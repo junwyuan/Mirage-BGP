@@ -4,4 +4,6 @@
 *.cmi
 _digests
 *.where
-
+_log
+_build/
+*.swp
