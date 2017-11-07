@@ -1,0 +1,24 @@
+### Starting build.
+# Target: src/common.ml.depends, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), debug, extension:ml, file:src/common.ml, ocaml, ocamldep, quiet, traverse }
+ocamlfind ocamldep -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -modules src/common.ml > src/common.ml.depends
+# Target: src/lib/afi.mli.depends, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), debug, extension:mli, file:src/lib/afi.mli, ocaml, ocamldep, quiet, traverse }
+ocamlfind ocamldep -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -modules src/lib/afi.mli > src/lib/afi.mli.depends # cached
+# Target: src/lib/afi.cmi, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), byte, compile, debug, extension:mli, file:src/lib/afi.mli, interf, ocaml, quiet, traverse }
+ocamlfind ocamlc -c -g -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -I src/lib -I src -o src/lib/afi.cmi src/lib/afi.mli # cached
+# Target: src/lib/operators.ml.depends, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), debug, extension:ml, file:src/lib/operators.ml, ocaml, ocamldep, quiet, traverse }
+ocamlfind ocamldep -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -modules src/lib/operators.ml > src/lib/operators.ml.depends # cached
+# Target: src/lib/operators.cmo, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), byte, compile, debug, extension:cmo, extension:ml, file:src/lib/operators.cmo, file:src/lib/operators.ml, implem, ocaml, quiet, traverse }
+ocamlfind ocamlc -c -g -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -I src/lib -I src -o src/lib/operators.cmo src/lib/operators.ml # cached
+# Target: src/lib/safi.ml.depends, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), debug, extension:ml, file:src/lib/safi.ml, ocaml, ocamldep, quiet, traverse }
+ocamlfind ocamldep -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -modules src/lib/safi.ml > src/lib/safi.ml.depends # cached
+# Target: src/lib/safi.cmo, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), byte, compile, debug, extension:cmo, extension:ml, file:src/lib/safi.cmo, file:src/lib/safi.ml, implem, ocaml, quiet, traverse }
+ocamlfind ocamlc -c -g -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -I src/lib -I src -o src/lib/safi.cmo src/lib/safi.ml # cached
+# Target: src/common.cmo, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), byte, compile, debug, extension:cmo, extension:ml, file:src/common.cmo, file:src/common.ml, implem, ocaml, quiet, traverse }
+ocamlfind ocamlc -c -g -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -I src -I src/lib -o src/common.cmo src/common.ml
+# Target: src/lib/afi.ml.depends, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), debug, extension:ml, file:src/lib/afi.ml, ocaml, ocamldep, quiet, traverse }
+ocamlfind ocamldep -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -modules src/lib/afi.ml > src/lib/afi.ml.depends # cached
+# Target: src/lib/afi.cmo, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), byte, compile, debug, extension:cmo, extension:ml, file:src/lib/afi.cmo, file:src/lib/afi.ml, implem, ocaml, quiet, traverse }
+ocamlfind ocamlc -c -g -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -I src/lib -I src -o src/lib/afi.cmo src/lib/afi.ml # cached
+# Target: src/common.byte, tags: { package(angstrom), package(cstruct), package(cstruct.ppx), package(logs), package(sexplib), byte, debug, dont_link_with, extension:byte, file:src/common.byte, link, ocaml, program, quiet, traverse }
+ocamlfind ocamlc -linkpkg -g -package angstrom -package logs -package cstruct -package cstruct.ppx -package sexplib -I src/lib -I src src/lib/operators.cmo src/lib/afi.cmo src/lib/safi.cmo src/common.cmo -o src/common.byte
+# Compilation successful.
