@@ -164,11 +164,11 @@ type asp = {
 [@@big_endian]
 ]
 
-type asp = Set of int32 Cstruct.iter | Seq of int32 Cstruct.iter
+type asp = Set of int32 list | Seq of int32 list
 
 type path_attr =
   | Origin of origin option
-  | As_path of asp Cstruct.iter
+  | As_path of asp list
   | Next_hop of Afi.ip4
   | Community of int32
   | Ext_communities
@@ -177,14 +177,14 @@ type path_attr =
   | Aggregator
   | Mp_reach_nlri
   | Mp_unreach_nlri
-  | As4_path of asp Cstruct.iter
+  | As4_path of asp list
 
-type path_attrs = path_attr Cstruct.iter
+type path_attrs = path_attr list
 
 type update = {
-  withdrawn: Afi.prefix Cstruct.iter;
-  path_attrs: path_attr Cstruct.iter;
-  nlri: Afi.prefix Cstruct.iter;
+  withdrawn: Afi.prefix list;
+  path_attrs: path_attr list;
+  nlri: Afi.prefix list;
 }
 
 type t =
@@ -200,3 +200,4 @@ type path_attr_flag = {
   partial: bool;
   extlen: bool;
 }
+
