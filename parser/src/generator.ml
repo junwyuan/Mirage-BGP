@@ -155,6 +155,42 @@ let gen_notification =
   Cstruct.BE.set_uint16 h 19 0;
   h 
 
+let () =
+  let ip_list = [(172168_l, 16); (10_l, 8); (192168001_l, 24)] in
+  let pfx_list = List.map (fun (ip4, mask) -> 
+    Cstruct.(
+      let buf = create (mask + 1) in
+      set_uint8 buf 0 mask;
+      for i = 1 to mask do
+        set_uint8 buf i (Int32.to_int (ip4 >>> (32 - 8 * i) &&& 0x00ff_l))
+      done;
+      buf
+    )
+  ) ip_list
+  in 
+  let withdrawn_raw = Cstruct.concat pfx_list in
+  let withdrawn = Bgp.parse_nlris withdrawn_raw in
+  let origin = Origin (Some IGP) in
+  let next_hop = Next_hop (1721684163_l) in
+  let asn_list = [2_l; 5_l; 3_l] in
+  let asn_buf = List.map (fun x -> 
+    let buf = Cstruct.create 4 in
+    Cstruct.BE.set_uint32 buf 0 x;
+    buf
+    ) asn_list
+  in
+  let h = Cstruct.create 2 in
+  Cstruct.set_uint8 h 0 1;
+  Cstruct.set_uint8 h 1 3;
+  let asp = parse_aspath (Cstruct.concat (h :: asn_buf)) in
+  let h2 = Cstruct.create 2 in
+  set_asp_t h2 1;
+  set_asp_n h2 3;
+  
+ 
+
+    
+
 
 
 
