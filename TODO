@@ -1,0 +1,3 @@
+Seaparte parser from internal state representation.
+Use pure methods for generator (if possible)
+Generate notification message
