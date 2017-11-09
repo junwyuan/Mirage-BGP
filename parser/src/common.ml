@@ -47,12 +47,12 @@ type opt_param =
   | Capability of capability
 
 [%%cstruct
-type h = {
-  marker: uint8_t [@len 16];
-  len: uint16_t;
-  typ: uint8_t;
-}
-[@@big_endian]
+  type h = {
+    marker: uint8_t [@len 16];
+    len: uint16_t;
+    typ: uint8_t;
+  }
+  [@@big_endian]
 ]
 
 [%%cstruct
