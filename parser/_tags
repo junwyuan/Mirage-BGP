@@ -1,3 +1,0 @@
-true: package(angstrom), package(logs), package(cstruct), package(cstruct.ppx), package(sexplib), debug
-"src" : include
-"src/lib": include
