@@ -1,9 +1,39 @@
 open Lwt.Infix
 open Bgp
+open Mrt
 open Printf
 
+module Prefix_set = Set.Make (String) ;;
+
 module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
+  let time f c =
+    let t = Unix.gettimeofday () in
+    f () >>= fun () ->
+    C.log c (sprintf "Execution time: %fs\n" (Unix.gettimeofday () -. t))
+  ;;
   
+  let read_tcp_msg flow c = fun () -> 
+    S.TCPV4.read flow >>= fun s -> 
+      (match s with 
+      | Ok (`Data buf) -> 
+        (match Bgp.parse buf () with
+        | None -> failwith "no msg"
+        | Some v -> Lwt.return (Bgp.to_string v))
+      | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "read fail"
+      | _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "No data") >>= fun s ->
+      C.log c s
+  ;;
+
+  let write_tcp_msg flow c = fun buf ->
+    S.TCPV4.write flow buf >>= function
+    | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "write fail"
+    | Ok _ -> Lwt.return_unit
+  ;;
+
+  let rec read_loop flow c = fun () ->
+    read_tcp_msg flow c () >>=
+    read_loop flow c
+  ;;
 
   let ip4_of_ints a b c d =
     Int32.of_int ((a lsl 24) lor (b lsl 16) lor (c lsl 8) lor d)
@@ -85,84 +115,82 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       }
   ;;
 
-  let read_tcp_msg flow c = fun () -> 
-    S.TCPV4.read flow >>= fun s -> 
-      (match s with 
-      | Ok (`Data buf) -> 
-        (match Bgp.parse buf () with
-        | None -> failwith "no msg"
-        | Some v -> Lwt.return (Bgp.to_string v))
-      | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "read fail"
-      | _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "No data") >>= fun s ->
-      C.log c s
+  let update_prefix_set prefix_set = function
+    | Open _ | Notification _ | Keepalive -> prefix_set
+    | Update {withdrawn; path_attrs; nlri} ->
+      let after_wd = List.fold_left (fun acc x -> Prefix_set.remove (Afi.prefix_to_string x) acc) prefix_set withdrawn in
+      let after_nlri = List.fold_left (fun acc x -> Prefix_set.add (Afi.prefix_to_string x) acc) after_wd nlri in
+      after_nlri
   ;;
+    
 
-  let write_tcp_msg flow c = fun buf ->
-    S.TCPV4.write flow buf >>= function
-    | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "write fail"
-    | Ok _ -> Lwt.return_unit
-  ;;
 
-  let rec read_loop flow c = fun () ->
-    read_tcp_msg flow c () >>=
-    read_loop flow c
-  ;;
-
-  let feed_update flow c =
+  let feed_update ?(is_quick=true) flow c () =
     (* global packet counter *)
     let npackets = ref 0 in
   
     (* open file, create buf *)
     let fn = "data/updates.20171111.0005" in
+    
     let fd = Unix.(openfile fn [O_RDONLY] 0) in
+    
     let buf =
       let ba = Bigarray.(Array1.map_file fd Bigarray.char c_layout false (-1)) in
       Cstruct.of_bigarray ba
     in
+    
     C.log c (sprintf "file length %d\n%!" (Cstruct.len buf)) >>= fun () ->
     
-    let rec get_packet packets = match packets () with
-      | None -> Lwt.return None
-      | Some mrt -> 
-        (match mrt with
-        | (_, Mrt.Bgp4mp bgp4mp) -> (match bgp4mp with
-          | (_, Bgp4mp.Message_as4 bgp_t) -> (match bgp_t with 
-            | Some v -> Lwt.return (Some v)
-            | None -> get_packet packets)
-          | _ -> get_packet packets)
-        | _ -> get_packet packets)
-    in
-      
     (* generate packet iterator *)
     let packets = Mrt.parse buf in
 
+    let start_time = Unix.gettimeofday () in
+
     (* recursively iterate over packet iterator, printing as we go *)
-    let rec feed_packet () =
-      get_packet packets >>= function
-        | None -> Lwt.return_unit
-        | Some packet ->
-          incr npackets;
-          let p2 = modify_packet packet in
-          C.log c (Bgp.to_string p2) >>= fun () ->
-          let buf = Bgp.gen_msg ~test:true p2 in
-          let p = Bgp.parse_buffer_to_t buf |> function
-            | Error e -> 
-              (match e with
-              | General e -> C.log c (Bgp.to_string (Bgp.Notification e))
-              | _ -> Lwt.fail_with "Notification error")
-            | Ok v -> C.log c (Bgp.to_string v)
-          in p >>= fun () ->   
-          Cstruct.hexdump buf;
-          write_tcp_msg flow c buf >>= fun () ->
-          if false then Lwt.return_unit else 
-          OS.Time.sleep_ns (Duration.of_ms 1) >>=  
-          feed_packet
+    let feed_packet time = function
+      | None -> Lwt.return_unit
+      | Some packet ->
+        incr npackets;
+        let p2 = modify_packet packet in
+        (* C.log c (Bgp.to_string p2) >>= fun () -> *)
+        let buf = Bgp.gen_msg ~test:true p2 in
+        let p = Bgp.parse_buffer_to_t buf |> function
+          | Error e -> 
+            (match e with
+            | General e -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday () -. start_time) (Bgp.to_string (Bgp.Notification e)))
+            | _ -> Lwt.fail_with "Notification error")
+          | Ok v -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday () -. start_time) (Bgp.to_string v))
+        in p >>= fun () ->   
+        (* Cstruct.hexdump buf; *)
+        write_tcp_msg flow c buf
     in
-    feed_packet () >>= fun () ->
+    
+    let rec get_packet ?(is_quick=true) prev prefix_set packets = match packets () with
+      | None -> Lwt.return prefix_set
+      | Some mrt -> (match mrt with
+        | (header, Mrt.Bgp4mp bgp4mp) -> 
+          let sec = Int32.to_int header.ts_sec in
+          let uses = Int32.to_int header.ts_usec in
+          let time = sec * 1000 * 1000 + uses in
+          (match bgp4mp with
+          | (_, Bgp4mp.Message_as4 bgp_t) -> (match bgp_t with 
+            | Some v -> begin
+              let updated_pfx_set = update_prefix_set prefix_set v in
+              (if (time > prev) && (not is_quick) && (prev != 0) then 
+                OS.Time.sleep_ns (Duration.of_us (time - prev)) >>= fun () -> feed_packet (Int64.of_int time) (Some v)
+              else feed_packet (Int64.of_int time) (Some v)) >>= fun () ->
+              get_packet ~is_quick time updated_pfx_set packets
+            end
+            | None -> get_packet ~is_quick prev prefix_set packets)
+          | _ -> get_packet ~is_quick prev prefix_set packets)
+        | _ -> get_packet ~is_quick prev prefix_set packets)
+    in
+    
+    get_packet ~is_quick 0 (Prefix_set.empty) packets >>= fun prefix_set ->
 
     (* done! *)
     C.log c (sprintf "num packets %d\n%!" !npackets) >>= fun () ->
-    Lwt.return_unit
+    C.log c (sprintf "num prefixes %d\n" (List.length (Prefix_set.elements prefix_set)))
   ;;
 
   let start_bgp flow c : unit Lwt.t = 
@@ -179,7 +207,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     read_tcp_msg flow c >>= fun () ->
     let k = Bgp.gen_keepalive () in
     write_tcp_msg flow c k >>= fun () ->
-    Lwt.join [read_loop flow c (); feed_update flow c]
+    Lwt.join [read_loop flow c (); time (feed_update ~is_quick:false flow c) c]
   ;;
 
   let start c s =
