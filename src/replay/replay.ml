@@ -37,6 +37,24 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       in
 
       let modified = List.fold_right modify_attr path_attrs [] in
+      
+      let contain_next_hop path_attrs = 
+        List.exists (fun (_, pl) -> 
+          match pl with Next_hop _ -> true | _ -> false
+        ) path_attrs
+      in
+
+      let contain_as_path path_attrs = 
+        List.exists (fun (_, pl) -> 
+          match pl with As_path _ -> true | _ -> false
+        ) path_attrs
+      in 
+
+      let contain_origin path_attrs = 
+        List.exists (fun (_, pl) -> 
+          match pl with Origin _ -> true | _ -> false
+        ) path_attrs
+      in 
 
       let flags = {
         optional=false;
@@ -44,12 +62,25 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         partial=false;
         extlen=false;
       } in
+      
+      let with_as_path = if not (contain_as_path modified) then
+        let as_path = (flags, As_path []) in
+        List.append modified [as_path]
+      else modified in
+      
+      let with_next_hop = if not (contain_next_hop with_as_path) then
+        let next_hop = (flags, Next_hop bgp_id) in
+        List.append with_as_path [next_hop]
+      else with_as_path in
 
-      let as_path = (flags, As_path []) in
-      let pa = List.cons as_path modified in
+      let with_origin = if not (contain_origin with_next_hop) then
+        let origin = (flags, Origin EGP) in
+        List.append with_next_hop [origin]
+      else with_next_hop in
+
       Update {
         withdrawn;
-        path_attrs = pa;
+        path_attrs = with_origin;
         nlri;
       }
   ;;
@@ -111,8 +142,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         | None -> Lwt.return_unit
         | Some packet ->
           incr npackets;
-          C.log c (Bgp.to_string packet) >>= fun () ->
           let p2 = modify_packet packet in
+          C.log c (Bgp.to_string p2) >>= fun () ->
           let buf = Bgp.gen_msg ~test:true p2 in
           let p = Bgp.parse_buffer_to_t buf |> function
             | Error e -> 
@@ -123,8 +154,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           in p >>= fun () ->   
           Cstruct.hexdump buf;
           write_tcp_msg flow c buf >>= fun () ->
-          if (!npackets = 10) then Lwt.return_unit else 
-          OS.Time.sleep_ns (Duration.of_ms 500) >>=  
+          if false then Lwt.return_unit else 
+          OS.Time.sleep_ns (Duration.of_ms 1) >>=  
           feed_packet
     in
     feed_packet () >>= fun () ->
