@@ -6,6 +6,18 @@ open Printf
 module Prefix_set = Set.Make (String) ;;
 
 module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
+  let host () = Key_gen.host ();;
+  let my_as () = Int32.of_int (Key_gen.asn ());;
+  let bgp_id () = 
+    let raw = Key_gen.id () in
+    let ip = Ipaddr.V4.of_string_exn raw in
+    Ipaddr.V4.to_int32 ip
+  ;;
+
+  let filename () = Key_gen.filename ();;
+
+  let is_quick () = Key_gen.mode ();;
+
   let time f c =
     let t = Unix.gettimeofday () in
     f () >>= fun () ->
@@ -24,8 +36,6 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       C.log c s
   ;;
 
-
-
   let write_tcp_msg flow c = fun buf ->
     S.TCPV4.write flow buf >>= function
     | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "write fail"
@@ -39,30 +49,26 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
   let ip4_of_ints a b c d =
     Int32.of_int ((a lsl 24) lor (b lsl 16) lor (c lsl 8) lor d)
-  ;;
-
-  let bgp_id = ip4_of_ints 192 168 1 101
-  
-  let my_as = 64513_l
+  ;;  
 
   let modify_packet t = match t with
     | Open _ | Notification _ | Keepalive -> t
     | Update {withdrawn; path_attrs; nlri} ->
       let modify_attr (flags, pl) seen = 
         let modified = match pl with
-          | Next_hop _ -> Next_hop bgp_id
+          | Next_hop _ -> Next_hop (bgp_id ())
           | As4_path l_segment -> (match l_segment with
-            | [] -> As4_path [Seq [my_as]]
+            | [] -> As4_path [Seq [my_as ()]]
             | hd::tl -> (match hd with
-              | Set l -> As4_path [Set (List.cons my_as l)]
-              | Seq l -> As4_path [Seq (List.cons my_as l)]
+              | Set l -> As4_path [Set (List.cons (my_as ()) l)]
+              | Seq l -> As4_path [Seq (List.cons (my_as ()) l)]
             ))
           | As_path l_segment -> 
             (match l_segment with
-            | [] -> As4_path [Seq [my_as]]
+            | [] -> As4_path [Seq [my_as ()]]
             | hd::tl -> (match hd with
-              | Set l -> As4_path [Set (List.cons my_as l)]
-              | Seq l -> As4_path [Seq (List.cons my_as l)]
+              | Set l -> As4_path [Set (List.cons (my_as ()) l)]
+              | Seq l -> As4_path [Seq (List.cons (my_as ()) l)]
             ))
           | attr -> attr
         in List.cons (flags, modified) seen
@@ -101,7 +107,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       else modified in
       
       let with_next_hop = if not (contain_next_hop with_as_path) then
-        let next_hop = (flags, Next_hop bgp_id) in
+        let next_hop = (flags, Next_hop (bgp_id ())) in
         List.append with_as_path [next_hop]
       else with_as_path in
 
@@ -132,7 +138,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     let npackets = ref 0 in
   
     (* open file, create buf *)
-    let fn = "data/updates.20171111.0005" in
+    let fn = filename () in
     
     let fd = Unix.(openfile fn [O_RDONLY] 0) in
     
@@ -198,9 +204,9 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   let start_bgp flow c : unit Lwt.t = 
     let o = {
       version=4;
-      my_as=Bgp.Asn 64513;
+      my_as=Bgp.Asn (Int32.to_int (my_as ()));
       hold_time=180;
-      bgp_id;
+      bgp_id = bgp_id ();
       options=[]
     } 
     in
@@ -209,12 +215,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     read_tcp_msg flow c >>= fun () ->
     let k = Bgp.gen_keepalive () in
     write_tcp_msg flow c k >>= fun () ->
-    Lwt.join [read_loop flow c (); time (feed_update ~is_quick:false flow c) c]
+    Lwt.join [read_loop flow c (); time (feed_update ~is_quick:(is_quick ()) flow c) c]
   ;;
 
   let start c s =
     let port = 179 in
-    let host = Ipaddr.V4.of_string_exn "192.168.1.103" in
+    let host = Ipaddr.V4.of_string_exn (host ()) in
     let tcp_s = S.tcpv4 s in
     S.TCPV4.create_connection tcp_s (host, port) >>= function
       | Ok flow -> start_bgp flow c

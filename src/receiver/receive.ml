@@ -51,10 +51,10 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   let start_bgp flow c : unit Lwt.t = 
     let o = {
       version=4;
-      my_as=Bgp.Asn 64514;
+      my_as=Bgp.Asn (Key_gen.asn ());
       hold_time=180;
-      bgp_id;
-      options=[]
+      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.id ()));
+      options=[];
     } 
     in
     let o = Bgp.gen_open o in
@@ -67,7 +67,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
   let start c s =
     let port = 179 in
-    let host = Ipaddr.V4.of_string_exn "192.168.1.103" in
+    let host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
     let tcp_s = S.tcpv4 s in
     S.TCPV4.create_connection tcp_s (host, port) >>= function
       | Ok flow -> start_bgp flow c
