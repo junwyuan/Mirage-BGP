@@ -7,7 +7,7 @@ _digests
 _log
 _build/
 *.swp
-lib/
+lib
 Makefile
 .mirage.config
 *.opam
