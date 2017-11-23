@@ -1,3 +1,0 @@
-true: package(angstrom), package(logs), package(cstruct), package(cstruct.ppx), package(sexplib), package(alcotest), package(lwt), package(cstruct-lwt), debug
-true: package(mrt-format)
-"." : include
