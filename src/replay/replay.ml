@@ -165,7 +165,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         let p = Bgp.parse_buffer_to_t buf |> function
           | Error e -> 
             (match e with
-            | General e -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday () -. start_time) (Bgp.to_string (Bgp.Notification e)))
+            | General e -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday ()) (Bgp.to_string (Bgp.Notification e)))
             | _ -> Lwt.fail_with "Notification error")
           | Ok v -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday () -. start_time) (Bgp.to_string v))
         in p >>= fun () ->   

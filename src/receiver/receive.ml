@@ -19,7 +19,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         | Some v -> Lwt.return (Bgp.to_string v))
       | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "read fail"
       | _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "No data") >>= fun s ->
-      C.log c s
+      C.log c (sprintf "%fs: %s" (Unix.gettimeofday ()) s)
   ;;
 
   let write_tcp_msg flow c = fun buf ->
