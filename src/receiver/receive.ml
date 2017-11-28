@@ -44,11 +44,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   let ip4_of_ints a b c d =
     Int32.of_int ((a lsl 24) lor (b lsl 16) lor (c lsl 8) lor d)
   ;;
-
-  let bgp_id = ip4_of_ints 192 168 1 104
-  
-  let my_as = 64514_l
-
+    
   let start_bgp flow c : unit Lwt.t = 
     let o = {
       version=4;
