@@ -18,8 +18,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         (match Bgp.parse buf () with
         | None -> failwith "no msg"
         | Some v -> Lwt.return (Bgp.to_string v))
-      | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.return "Read fail"
-      | _ -> S.TCPV4.close flow >>= fun () ->  Lwt.return "Connection closed.") >>= fun s ->
+      | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "read fail"
+      | _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "No data") >>= fun s ->
       C.log c (sprintf "%fs: %s" ((Unix.gettimeofday ()) -. start_time) s)
   ;;
 
@@ -61,42 +61,14 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     Lwt.join [read_loop flow c (); write_keepalive flow c ()]
   ;;
 
-  let rec loop c = 
-    OS.Time.sleep_ns (Duration.of_sec 5)
-    >>= fun () ->
-    C.log c "Five second past."
-    >>= fun () ->
-    loop c
-  ;;
-
-  let start_receive flow c =
-    read_tcp_msg flow c ()
-    >>= fun msg ->
-    let open Bgp in
-    let o = {
-      version = 4;
-      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.host ()));
-      my_as = Asn 12345;
-      options = [];
-      hold_time = 180;
-    } in
-    write_tcp_msg flow c (Bgp.gen_open o)
-    >>= fun () ->
-    let timeout () = 
-      OS.Time.sleep_ns (Duration.of_sec 5)
-      >>= fun () ->
-      S.TCPV4.close flow
-    in
-    Lwt.join [timeout (); read_loop flow c ()]
-  ;;
-
   let start c s =
-    let port = 50000 in
+    let port = 179 in
     let host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
-
-    S.listen_tcpv4 s ~port (fun flow -> start_receive flow c);
-    loop c
-  ;;    
+    let tcp_s = S.tcpv4 s in
+    S.TCPV4.create_connection tcp_s (host, port) >>= function
+      | Ok flow -> start_bgp flow c
+      | Error err -> failwith "Connection failure"
+  ;;
 end
 
 

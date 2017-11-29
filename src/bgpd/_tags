@@ -1,2 +1,4 @@
-true: package(result), package(cstruct), package(cstruct.ppx)
+true: package(result), package(cstruct), package(cstruct.ppx), package(lwt)
+<test/*.*>: package(alcotest)
 "lib": include
+"test": include

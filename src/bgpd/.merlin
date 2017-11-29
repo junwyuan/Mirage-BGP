@@ -3,12 +3,15 @@ PKG cohttp mirage-net-unix mirage-unix mirage-clock-unix functoria
 PKG tcpip.ethif tcpip.arpv4 tls logs mirage-logs
 PKG magic-mime mirage-types-lwt duration
 PKG cstruct cstruct.ppx
+PKG alcotest
 
 S **
 S lib/**
+S test
 
 B _build/**
 B _build/lib/**
+B _build/test
 
 
 
