@@ -1,414 +1,94 @@
-module FSM = struct
-    type state =
-    | IDLE
-    | CONNECT
-    | ACTIVE
-    | OPEN_SENT
-    | OPEN_CONFIRMED
-    | ESTABLISHED
+open Lwt.Infix
+open Printf
 
-    type t = {
-        state: state;
-        connect_retry_timer: float;
-        connect_retry_counter: int;
-        connect_retry_time: float;
-        hold_timer: float;
-        hold_time: float;
-        keepalive_timer: float;
-        keepalive_time: float;
-    }
+module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
+  module Thread_map = Map.Make(String);;
+  module FSM = Fsm.Make(S);;
 
-    type event = 
-    | Manual_start
-    | Manual_stop
-    | Connection_retry_timer_expired
-    | Hold_timer_expired
-    | Keepalive_timer_expired
-    | Tcp_CR_Acked
-    | Tcp_connection_confirmed
-    | Tcp_connection_fail
-    | BGP_open of Bgp.opent
-    | Bgp_header_err of Bgp.message_header_error
-    | Bgp_open_msg_err of Bgp.open_message_error
-    | Notif_msg_ver_err
-    | Notif_msg of Bgp.error
-    | Keepalive_msg
-    | Update_msg of Bgp.update
-    | Update_msg_err of Bgp.update_message_error
+  type flags = {
+    mutable listen_tcp_conn: bool;
+    mutable read_tcp_flow: bool;
+  }
 
-    type action =
-    | Initiate_tcp_connection
-    | Listen_tcp_connection
-    | Drop_tcp_connection
-    | Send_open_msg
-    | Send_msg of Bgp.t
-    ;;
+  type t = {
+    mutable fsm: FSM.t;
+    flags: flags;
+  }
 
-    let make connect_retry_time hold_time keepalive_time = {
-        state=IDLE;
-        connect_retry_time;
-        connect_retry_timer = connect_retry_time;
-        connect_retry_counter = 0;
-        hold_timer = hold_time;
-        hold_time;
-        keepalive_timer = keepalive_time;
-        keepalive_time;
-    };;
+  let init_tcp_connection host soc push =
+    S.TCPV4.create_connection soc (host, 179)
+    >>= (function
+    | Error _ -> Lwt.return FSM.Tcp_connection_fail
+    | Ok flow -> Lwt.return (FSM.Tcp_CR_Acked flow))
+    >>= fun event ->
+    let () = push (Some event) in
+    Lwt.return_unit
+  ;;      
 
-    let handle_idle ({state; connect_retry_counter; connect_retry_time; 
-                    connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                    keepalive_timer} as fsm) = function
-        | Manual_start -> 
-            let actions = [Initiate_tcp_connection; Listen_tcp_connection] in
-            let new_fsm = {
-                state=CONNECT;
-                connect_retry_counter=0;
-                connect_retry_timer=connect_retry_time;
-                connect_retry_time;
-                hold_timer;
-                hold_time;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | _ -> (fsm, [])
-    ;;
+  let send_msg flow msg = 
+    match flow with
+    | Some flow ->
+      S.TCPV4.write flow (Bgp.gen_msg msg) 
+      >>= (function
+      | Error _ -> printf "Write Error"; Lwt.return_unit
+      | Ok () -> Lwt.return_unit)
+    | None -> Lwt.return_unit
+  ;;
 
-    let handle_connect ({state; connect_retry_counter; connect_retry_time; 
-                    connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                    keepalive_timer} as fsm) = function
-        | Manual_stop ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter=0;
-                connect_retry_timer=0.;
-                connect_retry_time;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Connection_retry_timer_expired ->
-            let actions = [Initiate_tcp_connection] in
-            let new_fsm = {
-                state=CONNECT;
-                connect_retry_timer=connect_retry_time;
-                connect_retry_time;
-                connect_retry_counter;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Tcp_CR_Acked | Tcp_connection_confirmed ->
-            let actions = [Send_open_msg] in
-            let new_fsm = {
-                state=OPEN_SENT;
-                connect_retry_counter;
-                connect_retry_timer=0.;
-                connect_retry_time;
-                hold_time;
-                hold_timer=240.; (* 4 minutes *)
-                keepalive_timer;
-                keepalive_time;
-            } in
-            (new_fsm, actions)
-        | Tcp_connection_fail ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Manual_start -> (fsm, [])
-        | _ ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter=connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer=0.;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-    ;;
+  let send_open_msg id my_as flow =
+    let open Bgp in
+    let o = {
+      version = 4;
+      bgp_id = Ipaddr.V4.to_int32 id;
+      my_as = Asn my_as;
+      hold_time = 180;
+      options = [];
+    } in
+    send_msg flow (Bgp.Open o) 
+  ;;
 
-    let handle_active ({state; connect_retry_counter; connect_retry_time; 
-                    connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                    keepalive_timer} as fsm) = function
-        | Manual_start -> (fsm, [])
-        | Manual_stop ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Connection_retry_timer_expired ->
-            let actions = [Initiate_tcp_connection] in
-            let new_fsm = {
-                state=CONNECT;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer=connect_retry_time;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Tcp_CR_Acked | Tcp_connection_confirmed ->
-            let actions = [Send_open_msg] in
-            let new_fsm = {
-                state=OPEN_SENT;
-                connect_retry_counter;
-                connect_retry_timer=0.;
-                connect_retry_time;
-                hold_time;
-                hold_timer=240.; (* 4 minutes *)
-                keepalive_timer;
-                keepalive_time;
-            } in
-            (new_fsm, actions)
-        | Tcp_connection_fail ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter=connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | _ ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter=connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer=0.;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-    ;;
+  let drop_tcp_connection flow =
+    match flow with
+    | None -> Lwt.return_unit
+    | Some flow -> S.TCPV4.close flow
+  ;;
 
-    let handle_open_sent ({state; connect_retry_counter; connect_retry_time; 
-                    connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                    keepalive_timer} as fsm) = function
-        | Manual_start -> (fsm, [])
-        | Manual_stop -> 
-            let actions = [Send_msg (Bgp.Notification Bgp.Cease) ; Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_timer=0.;
-                connect_retry_counter=0;
-                connect_retry_time;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Hold_timer_expired ->
-            let actions = [Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter=connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer=0.;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Tcp_connection_fail ->
-            let actions = [] in
-            let new_fsm = {
-                state=ACTIVE;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer=connect_retry_time;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | BGP_open o ->
-            let open Bgp in
-            let actions = [Send_msg Bgp.Keepalive] in
-            let remote_ht = float_of_int o.hold_time in
-            let nego_hold_time = if hold_time > remote_ht then remote_ht else hold_time in
-            let new_fsm = {
-                state = OPEN_CONFIRMED;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer = 0.;
-                hold_time = nego_hold_time;
-                hold_timer = nego_hold_time;
-                keepalive_time = nego_hold_time /. 3.;
-                keepalive_timer = nego_hold_time /. 3.;
-            } in
-            (new_fsm, actions)
-        | Bgp_header_err header_err ->
-            let actions = [Send_msg (Bgp.Notification (Bgp.Message_header_error header_err)); Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter = connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer=0.;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Notif_msg_ver_err ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state = IDLE;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | _ -> (fsm, [])
-    ;;
+  let rec bgp_daemon host id my_as fsm soc events push threads flow =
+    Lwt_stream.get events 
+    >>= function
+    | None -> bgp_daemon host id my_as fsm soc events push threads flow
+    | Some event ->
+      let open FSM in
+      let new_fsm, actions = handle fsm event in
+      let perform_action = function
+        | Initiate_tcp_connection -> init_tcp_connection host (S.tcpv4 soc) push
+        | Send_open_msg -> send_open_msg id my_as flow
+        | Send_msg msg -> send_msg flow msg
+        | Drop_tcp_connection -> drop_tcp_connection flow
+      in
+      Lwt.join (List.map perform_action actions)
+      >>= fun () ->
+      bgp_daemon host id my_as fsm soc events push threads flow
+  ;;
 
-    let handle_open_confirmed ({state; connect_retry_counter; connect_retry_time; 
-                    connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                    keepalive_timer} as fsm) = function
-        | Manual_start -> (fsm, [])
-        | Manual_stop -> 
-            let actions = [Send_msg (Bgp.Notification Bgp.Cease) ; Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_timer=0.;
-                connect_retry_counter=0;
-                connect_retry_time;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Hold_timer_expired ->
-            let actions = [Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter=connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer=0.;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Keepalive_timer_expired ->
-            let actions = [Send_msg Bgp.Keepalive] in
-            let new_fsm = {
-                state;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer = keepalive_time;
-            } in
-            (new_fsm, actions)
-        | Tcp_connection_fail | Notif_msg _ ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state=IDLE;
-                connect_retry_counter = connect_retry_counter + 1;
-                connect_retry_time;
-                connect_retry_timer = 0.;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Notif_msg_ver_err ->
-            let actions = [Drop_tcp_connection] in
-            let new_fsm = {
-                state = IDLE;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, actions)
-        | Keepalive_msg ->
-            let new_fsm = {
-                state = ESTABLISHED;
-                connect_retry_counter;
-                connect_retry_time;
-                connect_retry_timer;
-                hold_time;
-                hold_timer = hold_time;
-                keepalive_time;
-                keepalive_timer;
-            } in
-            (new_fsm, [])
-        | _ -> (fsm, [Drop_tcp_connection])
-    ;;        
+  let start _c s =
+    let host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
+    let id = Ipaddr.V4.of_string_exn (Key_gen.id ()) in
+    let asn = Key_gen.asn () in
+    let fsm = FSM.create 60. 180. 30. in
+    let soc = s in
 
+    (* Produce event queue *)
+    let events, push = Lwt_stream.create () in
+    push (Some FSM.Manual_start);
 
-    let handle fsm event =
-        match fsm.state with
-        | IDLE -> handle_idle fsm event
-        | CONNECT -> handle_connect fsm event
-        | ACTIVE -> handle_active fsm event
-        | OPEN_SENT -> handle_open_sent fsm event
-        | OPEN_CONFIRMED -> handle_open_confirmed fsm event
-        | _ -> (fsm, [])
-    ;;
-        
-        
+    (* Listen to port 179 *)
+    S.listen_tcpv4 soc ~port:179 (fun flow -> push (Some (FSM.Tcp_connection_confirmed flow)); Lwt.return_unit);
     
+
+    let threads = Thread_map.empty in
+    bgp_daemon host id asn fsm soc events push threads None
+  ;;
+
 
 end
-
-
-
-
-
-
-        
-    
-
