@@ -8,13 +8,10 @@ type state =
 
 type t = {
   state: state;
-  connect_retry_timer: float;
-  connect_retry_counter: int;
-  connect_retry_time: float;
-  hold_timer: float;
-  hold_time: float;
-  keepalive_timer: float;
-  keepalive_time: float;
+  conn_retry_counter: int;
+  conn_retry_time: int;
+  hold_time: int;
+  keepalive_time: int;
 }
 
 type event = 
@@ -41,444 +38,370 @@ type action =
 | Drop_tcp_connection
 | Send_open_msg
 | Send_msg of Bgp.t
+| Start_conn_retry_timer
+| Stop_conn_retry_timer
+| Reset_conn_retry_timer
+| Start_hold_timer
+| Stop_hold_timer
+| Reset_hold_timer
+| Start_keepalive_timer
+| Stop_keepalive_timer
+| Reset_keepalive_timer
 
-let create connect_retry_time hold_time keepalive_time = {
-  state=IDLE;
-  connect_retry_time;
-  connect_retry_timer = connect_retry_time;
-  connect_retry_counter = 0;
-  hold_timer = hold_time;
+let create conn_retry_time hold_time keepalive_time = {
+  state = IDLE;
+  conn_retry_counter = 0;
+  conn_retry_time;
   hold_time;
-  keepalive_timer = keepalive_time;
   keepalive_time;
 }
 
-let handle_idle ({state; connect_retry_counter; connect_retry_time; 
-                connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                keepalive_timer} as fsm) = function
+let handle_idle ({ state; conn_retry_counter; conn_retry_time; hold_time; keepalive_time } as fsm) = function
   | Manual_start -> 
-    let actions = [Initiate_tcp_connection; Listen_tcp_connection] in
+    let actions = [Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
     let new_fsm = {
-        state = CONNECT;
-        connect_retry_counter = 0;
-        connect_retry_timer = connect_retry_time;
-        connect_retry_time;
-        hold_timer;
-        hold_time;
-        keepalive_time;
-        keepalive_timer;
+      state = CONNECT;
+      conn_retry_counter = 0;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
   | _ -> (fsm, [])
 ;;
 
-let handle_connect ({state; connect_retry_counter; connect_retry_time; 
-                connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                keepalive_timer} as fsm) = function
+let handle_connect ({ state; conn_retry_counter; conn_retry_time; hold_time; keepalive_time } as fsm) = function
+  | Manual_start -> (fsm, [])
   | Manual_stop ->
-    let actions = [Drop_tcp_connection] in
+    let actions = [Drop_tcp_connection; Stop_conn_retry_timer] in
     let new_fsm = {
-        state=IDLE;
-        connect_retry_counter=0;
-        connect_retry_timer=0.;
-        connect_retry_time;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = IDLE;
+      conn_retry_counter = 0;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
   | Connection_retry_timer_expired ->
-    let actions = [Initiate_tcp_connection] in
+    let actions = [Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
     let new_fsm = {
-        state=CONNECT;
-        connect_retry_timer=connect_retry_time;
-        connect_retry_time;
-        connect_retry_counter;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = CONNECT;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
-    let actions = [Send_open_msg] in
+    let actions = [Stop_conn_retry_timer; Send_open_msg; Start_hold_timer] in
     let new_fsm = {
-        state=OPEN_SENT;
-        connect_retry_counter;
-        connect_retry_timer=0.;
-        connect_retry_time;
-        hold_time;
-        hold_timer=240.; (* 4 minutes *)
-        keepalive_timer;
-        keepalive_time;
+      state = OPEN_SENT;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time = 240; (* 4 minutes *)
+      keepalive_time;
     } in
     (new_fsm, actions)
   | Tcp_connection_fail ->
-    let actions = [Drop_tcp_connection] in
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
     let new_fsm = {
-        state = IDLE;
-        connect_retry_counter;
-        connect_retry_time;
-        connect_retry_timer;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = IDLE;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
-  | Manual_start -> (fsm, [])
   | _ ->
-    let actions = [Drop_tcp_connection] in
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
     let new_fsm = {
-        state=IDLE;
-        connect_retry_counter=connect_retry_counter + 1;
-        connect_retry_time;
-        connect_retry_timer=0.;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
 ;;
 
-let handle_active ({state; connect_retry_counter; connect_retry_time; 
-                connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                keepalive_timer} as fsm) = function
+let handle_active ({ state; conn_retry_counter; conn_retry_time; hold_time; keepalive_time } as fsm) = function
   | Manual_start -> (fsm, [])
   | Manual_stop ->
-    let actions = [Drop_tcp_connection] in
+    let actions = [Drop_tcp_connection; Stop_conn_retry_timer] in
     let new_fsm = {
-        state=IDLE;
-        connect_retry_counter;
-        connect_retry_time;
-        connect_retry_timer;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = IDLE;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
   | Connection_retry_timer_expired ->
-    let actions = [Initiate_tcp_connection] in
+    let actions = [Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
     let new_fsm = {
-        state=CONNECT;
-        connect_retry_counter;
-        connect_retry_time;
-        connect_retry_timer=connect_retry_time;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = CONNECT;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
-    let actions = [Send_open_msg] in
+    let actions = [Send_open_msg; Start_hold_timer] in
     let new_fsm = {
-        state=OPEN_SENT;
-        connect_retry_counter;
-        connect_retry_timer=0.;
-        connect_retry_time;
-        hold_time;
-        hold_timer=240.; (* 4 minutes *)
-        keepalive_timer;
-        keepalive_time;
+      state = OPEN_SENT;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time = 240; (* 4 minutes *)
+      keepalive_time;
     } in
     (new_fsm, actions)
   | Tcp_connection_fail ->
-    let actions = [Drop_tcp_connection] in
+    let actions = [Reset_conn_retry_timer; Drop_tcp_connection] in
     let new_fsm = {
-        state=IDLE;
-        connect_retry_counter=connect_retry_counter + 1;
-        connect_retry_time;
-        connect_retry_timer;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
   | _ ->
-    let actions = [Drop_tcp_connection] in
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
     let new_fsm = {
-        state=IDLE;
-        connect_retry_counter=connect_retry_counter + 1;
-        connect_retry_time;
-        connect_retry_timer=0.;
-        hold_time;
-        hold_timer;
-        keepalive_time;
-        keepalive_timer;
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
     } in
     (new_fsm, actions)
 ;;
 
-let handle_open_sent ({state; connect_retry_counter; connect_retry_time; 
-                connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                keepalive_timer} as fsm) = function
-    | Manual_start -> (fsm, [])
-    | Manual_stop -> 
-        let actions = [Send_msg (Bgp.Notification Bgp.Cease) ; Drop_tcp_connection] in
-        let new_fsm = {
-            state=IDLE;
-            connect_retry_timer=0.;
-            connect_retry_counter=0;
-            connect_retry_time;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Hold_timer_expired ->
-        let actions = [Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); Drop_tcp_connection] in
-        let new_fsm = {
-            state=IDLE;
-            connect_retry_counter=connect_retry_counter + 1;
-            connect_retry_time;
-            connect_retry_timer=0.;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Tcp_connection_fail ->
-        let actions = [Drop_tcp_connection] in
-        let new_fsm = {
-            state=ACTIVE;
-            connect_retry_counter;
-            connect_retry_time;
-            connect_retry_timer=connect_retry_time;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | BGP_open o ->
-        let open Bgp in
-        let actions = [Send_msg Bgp.Keepalive] in
-        let remote_ht = float_of_int o.hold_time in
-        let nego_hold_time = if hold_time > remote_ht then remote_ht else hold_time in
-        let new_fsm = {
-            state = OPEN_CONFIRMED;
-            connect_retry_counter;
-            connect_retry_time;
-            connect_retry_timer = 0.;
-            hold_time = nego_hold_time;
-            hold_timer = nego_hold_time;
-            keepalive_time = nego_hold_time /. 3.;
-            keepalive_timer = nego_hold_time /. 3.;
-        } in
-        (new_fsm, actions)
-    | Bgp_header_err header_err ->
-        let actions = [Send_msg (Bgp.Notification (Bgp.Message_header_error header_err)); Drop_tcp_connection] in
-        let new_fsm = {
-            state=IDLE;
-            connect_retry_counter = connect_retry_counter + 1;
-            connect_retry_time;
-            connect_retry_timer=0.;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Notif_msg_ver_err ->
-        let actions = [Drop_tcp_connection] in
-        let new_fsm = {
-            state = IDLE;
-            connect_retry_counter;
-            connect_retry_time;
-            connect_retry_timer;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | _ -> (fsm, [])
-;;
-
-let handle_open_confirmed ({state; connect_retry_counter; connect_retry_time; 
-                connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                keepalive_timer} as fsm) = function
-    | Manual_start -> (fsm, [])
-    | Manual_stop -> 
-        let actions = [Send_msg (Bgp.Notification Bgp.Cease) ; Drop_tcp_connection] in
-        let new_fsm = {
-            state=IDLE;
-            connect_retry_timer=0.;
-            connect_retry_counter=0;
-            connect_retry_time;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Hold_timer_expired ->
-        let actions = [Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); Drop_tcp_connection] in
-        let new_fsm = {
-            state=IDLE;
-            connect_retry_counter=connect_retry_counter + 1;
-            connect_retry_time;
-            connect_retry_timer=0.;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Keepalive_timer_expired ->
-        let actions = [Send_msg Bgp.Keepalive] in
-        let new_fsm = {
-            state;
-            connect_retry_counter;
-            connect_retry_time;
-            connect_retry_timer;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer = keepalive_time;
-        } in
-        (new_fsm, actions)
-    | Tcp_connection_fail | Notif_msg _ ->
-        let actions = [Drop_tcp_connection] in
-        let new_fsm = {
-            state=IDLE;
-            connect_retry_counter = connect_retry_counter + 1;
-            connect_retry_time;
-            connect_retry_timer = 0.;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Notif_msg_ver_err ->
-        let actions = [Drop_tcp_connection] in
-        let new_fsm = {
-            state = IDLE;
-            connect_retry_counter;
-            connect_retry_time;
-            connect_retry_timer;
-            hold_time;
-            hold_timer;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, actions)
-    | Keepalive_msg ->
-        let new_fsm = {
-            state = ESTABLISHED;
-            connect_retry_counter;
-            connect_retry_time;
-            connect_retry_timer;
-            hold_time;
-            hold_timer = hold_time;
-            keepalive_time;
-            keepalive_timer;
-        } in
-        (new_fsm, [])
-    | _ -> (fsm, [Drop_tcp_connection])
-;;        
-
-let handle_established ({state; connect_retry_counter; connect_retry_time; 
-                connect_retry_timer; hold_timer; hold_time; keepalive_time; 
-                keepalive_timer} as fsm) = function
+let handle_open_sent ({ state; conn_retry_counter; conn_retry_time; hold_time; keepalive_time } as fsm) = function
   | Manual_start -> (fsm, [])
   | Manual_stop -> 
-      let actions = [Send_msg (Bgp.Notification Bgp.Cease) ; Drop_tcp_connection] in
-      let new_fsm = {
-          state=IDLE;
-          connect_retry_timer=0.;
-          connect_retry_counter=0;
-          connect_retry_time;
-          hold_time;
-          hold_timer;
-          keepalive_time;
-          keepalive_timer;
-      } in
-      (new_fsm, actions)
-    | Hold_timer_expired ->
-      let actions = [Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); Drop_tcp_connection] in
-      let new_fsm = {
-          state=IDLE;
-          connect_retry_counter=connect_retry_counter + 1;
-          connect_retry_time;
-          connect_retry_timer=0.;
-          hold_time;
-          hold_timer;
-          keepalive_time;
-          keepalive_timer;
-      } in
-      (new_fsm, actions)
-    | Keepalive_timer_expired ->
-      let actions = [Send_msg Bgp.Keepalive] in
-      let new_fsm = {
-          state;
-          connect_retry_counter;
-          connect_retry_time;
-          hold_timer;
-          connect_retry_timer;
-          hold_time;
-          keepalive_time;
-          keepalive_timer = keepalive_time;
-      } in
-      (new_fsm, actions)
-    | Tcp_connection_fail ->
-      let actions = [Drop_tcp_connection] in
-      let new_fsm = {
-          state=IDLE;
-          connect_retry_counter = connect_retry_counter + 1;
-          connect_retry_time;
-          connect_retry_timer = 0.;
-          hold_time;
-          hold_timer;
-          keepalive_time;
-          keepalive_timer;
-      } in
-      (new_fsm, actions)
-    | Notif_msg err ->
-      let actions = [Drop_tcp_connection] in
-      let new_fsm = {
-          state = IDLE;
-          connect_retry_counter = connect_retry_counter + 1;
-          connect_retry_time;
-          connect_retry_timer = 0.;
-          hold_time;
-          hold_timer;
-          keepalive_time;
-          keepalive_timer;
-      } in
-      (new_fsm, actions)
-    | Keepalive_msg ->
-      let new_fsm = {
-          state;
-          connect_retry_counter;
-          connect_retry_time;
-          connect_retry_timer;
-          hold_time;
-          hold_timer = hold_time;
-          keepalive_time;
-          keepalive_timer;
-      } in
-      (new_fsm, [])
-    | _ ->
-      let new_fsm = {
-          state = IDLE;
-          connect_retry_counter = connect_retry_counter + 1;
-          connect_retry_time;
-          connect_retry_timer = 0.;
-          hold_time;
-          hold_timer;
-          keepalive_time;
-          keepalive_timer;
-      } in
-      (new_fsm, [])
+    let actions = [Send_msg (Bgp.Notification Bgp.Cease); Stop_conn_retry_timer; Drop_tcp_connection] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = 0;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Hold_timer_expired ->
+    let actions = [Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); Stop_conn_retry_timer; Drop_tcp_connection] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Tcp_connection_fail ->
+    let actions = [Drop_tcp_connection; Start_conn_retry_timer; Listen_tcp_connection] in
+    let new_fsm = {
+      state = ACTIVE;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | BGP_open o ->
+    let open Bgp in
+    let actions = [Stop_conn_retry_timer; Send_msg Bgp.Keepalive; Start_keepalive_timer; Start_hold_timer] in
+    let remote_ht = o.hold_time in
+    let nego_hold_time = if hold_time > remote_ht then remote_ht else hold_time in
+    let new_fsm = {
+      state = OPEN_CONFIRMED;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time = nego_hold_time;
+      keepalive_time = nego_hold_time / 3;
+    } in
+    (new_fsm, actions)
+  | Bgp_header_err header_err ->
+    let actions = [
+      Send_msg (Bgp.Notification (Bgp.Message_header_error header_err)); 
+      Drop_tcp_connection;
+      Stop_conn_retry_timer;
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Notif_msg_ver_err ->
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | _ -> 
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Finite_state_machine_error);
+      Stop_conn_retry_timer; 
+      Drop_tcp_connection
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+;;
+
+let handle_open_confirmed  ({ state; conn_retry_counter; conn_retry_time; hold_time; keepalive_time } as fsm) = function
+  | Manual_start -> (fsm, [])
+  | Manual_stop -> 
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Cease); 
+      Drop_tcp_connection; 
+      Stop_conn_retry_timer
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter=0;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Hold_timer_expired ->
+    let actions = [
+      Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); 
+      Stop_conn_retry_timer;
+      Drop_tcp_connection
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Keepalive_timer_expired ->
+    let actions = [Send_msg Bgp.Keepalive; Start_keepalive_timer] in
+    (fsm, actions)
+  | Tcp_connection_fail | Notif_msg _ ->
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Notif_msg_ver_err ->
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Keepalive_msg ->
+    let actions = [Reset_hold_timer] in
+    let new_fsm = {
+      state = ESTABLISHED;
+      conn_retry_counter;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | _ -> 
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Finite_state_machine_error);
+      Stop_conn_retry_timer;
+      Drop_tcp_connection;
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+;;        
+
+let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time; keepalive_time } as fsm) = function
+  | Manual_start -> (fsm, [])
+  | Manual_stop -> 
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Cease); 
+      Drop_tcp_connection;
+      Stop_conn_retry_timer;
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = 0;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Hold_timer_expired ->
+    let actions = [
+      Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); 
+      Stop_conn_retry_timer;
+      Drop_tcp_connection
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Keepalive_timer_expired ->
+    let actions = [Send_msg Bgp.Keepalive; Start_keepalive_timer] in
+    (fsm, actions)
+  | Tcp_connection_fail | Notif_msg _ ->
+    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
+  | Keepalive_msg ->
+    let actions = [Start_hold_timer] in
+    (fsm, actions)
+  | _ ->
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Finite_state_machine_error);
+      Stop_conn_retry_timer;
+      Drop_tcp_connection;
+    ] in
+    let new_fsm = {
+      state = IDLE;
+      conn_retry_counter = conn_retry_counter + 1;
+      conn_retry_time;
+      hold_time;
+      keepalive_time;
+    } in
+    (new_fsm, actions)
 ;;
 
 let handle t event =

@@ -1,4 +1,5 @@
 true: package(result), package(cstruct), package(cstruct.ppx), package(lwt)
 <test/*.*>: package(alcotest)
+<test.*>: package(lwt.unix)
 "lib": include
 "test": include

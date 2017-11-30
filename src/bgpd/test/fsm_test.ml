@@ -5,7 +5,7 @@ open Printf
 
 let idle_to_established =
   let f () =
-    let fsm = create 0. 0. 0. in
+    let fsm = create 0 0 0 in
     assert (fsm.state = IDLE);
     let (fsm1, _) = handle fsm (Fsm.Manual_start) in
     let (fsm2, _) = handle fsm1 (Fsm.Tcp_connection_confirmed) in
@@ -15,9 +15,7 @@ let idle_to_established =
     assert (fsm4.state = ESTABLISHED);
 
     printf "%d\n" (List.length actions);
-    assert (List.length actions = 1);
-    
-    assert (List.exists (fun x -> x = Drop_tcp_connection) actions);
+    assert (List.length actions = 1);    
   in
   test_case "IDLE to ESTABLISHED state transit test." `Slow f
 ;;
