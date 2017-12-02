@@ -24,7 +24,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         | Some v -> Lwt.return (Bgp.to_string v))
       | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.return "Read fail"
       | _ -> S.TCPV4.close flow >>= fun () ->  Lwt.return "Connection closed.") >>= fun s ->
-      Rec_log.info (fun m -> m "%fs: %s" ((Unix.gettimeofday ()) -. start_time) s);
+      Rec_log.info (fun m -> m "receive: %s" s);
       Lwt.return_unit
   ;;
 

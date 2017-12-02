@@ -7,14 +7,14 @@ module Bgp_log = (val Logs.src_log bgpd_src : Logs.LOG)
 (* Timer *)
 module Timer = struct
   type t = unit Lwt.t
-  let create time : t =
+  let create time callback : t =
     let t, u = Lwt.task () in
     let _ = 
       OS.Time.sleep_ns (Duration.of_sec time) 
       >>= fun () -> 
       Lwt.wakeup u (); Lwt.return_unit 
     in
-    t 
+    t >>= callback
   ;;
 end
 
@@ -22,12 +22,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   type flags = {
     mutable listen_tcp_conn: bool;
     mutable read_tcp_flow: bool;
-  }
-
-  type timers = {
-    mutable conn_retry_timer: Timer.t option;
-    mutable hold_timer: Timer.t option;
-    mutable keepalive_timer: Timer.t option;
   }
 
   type t = {
@@ -38,7 +32,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     mutable fsm: Fsm.t;
     mutable flow: S.TCPV4.flow option;
     flags: flags;
-    timers: timers;
+    mutable conn_retry_timer: Timer.t option;
+    mutable hold_timer: Timer.t option;
+    mutable keepalive_timer: Timer.t option;
   }
 
   let rec msg_read_loop t callback =
@@ -126,11 +122,11 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let send_msg t msg = 
     match t.flow with
     | Some flow ->
-      Bgp_log.info (fun m -> m "write message %s" (Bgp.to_string msg));
+      Bgp_log.info (fun m -> m "send message %s" (Bgp.to_string msg));
       S.TCPV4.write flow (Bgp.gen_msg msg) 
       >>= begin function
       | Error _ ->
-        Bgp_log.debug (fun m -> m "fail to write TCP message.");
+        Bgp_log.debug (fun m -> m "fail to send TCP message %s" (Bgp.to_string msg));
         Lwt.return_unit
       | Ok () -> Lwt.return_unit
       end    
@@ -139,11 +135,12 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
 
   let send_open_msg (t: t) =
     let open Bgp in
+    let open Fsm in
     let o = {
       version = 4;
       bgp_id = Ipaddr.V4.to_int32 t.my_id;
       my_as = Asn t.my_as;
-      hold_time = 180;
+      hold_time = t.fsm.hold_time;
       options = [];
     } in
     send_msg t (Bgp.Open o) 
@@ -169,7 +166,57 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Send_msg msg -> send_msg t msg
     | Drop_tcp_connection -> drop_tcp_connection t
     | Listen_tcp_connection -> t.flags.listen_tcp_conn <- true; Lwt.return_unit
-    | _ -> Lwt.return_unit
+    | Start_conn_retry_timer -> 
+      if (t.fsm.conn_retry_time > 0) then 
+        t.conn_retry_timer <- Some (Timer.create t.fsm.conn_retry_time (fun () -> handle_event t Connection_retry_timer_expired));
+      Lwt.return_unit
+    | Stop_conn_retry_timer -> begin
+      match t.conn_retry_timer with
+      | None -> Lwt.return_unit
+      | Some t -> Lwt.cancel t; Lwt.return_unit
+    end
+    | Reset_conn_retry_timer -> begin
+      (match t.conn_retry_timer with
+      | None -> ()
+      | Some t -> Lwt.cancel t);
+      if (t.fsm.conn_retry_time > 0) then 
+        t.conn_retry_timer <- Some (Timer.create t.fsm.conn_retry_time (fun () -> handle_event t Connection_retry_timer_expired));
+      Lwt.return_unit
+    end
+    | Start_hold_timer ht -> 
+      if (t.fsm.hold_time > 0) then 
+        t.hold_timer <- Some (Timer.create ht (fun () -> handle_event t Hold_timer_expired));
+      Lwt.return_unit
+    | Stop_hold_timer -> begin
+      match t.hold_timer with
+      | None -> Lwt.return_unit
+      | Some t -> Lwt.cancel t; Lwt.return_unit
+    end
+    | Reset_hold_timer ht -> begin
+      (match t.hold_timer with
+      | None -> ()
+      | Some t -> Lwt.cancel t);
+      if (t.fsm.hold_time > 0) then 
+        t.hold_timer <- Some (Timer.create ht (fun () -> handle_event t Hold_timer_expired));
+      Lwt.return_unit
+    end
+    | Start_keepalive_timer -> 
+      if (t.fsm.keepalive_time > 0) then 
+        t.keepalive_timer <- Some (Timer.create t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
+      Lwt.return_unit
+    | Stop_keepalive_timer -> begin
+      match t.keepalive_timer with
+      | None -> Lwt.return_unit
+      | Some t -> Lwt.cancel t; Lwt.return_unit
+    end
+    | Reset_keepalive_timer -> begin
+      (match t.keepalive_timer with
+      | None -> ()
+      | Some t -> Lwt.cancel t);
+      if (t.fsm.keepalive_time > 0) then 
+        t.keepalive_timer <- Some (Timer.create t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
+      Lwt.return_unit
+    end
 
   and handle_event t event =
     let new_fsm, actions = Fsm.handle t.fsm event in
@@ -179,16 +226,19 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
+
+
   let start_bgp host_id my_id my_as socket =
     let fsm = Fsm.create 120 90 30 in
     let flags = { listen_tcp_conn = false; read_tcp_flow = false } in
     let flow = None in
-    let timers = {
-      conn_retry_timer = None;
-      hold_timer = None;
+    let t = { 
+      host_id; my_id; my_as; 
+      socket; fsm; flow; flags; 
+      conn_retry_timer = None; 
+      hold_timer = None; 
       keepalive_timer = None;
     } in
-    let t = { host_id; my_id; my_as; socket; fsm; flow; flags; timers } in
 
     (* Start listening to BGP port. *)
     listen_tcp_connection t (handle_event t);
@@ -204,10 +254,15 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         Bgp_log.info (fun m -> m "BGP stops.");
         handle_event t (Fsm.Manual_stop) >>= loop
       | "exit" -> 
+        handle_event t (Fsm.Manual_stop)
+        >>= fun () ->
         Bgp_log.info (fun m -> m "BGP exits.");
         S.disconnect socket
         >>= fun () ->
         Lwt.return_unit
+      | "show" ->
+        Bgp_log.info (fun m -> m "status: %s" (Fsm.to_string t.fsm));
+        loop ()
       | _ -> Lwt.return_unit >>= loop
     in
     loop ()

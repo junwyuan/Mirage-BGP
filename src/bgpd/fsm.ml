@@ -41,9 +41,9 @@ type action =
 | Start_conn_retry_timer
 | Stop_conn_retry_timer
 | Reset_conn_retry_timer
-| Start_hold_timer
+| Start_hold_timer of int
 | Stop_hold_timer
-| Reset_hold_timer
+| Reset_hold_timer of int
 | Start_keepalive_timer
 | Stop_keepalive_timer
 | Reset_keepalive_timer
@@ -93,12 +93,12 @@ let handle_connect ({ state; conn_retry_counter; conn_retry_time; hold_time; kee
     } in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
-    let actions = [Stop_conn_retry_timer; Send_open_msg; Start_hold_timer] in
+    let actions = [Stop_conn_retry_timer; Send_open_msg; Start_hold_timer 240] in
     let new_fsm = {
       state = OPEN_SENT;
       conn_retry_counter;
       conn_retry_time;
-      hold_time = 240; (* 4 minutes *)
+      hold_time;
       keepalive_time;
     } in
     (new_fsm, actions)
@@ -147,12 +147,12 @@ let handle_active ({ state; conn_retry_counter; conn_retry_time; hold_time; keep
     } in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
-    let actions = [Send_open_msg; Start_hold_timer] in
+    let actions = [Send_open_msg; Start_hold_timer 240] in
     let new_fsm = {
       state = OPEN_SENT;
       conn_retry_counter;
       conn_retry_time;
-      hold_time = 240; (* 4 minutes *)
+      hold_time;
       keepalive_time;
     } in
     (new_fsm, actions)
@@ -212,9 +212,9 @@ let handle_open_sent ({ state; conn_retry_counter; conn_retry_time; hold_time; k
     (new_fsm, actions)
   | BGP_open o ->
     let open Bgp in
-    let actions = [Stop_conn_retry_timer; Send_msg Bgp.Keepalive; Start_keepalive_timer; Start_hold_timer] in
     let remote_ht = o.hold_time in
     let nego_hold_time = if hold_time > remote_ht then remote_ht else hold_time in
+    let actions = [Stop_conn_retry_timer; Send_msg Bgp.Keepalive; Start_keepalive_timer; Start_hold_timer nego_hold_time] in
     let new_fsm = {
       state = OPEN_CONFIRMED;
       conn_retry_counter;
@@ -317,7 +317,7 @@ let handle_open_confirmed  ({ state; conn_retry_counter; conn_retry_time; hold_t
     } in
     (new_fsm, actions)
   | Keepalive_msg ->
-    let actions = [Reset_hold_timer] in
+    let actions = [Reset_hold_timer hold_time] in
     let new_fsm = {
       state = ESTABLISHED;
       conn_retry_counter;
@@ -386,7 +386,7 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
     } in
     (new_fsm, actions)
   | Keepalive_msg ->
-    let actions = [Start_hold_timer] in
+    let actions = [Start_hold_timer hold_time] in
     (fsm, actions)
   | _ ->
     let actions = [
@@ -413,6 +413,22 @@ let handle t event =
   | OPEN_CONFIRMED -> handle_open_confirmed t event
   | ESTABLISHED -> handle_established t event
 ;;
+
+let to_string t = 
+  let state_msg = 
+    match t.state with
+    | IDLE -> "IDLE"
+    | CONNECT -> "CONNECT"
+    | ACTIVE -> "ACTIVE"
+    | OPEN_SENT -> "OPEN_SENT"
+    | OPEN_CONFIRMED -> "OPEN_CONFIRMED"
+    | ESTABLISHED -> "ESTABLISHED"
+  in
+  Printf.sprintf "{state: %s; conn_retry_counter: %d; conn_retry_time: %d; hold_time: %d; keepalive_time: %d;}"
+                state_msg t.conn_retry_counter t.conn_retry_time t.hold_time t.keepalive_time
+;;
+  
+
 
 
 
