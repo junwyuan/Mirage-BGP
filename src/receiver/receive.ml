@@ -3,15 +3,19 @@ open Printf
 open Bgp
 
 
-module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
+let rec_log = Logs.Src.create "receiver" ~doc:"Receiver log"
+module Rec_log = (val Logs.src_log rec_log : Logs.LOG)
+
+module  Main (S: Mirage_stack_lwt.V4) = struct
   let start_time = Unix.gettimeofday ();;
   let time f c =
     let t = Sys.time () in
     f () >>= fun () ->
-    C.log c (sprintf "Execution time: %fs\n" (Sys.time() -. t))
+    Rec_log.info (fun m -> m "Execution time: %fs\n" (Sys.time() -. t));
+    Lwt.return_unit
   ;;
   
-  let read_tcp_msg flow c = fun () -> 
+  let read_tcp_msg flow = fun () -> 
     S.TCPV4.read flow >>= fun s -> 
       (match s with 
       | Ok (`Data buf) -> 
@@ -20,31 +24,35 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         | Some v -> Lwt.return (Bgp.to_string v))
       | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.return "Read fail"
       | _ -> S.TCPV4.close flow >>= fun () ->  Lwt.return "Connection closed.") >>= fun s ->
-      C.log c (sprintf "%fs: %s" ((Unix.gettimeofday ()) -. start_time) s)
+      Rec_log.info (fun m -> m "%fs: %s" ((Unix.gettimeofday ()) -. start_time) s);
+      Lwt.return_unit
   ;;
 
-  let write_tcp_msg flow c = fun buf ->
+  let write_tcp_msg flow = fun buf ->
     S.TCPV4.write flow buf >>= function
-    | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "write fail"
+    | Error _ ->
+      Rec_log.debug (fun m -> m "Fail TCP write."); 
+      S.TCPV4.close flow 
     | Ok _ -> Lwt.return_unit
   ;;
 
-  let rec read_loop flow c = fun () ->
-    read_tcp_msg flow c () >>=
-    read_loop flow c
+  let rec read_loop flow = fun () ->
+    read_tcp_msg flow () >>=
+    read_loop flow
   ;;
 
-  let rec write_keepalive flow c = fun () ->
-    OS.Time.sleep_ns (Duration.of_sec 30) >>= fun () ->
-    write_tcp_msg flow c (Bgp.gen_keepalive ()) >>=
-    write_keepalive flow c
+  let rec write_keepalive flow = fun () ->
+    OS.Time.sleep_ns (Duration.of_sec 30) 
+    >>= fun () ->
+    write_tcp_msg flow (Bgp.gen_keepalive ()) >>=
+    write_keepalive flow
   ;;
 
   let ip4_of_ints a b c d =
     Int32.of_int ((a lsl 24) lor (b lsl 16) lor (c lsl 8) lor d)
   ;;
     
-  let start_bgp flow c : unit Lwt.t = 
+  let start_bgp flow : unit Lwt.t = 
     let o = {
       version=4;
       my_as=Bgp.Asn (Key_gen.asn ());
@@ -54,24 +62,23 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     } 
     in
     let o = Bgp.gen_open o in
-    write_tcp_msg flow c o >>=
-    read_tcp_msg flow c >>= fun () ->
+    write_tcp_msg flow o >>=
+    read_tcp_msg flow >>= fun () ->
     let k = Bgp.gen_keepalive () in
-    write_tcp_msg flow c k >>= fun () ->
-    Lwt.join [read_loop flow c (); write_keepalive flow c ()]
+    write_tcp_msg flow k >>= fun () ->
+    Lwt.join [read_loop flow (); write_keepalive flow ()]
   ;;
 
-  let rec loop c = 
-    OS.Time.sleep_ns (Duration.of_sec 5)
+  let rec loop () = 
+    OS.Time.sleep_ns (Duration.of_sec 30) 
     >>= fun () ->
-    C.log c "Five second past."
-    >>= fun () ->
-    loop c
+    Rec_log.info (fun m -> m "30 seconds mark.");
+    loop ()
   ;;
 
-  let start_receive flow c =
-    read_tcp_msg flow c ()
-    >>= fun msg ->
+  let start_receive flow =
+    read_tcp_msg flow ()
+    >>= fun () ->
     let open Bgp in
     let o = {
       version = 4;
@@ -80,22 +87,21 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       options = [];
       hold_time = 180;
     } in
-    write_tcp_msg flow c (Bgp.gen_open o)
+    write_tcp_msg flow (Bgp.gen_open o)
     >>= fun () ->
-    let timeout () = 
-      OS.Time.sleep_ns (Duration.of_sec 5)
-      >>= fun () ->
-      S.TCPV4.close flow
-    in
-    Lwt.join [timeout (); read_loop flow c ()]
+    read_tcp_msg flow ()
+    >>= fun () ->
+    write_tcp_msg flow (Bgp.gen_keepalive ())
+    >>= fun () ->
+    read_loop flow ()
   ;;
 
-  let start c s =
+  let start s =
     let port = 50000 in
-    let host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
+    let _host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
 
-    S.listen_tcpv4 s ~port (fun flow -> start_receive flow c);
-    loop c
+    S.listen_tcpv4 s ~port (fun flow -> start_receive flow);
+    loop ()
   ;;    
 end
 

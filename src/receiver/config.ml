@@ -14,11 +14,11 @@ let asn =
   Key.(create "asn" Arg.(opt int 64513 doc))
 ;;
 
-let main = foreign ~keys:[Key.abstract host; Key.abstract id; Key.abstract asn] "Receive.Main" (console @-> stackv4 @-> job)
+let main = foreign ~keys:[Key.abstract host; Key.abstract id; Key.abstract asn] "Receive.Main" (stackv4 @-> job)
 
 let stack = generic_stackv4 default_network
 
 let () =
   register "receive" [
-    main $ default_console $ stack
+    main $ stack
   ]

@@ -84,7 +84,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     match t.flow with
     | Some _ -> Lwt.return_unit
     | None -> begin
-      S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, 179)
+      S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, 50000)
       >>= function
       | Error _ -> 
         Bgp_log.debug (fun m -> m "fail to set up TCP connection.");
@@ -120,12 +120,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       end
       else Lwt.return_unit (* Silently quit *)
     in
-    S.listen_tcpv4 t.socket ~port:179 on_connect
+    S.listen_tcpv4 t.socket ~port:50001 on_connect
   ;;
                     
   let send_msg t msg = 
     match t.flow with
     | Some flow ->
+      Bgp_log.info (fun m -> m "write message %s" (Bgp.to_string msg));
       S.TCPV4.write flow (Bgp.gen_msg msg) 
       >>= begin function
       | Error _ ->

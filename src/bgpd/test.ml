@@ -38,7 +38,7 @@ let rec timer () : unit Lwt.t =
 
 let () =
   let t = timer () in
-  let t2 = Lwt_unix.sleep 7. >>= fun () -> Lwt.cancel t; Lwt.return_unit in
+  let _ = Lwt_unix.sleep 7. >>= fun () -> Lwt.cancel t; Lwt.return_unit in
   Lwt_main.run (loop2 ())
 ;;
 
