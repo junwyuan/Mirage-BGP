@@ -385,6 +385,8 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
       keepalive_time;
     } in
     (new_fsm, actions)
+  | Update_msg u ->
+    (fsm, [Reset_hold_timer hold_time])
   | Keepalive_msg ->
     let actions = [Reset_hold_timer hold_time] in
     (fsm, actions)
