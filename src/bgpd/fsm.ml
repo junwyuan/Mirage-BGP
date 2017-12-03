@@ -83,7 +83,7 @@ let handle_connect ({ state; conn_retry_counter; conn_retry_time; hold_time; kee
     } in
     (new_fsm, actions)
   | Connection_retry_timer_expired ->
-    let actions = [Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
+    let actions = [Drop_tcp_connection; Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
     let new_fsm = {
       state = CONNECT;
       conn_retry_counter;
@@ -386,7 +386,7 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
     } in
     (new_fsm, actions)
   | Keepalive_msg ->
-    let actions = [Start_hold_timer hold_time] in
+    let actions = [Reset_hold_timer hold_time] in
     (fsm, actions)
   | _ ->
     let actions = [

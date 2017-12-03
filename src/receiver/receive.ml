@@ -2,7 +2,6 @@ open Lwt.Infix
 open Printf
 open Bgp
 
-
 let rec_log = Logs.Src.create "receiver" ~doc:"Receiver log"
 module Rec_log = (val Logs.src_log rec_log : Logs.LOG)
 
@@ -23,15 +22,17 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         | None -> failwith "no msg"
         | Some v -> Lwt.return (Bgp.to_string v))
       | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.return "Read fail"
-      | _ -> S.TCPV4.close flow >>= fun () ->  Lwt.return "Connection closed.") >>= fun s ->
-      Rec_log.info (fun m -> m "receive: %s" s);
+      | _ -> S.TCPV4.close flow >>= fun () ->  Lwt.return "Connection closed.") 
+      >>= fun s ->
+      Rec_log.info (fun m -> m "%s" s);
       Lwt.return_unit
   ;;
 
-  let write_tcp_msg flow = fun buf ->
-    S.TCPV4.write flow buf >>= function
+  let write_tcp_msg flow = fun msg ->
+    Rec_log.info (fun m -> m "send TCP message %s" (Bgp.to_string msg));
+    S.TCPV4.write flow (Bgp.gen_msg msg) >>= function
     | Error _ ->
-      Rec_log.debug (fun m -> m "Fail TCP write."); 
+      Rec_log.debug (fun m -> m "fail to send TCP message."); 
       S.TCPV4.close flow 
     | Ok _ -> Lwt.return_unit
   ;;
@@ -44,29 +45,12 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let rec write_keepalive flow = fun () ->
     OS.Time.sleep_ns (Duration.of_sec 30) 
     >>= fun () ->
-    write_tcp_msg flow (Bgp.gen_keepalive ()) >>=
+    write_tcp_msg flow Bgp.Keepalive >>=
     write_keepalive flow
   ;;
 
   let ip4_of_ints a b c d =
     Int32.of_int ((a lsl 24) lor (b lsl 16) lor (c lsl 8) lor d)
-  ;;
-    
-  let start_bgp flow : unit Lwt.t = 
-    let o = {
-      version=4;
-      my_as=Bgp.Asn (Key_gen.asn ());
-      hold_time=180;
-      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.id ()));
-      options=[];
-    } 
-    in
-    let o = Bgp.gen_open o in
-    write_tcp_msg flow o >>=
-    read_tcp_msg flow >>= fun () ->
-    let k = Bgp.gen_keepalive () in
-    write_tcp_msg flow k >>= fun () ->
-    Lwt.join [read_loop flow (); write_keepalive flow ()]
   ;;
 
   let rec loop () = 
@@ -87,13 +71,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       options = [];
       hold_time = 180;
     } in
-    write_tcp_msg flow (Bgp.gen_open o)
+    write_tcp_msg flow (Bgp.Open o)
     >>= fun () ->
     read_tcp_msg flow ()
     >>= fun () ->
-    write_tcp_msg flow (Bgp.gen_keepalive ())
+    write_tcp_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    read_loop flow ()
+    Lwt.join [read_loop flow (); write_keepalive flow ()]
   ;;
 
   let start s =

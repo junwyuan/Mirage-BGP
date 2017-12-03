@@ -1,29 +1,30 @@
 open Lwt.Infix
 
 (* Logging *)
-let bgpd_src = Logs.Src.create "bgp" ~doc:"BGP logging"
+let bgpd_src = Logs.Src.create "BGP" ~doc:"BGP logging"
 module Bgp_log = (val Logs.src_log bgpd_src : Logs.LOG)
 
-(* Timer *)
-module Timer = struct
+(* This is to simulate a cancellable lwt thread *)
+module Device = struct
   type t = unit Lwt.t
-  let create time callback : t =
+
+  let create f callback : t =
     let t, u = Lwt.task () in
     let _ = 
-      OS.Time.sleep_ns (Duration.of_sec time) 
-      >>= fun () -> 
-      Lwt.wakeup u (); Lwt.return_unit 
+      f () >>= fun x ->
+      Lwt.wakeup u x;
+      Lwt.return_unit
     in
-    t >>= callback
+    t >>= fun x ->
+    (* To avoid callback being cancelled. *)
+    let _ = callback x in
+    Lwt.return_unit
   ;;
+
+  let stop t = Lwt.cancel t
 end
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
-  type flags = {
-    mutable listen_tcp_conn: bool;
-    mutable read_tcp_flow: bool;
-  }
-
   type t = {
     host_id: Ipaddr.V4.t;
     my_id: Ipaddr.V4.t;
@@ -31,29 +32,35 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     socket: S.t;
     mutable fsm: Fsm.t;
     mutable flow: S.TCPV4.flow option;
-    flags: flags;
-    mutable conn_retry_timer: Timer.t option;
-    mutable hold_timer: Timer.t option;
-    mutable keepalive_timer: Timer.t option;
+    mutable listen_tcp_conn: bool;
+    mutable conn_retry_timer: Device.t option;
+    mutable hold_timer: Device.t option;
+    mutable keepalive_timer: Device.t option;
+    mutable conn_starter: Device.t option;
+    mutable tcp_flow_reader: Device.t option;
   }
 
-  let rec msg_read_loop t callback =
+  let create_timer time callback : Device.t =
+    Device.create (fun () -> OS.Time.sleep_ns (Duration.of_sec time)) callback
+  ;;
+
+  let rec tcp_flow_reader t callback =
+    (match t.conn_starter with
+    | None -> ()
+    | Some _ -> Bgp_log.warn (fun m -> m "new flow reader when there exists another conn starter."));
+
     match t.flow with
     | None -> Lwt.return_unit
-    | Some flow -> begin 
-      S.TCPV4.read flow
-      >>= fun result ->
-      if not (t.flags.read_tcp_flow) then begin
-        Bgp_log.debug (fun m -> m "Exit TCP read loop.");
-        Lwt.return_unit (* Silent exit *)
-      end
-      else begin
+    | Some flow -> begin
+      let task () = S.TCPV4.read flow in
+
+      let wrapped_callback result =
         match result with
         | Ok (`Data buf) -> begin
           match Bgp.parse_buffer_to_t buf with
           | Error _ -> 
             (* TODO *)
-            msg_read_loop t callback
+            tcp_flow_reader t callback
           | Ok msg ->
             let event = match msg with
             | Bgp.Open o -> Fsm.BGP_open o
@@ -62,56 +69,70 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
             | Bgp.Keepalive -> Fsm.Keepalive_msg
             in
             Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
-            let _ = callback event in
-            msg_read_loop t callback
+            tcp_flow_reader t callback
+            >>= fun () ->
+            callback event
         end 
       | Error _ -> 
         Bgp_log.debug (fun m -> m "fail to read from TCP.");
-        callback Fsm.Tcp_connection_fail
+        t.tcp_flow_reader <- None;
+        callback Fsm.Tcp_connection_fail      
       | Ok (`Eof) -> 
         Bgp_log.debug (fun m -> m "TCP connection closed by remote.");
+        t.tcp_flow_reader <- None;
         callback Fsm.Tcp_connection_fail
-      end
+      in
+      t.tcp_flow_reader <- Some (Device.create task wrapped_callback);
+      Lwt.return_unit
     end
   ;;
 
   let init_tcp_connection t callback =
-    Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
+    (match t.conn_starter with
+    | None -> ()
+    | Some _ -> Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter."));
+
     match t.flow with
-    | Some _ -> Lwt.return_unit
+    | Some _ -> 
+      Bgp_log.warn (fun m -> m "new connection is initiated when there exists an old connection.");
+      Lwt.return_unit
     | None -> begin
-      S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, 50000)
-      >>= function
-      | Error _ -> 
-        Bgp_log.debug (fun m -> m "fail to set up TCP connection.");
-        callback (Fsm.Tcp_connection_fail)
-      | Ok flow -> begin
-        match t.flow with
-        | None -> begin
-          t.flow <- Some flow;
-          t.flags.read_tcp_flow <- true;
-          Bgp_log.debug (fun m -> m "TCP connection succeeds.");
-
-          (* Spawn a thread to read messages from flow *)
-          let _ = msg_read_loop t callback in
-
-          callback Fsm.Tcp_CR_Acked
+      let task = fun () ->
+        Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
+        S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, 179)
+      in
+      let wrapped_callback = function
+        | Error _ -> 
+          Bgp_log.debug (fun m -> m "fail to set up TCP connection.");
+          t.conn_starter <- None;
+          callback (Fsm.Tcp_connection_fail)
+        | Ok flow -> begin
+          match t.flow with
+          | None ->
+            Bgp_log.debug (fun m -> m "TCP connection succeeds.");
+            t.flow <- Some flow;
+            t.conn_starter <- None;
+            tcp_flow_reader t callback
+            >>= fun () ->
+            callback Fsm.Tcp_CR_Acked
+          | Some _ -> 
+            Bgp_log.warn (fun m -> m "new connection is established when there exists an old connection. Discard new connection");
+            t.conn_starter <- None;
+            S.TCPV4.close flow
         end
-        | Some _ -> S.TCPV4.close flow
-      end
+      in
+      t.conn_starter <- Some (Device.create task wrapped_callback);
+      Lwt.return_unit
     end
   ;;      
 
   let listen_tcp_connection t callback =
     let on_connect = fun flow -> 
-      if (t.flags.listen_tcp_conn) then begin
-        t.flow <- Some flow;
-        t.flags.read_tcp_flow <- true;
+      if (t.listen_tcp_conn) then begin
         Bgp_log.debug (fun m -> m "accept incoming TCP connection from peer.");
-
-        (* Spawn a thread to read messages from flow *)
-        let _ = msg_read_loop t callback in
-
+        t.flow <- Some flow;
+        tcp_flow_reader t callback
+        >>= fun () ->
         callback Fsm.Tcp_connection_confirmed
       end
       else Lwt.return_unit (* Silently quit *)
@@ -147,12 +168,27 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let drop_tcp_connection t =
-    Bgp_log.debug (fun m -> m "Drop TCP connection.");
-    t.flags.read_tcp_flow <- false;
-    t.flags.listen_tcp_conn <- false;
+    Bgp_log.debug (fun m -> m "drop TCP connection.");
+    t.listen_tcp_conn <- false;
+    
+    (match t.conn_starter with
+    | None -> ()
+    | Some d -> 
+      Bgp_log.debug (fun m -> m "close conn starter."); 
+      t.conn_starter <- None;
+      Device.stop d;);
+
+    (match t.tcp_flow_reader with
+    | None -> ()
+    | Some d -> 
+      Bgp_log.debug (fun m -> m "close tcp flow reader."); 
+      t.tcp_flow_reader <- None;
+      Device.stop d);
+    
     match t.flow with
     | None -> Lwt.return_unit
-    | Some flow -> 
+    | Some flow ->
+      Bgp_log.debug (fun m -> m "close existing flow."); 
       t.flow <- None; 
       S.TCPV4.close flow;
   ;;
@@ -165,56 +201,66 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Send_open_msg -> send_open_msg t
     | Send_msg msg -> send_msg t msg
     | Drop_tcp_connection -> drop_tcp_connection t
-    | Listen_tcp_connection -> t.flags.listen_tcp_conn <- true; Lwt.return_unit
+    | Listen_tcp_connection -> t.listen_tcp_conn <- true; Lwt.return_unit
     | Start_conn_retry_timer -> 
-      if (t.fsm.conn_retry_time > 0) then 
-        t.conn_retry_timer <- Some (Timer.create t.fsm.conn_retry_time (fun () -> handle_event t Connection_retry_timer_expired));
+      if (t.fsm.conn_retry_time > 0) then begin
+        let callback () =
+          Bgp_log.info (fun m -> m "TCP connection timeouts.");
+          handle_event t Connection_retry_timer_expired
+        in
+        t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
+      end;
       Lwt.return_unit
     | Stop_conn_retry_timer -> begin
       match t.conn_retry_timer with
       | None -> Lwt.return_unit
-      | Some t -> Lwt.cancel t; Lwt.return_unit
+      | Some t -> Device.stop t; Lwt.return_unit
     end
     | Reset_conn_retry_timer -> begin
       (match t.conn_retry_timer with
       | None -> ()
-      | Some t -> Lwt.cancel t);
-      if (t.fsm.conn_retry_time > 0) then 
-        t.conn_retry_timer <- Some (Timer.create t.fsm.conn_retry_time (fun () -> handle_event t Connection_retry_timer_expired));
+      | Some t -> Device.stop t);
+      if (t.fsm.conn_retry_time > 0) then begin
+        let callback () =
+          Bgp_log.debug (fun m -> m "connection retry timer expired.");
+          handle_event t Connection_retry_timer_expired
+        in
+        t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
+      end;
       Lwt.return_unit
     end
     | Start_hold_timer ht -> 
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (Timer.create ht (fun () -> handle_event t Hold_timer_expired));
+        t.hold_timer <- Some (create_timer ht (fun () -> handle_event t Hold_timer_expired));
       Lwt.return_unit
     | Stop_hold_timer -> begin
       match t.hold_timer with
       | None -> Lwt.return_unit
-      | Some t -> Lwt.cancel t; Lwt.return_unit
+      | Some t -> Device.stop t; Lwt.return_unit
     end
     | Reset_hold_timer ht -> begin
       (match t.hold_timer with
       | None -> ()
-      | Some t -> Lwt.cancel t);
+      | Some t -> Device.stop t);
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (Timer.create ht (fun () -> handle_event t Hold_timer_expired));
+        t.hold_timer <- Some (create_timer ht (fun () -> handle_event t Hold_timer_expired));
       Lwt.return_unit
     end
     | Start_keepalive_timer -> 
       if (t.fsm.keepalive_time > 0) then 
-        t.keepalive_timer <- Some (Timer.create t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
+        t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
       Lwt.return_unit
     | Stop_keepalive_timer -> begin
       match t.keepalive_timer with
       | None -> Lwt.return_unit
-      | Some t -> Lwt.cancel t; Lwt.return_unit
+      | Some t -> Device.stop t; Lwt.return_unit
     end
     | Reset_keepalive_timer -> begin
       (match t.keepalive_timer with
       | None -> ()
-      | Some t -> Lwt.cancel t);
+      | Some t -> Device.stop t);
       if (t.fsm.keepalive_time > 0) then 
-        t.keepalive_timer <- Some (Timer.create t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
+        t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
       Lwt.return_unit
     end
 
@@ -226,18 +272,18 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
-
-
   let start_bgp host_id my_id my_as socket =
-    let fsm = Fsm.create 120 90 30 in
-    let flags = { listen_tcp_conn = false; read_tcp_flow = false } in
+    let fsm = Fsm.create 30 45 15 in
     let flow = None in
     let t = { 
       host_id; my_id; my_as; 
-      socket; fsm; flow; flags; 
+      socket; fsm; flow;
+      listen_tcp_conn = false; 
       conn_retry_timer = None; 
       hold_timer = None; 
       keepalive_timer = None;
+      conn_starter = None;
+      tcp_flow_reader = None;
     } in
 
     (* Start listening to BGP port. *)
