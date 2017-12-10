@@ -26,10 +26,9 @@ end
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
   type t = {
-    conn_id: int;
-    host_id: Ipaddr.V4.t;
-    my_id: Ipaddr.V4.t;
-    my_as: int;
+    remote_id: Ipaddr.V4.t;
+    local_id: Ipaddr.V4.t;
+    local_asn: int;
     socket: S.t;
     mutable fsm: Fsm.t;
     mutable flow: S.TCPV4.flow option;
@@ -73,10 +72,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
             | Bgp.Notification e -> Fsm.Notif_msg e
             | Bgp.Keepalive -> Fsm.Keepalive_msg
             in
-            (* Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg)); *)
+            Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
+
+            let _ = callback event in
             tcp_flow_reader t callback
-            >>= fun () ->
-            callback event
         end 
       | Error _ -> 
         Bgp_log.debug (fun m -> m "fail to read from TCP.");
@@ -104,7 +103,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | None -> begin
       let task = fun () ->
         Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
-        S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, Key_gen.port ())
+        S.TCPV4.create_connection (S.tcpv4 t.socket) (t.remote_id, Key_gen.remote_port ())
       in
       let wrapped_callback = function
         | Error _ -> 
@@ -164,8 +163,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let open Fsm in
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 t.my_id;
-      my_as = Asn t.my_as;
+      bgp_id = Ipaddr.V4.to_int32 t.local_id;
+      my_as = Asn t.local_asn;
       hold_time = t.fsm.hold_time;
       options = [];
     } in
@@ -192,7 +191,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow ->
-      Bgp_log.debug (fun m -> m "close existing flow."); 
+      Bgp_log.debug (fun m -> m "close tcp flow."); 
       t.flow <- None; 
       S.TCPV4.close flow;
   ;;
@@ -280,8 +279,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     end
     | Initiate_rib ->
       let input_rib = 
-        let callback u = Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.conn_id)) in
-        Rib.Adj_rib.create t.conn_id callback
+        let callback u = Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.remote_id)) in
+        Rib.Adj_rib.create t.remote_id callback
       in
       t.input_rib <- Some input_rib;
 
@@ -290,19 +289,19 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           let converted = Util.Rib_to_Bgp.convert_update u in
           send_msg t (Bgp.Update converted)
         in
-        Rib.Adj_rib.create t.conn_id callback
+        Rib.Adj_rib.create t.remote_id callback
       in
       t.output_rib <- Some output_rib;
 
-      Rib.Loc_rib.subscribe t.loc_rib output_rib
+      Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Subscribe output_rib)
     | Release_rib ->
       t.input_rib <- None;
       match t.output_rib with
       | None -> Lwt.return_unit
-      | Some rib -> t.output_rib <- None; Rib.Loc_rib.unsubscribe t.loc_rib rib
+      | Some rib -> t.output_rib <- None; Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Unsubscribe rib)
   
   and handle_event t event =
-    Bgp_log.debug (fun m -> m "%s" (Fsm.event_to_string event));
+    (* Bgp_log.debug (fun m -> m "%s" (Fsm.event_to_string event)); *)
     let new_fsm, actions = Fsm.handle t.fsm event in
     t.fsm <- new_fsm;
     (* Spawn threads to perform actions from left to right *)
@@ -310,12 +309,11 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
-  let start_bgp host_id my_id my_as socket =
+  let start_bgp remote_id local_id local_asn socket =
     let fsm = Fsm.create 30 45 15 in
     let flow = None in
     let t = {
-      conn_id = 0;
-      host_id; my_id; my_as; 
+      remote_id; local_id; local_asn; 
       socket; fsm; flow;
       listen_tcp_conn = false; 
       conn_retry_timer = None; 
@@ -379,11 +377,12 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start s =
-    let host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
-    let id = Ipaddr.V4.of_string_exn (Key_gen.id ()) in
-    let my_as = Key_gen.asn () in  
-    start_bgp host id my_as s
+    let remote_id = Ipaddr.V4.of_string_exn (Key_gen.remote_id ()) in
+    let local_id = Ipaddr.V4.of_string_exn (Key_gen.local_id ()) in
+    let local_asn = Key_gen.local_asn () in  
+    start_bgp remote_id local_id local_asn s
   ;;
+
 
 
 end

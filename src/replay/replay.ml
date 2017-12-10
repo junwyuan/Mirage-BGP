@@ -3,7 +3,11 @@ open Bgp
 open Mrt
 open Printf
 
-module Prefix_set = Set.Make (String) ;;
+module Prefix_set = Set.Make (String)
+
+(* Logging *)
+let replay_log = Logs.Src.create "Replay" ~doc:"Logging for Replay"
+module Replay_log = (val Logs.src_log replay_log : Logs.LOG)
 
 module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   let host () = Key_gen.host ();;
@@ -21,29 +25,37 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   let time f c =
     let t = Unix.gettimeofday () in
     f () >>= fun () ->
-    C.log c (sprintf "Execution time: %fs\n" (Unix.gettimeofday () -. t))
+    Replay_log.info (fun m -> m "Execution time: %fs\n" (Unix.gettimeofday () -. t));
+    Lwt.return_unit
   ;;
   
   let read_tcp_msg flow c = fun () -> 
-    S.TCPV4.read flow >>= fun s -> 
-      (match s with 
-      | Ok (`Data buf) -> 
-        (match Bgp.parse buf () with
-        | None -> failwith "no msg"
-        | Some v -> Lwt.return (Bgp.to_string v))
-      | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "read fail"
-      | _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "No data") >>= fun s ->
-      C.log c s
+    S.TCPV4.read flow 
+    >>= fun s -> 
+    (match s with 
+    | Ok (`Data buf) -> 
+      (match Bgp.parse buf () with
+      | None -> failwith "no msg"
+      | Some v -> Lwt.return (Bgp.to_string v))
+    | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "read fail"
+    | _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "No data") 
+    >>= fun s -> 
+    Replay_log.info (fun m -> m "%s" s);
+    Lwt.return_unit
   ;;
 
   let write_tcp_msg flow c = fun buf ->
     S.TCPV4.write flow buf >>= function
-    | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.fail_with "write fail"
+    | Error _ -> 
+      S.TCPV4.close flow
+      >>= fun () -> 
+      Lwt.fail_with "write fail"
     | Ok _ -> Lwt.return_unit
   ;;
 
   let rec read_loop flow c = fun () ->
-    read_tcp_msg flow c () >>=
+    read_tcp_msg flow c () 
+    >>=
     read_loop flow c
   ;;
 
@@ -130,8 +142,6 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       let after_nlri = List.fold_left (fun acc x -> Prefix_set.add (Afi.prefix_to_string x) acc) after_wd nlri in
       after_nlri
   ;;
-    
-
 
   let feed_update ?(is_quick=true) flow c () =
     (* global packet counter *)
@@ -147,12 +157,10 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       Cstruct.of_bigarray ba
     in
     
-    C.log c (sprintf "file length %d\n%!" (Cstruct.len buf)) >>= fun () ->
+    Replay_log.info (fun m -> m "file length %d\n%!" (Cstruct.len buf));
     
     (* generate packet iterator *)
     let packets = Mrt.parse buf in
-
-    let start_time = Unix.gettimeofday () in
 
     (* recursively iterate over packet iterator, printing as we go *)
     let feed_packet time = function
@@ -160,15 +168,14 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       | Some packet ->
         incr npackets;
         let p2 = modify_packet packet in
-        (* C.log c (Bgp.to_string p2) >>= fun () -> *)
         let buf = Bgp.gen_msg ~test:true p2 in
-        let p = Bgp.parse_buffer_to_t buf |> function
+        let () = Bgp.parse_buffer_to_t buf |> function
           | Error e -> 
             (match e with
-            | General e -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday () -. start_time) (Bgp.to_string (Bgp.Notification e)))
-            | _ -> Lwt.fail_with "Notification error")
-          | Ok v -> C.log c (sprintf "%fs: %s \n" (Unix.gettimeofday () -. start_time) (Bgp.to_string v))
-        in p >>= fun () ->   
+            | General e -> Replay_log.info (fun m -> m "%s" (Bgp.to_string (Bgp.Notification e)))
+            | _ -> Replay_log.info (fun m -> m "Notification error"))
+          | Ok v -> Replay_log.info (fun m -> m "%s" (Bgp.to_string v))
+        in
         (* Cstruct.hexdump buf; *)
         write_tcp_msg flow c buf
     in
@@ -197,8 +204,9 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     get_packet ~is_quick 0 (Prefix_set.empty) packets >>= fun prefix_set ->
 
     (* done! *)
-    C.log c (sprintf "num packets %d\n%!" !npackets) >>= fun () ->
-    C.log c (sprintf "num prefixes %d\n" (List.length (Prefix_set.elements prefix_set)))
+    Replay_log.info (fun m -> m "num packets %d\n%!" !npackets);
+    Replay_log.info (fun m -> m "num prefixes %d\n" (List.length (Prefix_set.elements prefix_set)));
+    Lwt.return_unit
   ;;
 
   let start_bgp flow c : unit Lwt.t = 

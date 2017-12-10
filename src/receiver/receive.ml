@@ -95,6 +95,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     read_tcp_msg flow ()
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive)
+    (* >>= fun () ->
+    read_tcp_msg flow () *)
     >>= fun () ->
     Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
     (* read_loop flow () *)
