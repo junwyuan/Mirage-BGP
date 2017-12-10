@@ -52,6 +52,25 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let ip4_of_ints a b c d =
     Int32.of_int ((a lsl 24) lor (b lsl 16) lor (c lsl 8) lor d)
   ;;
+  
+  let write_update flow =
+    let open Bgp in
+    let withdrawn = 
+      [(Afi.IPv4 (ip4_of_ints 192 168 0 0), 16); 
+        (Afi.IPv4 (ip4_of_ints 10 0 0 0), 8); 
+        (Afi.IPv4 (ip4_of_ints 172 16 84 0), 24);
+        ] 
+    in
+    let nlri = [(Afi.IPv4 (ip4_of_ints 192 168 0 0), 24)] in
+    let flags = {optional=false; transitive=false; partial=false; extlen=false} in
+    let path_attrs = [
+      flags, Origin IGP;
+      flags, As_path [Set [2_l; 5_l; 3_l]; Seq [10_l; 20_l; 30_l]];
+      flags, Next_hop (ip4_of_ints 192 168 1 253);
+    ] in 
+    let u = Update {withdrawn; path_attrs; nlri} in
+    write_tcp_msg flow u
+  ;;
 
   let rec loop () = 
     OS.Time.sleep_ns (Duration.of_sec 30) 
@@ -77,7 +96,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    Lwt.join [read_loop flow (); write_keepalive flow ()]
+    Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
+    (* read_loop flow () *)
   ;;
 
   let start s =

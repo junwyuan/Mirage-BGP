@@ -26,6 +26,7 @@ end
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
   type t = {
+    conn_id: int;
     host_id: Ipaddr.V4.t;
     my_id: Ipaddr.V4.t;
     my_as: int;
@@ -38,6 +39,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     mutable keepalive_timer: Device.t option;
     mutable conn_starter: Device.t option;
     mutable tcp_flow_reader: Device.t option;
+    mutable input_rib: Rib.Adj_rib.t option;
+    mutable output_rib: Rib.Adj_rib.t option;
+    mutable loc_rib: Rib.Loc_rib.t;
   }
 
   let create_timer time callback : Device.t =
@@ -58,9 +62,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         match result with
         | Ok (`Data buf) -> begin
           match Bgp.parse_buffer_to_t buf with
-          | Error _ -> 
+          | Error err -> begin 
             (* TODO *)
             tcp_flow_reader t callback
+          end
           | Ok msg ->
             let event = match msg with
             | Bgp.Open o -> Fsm.BGP_open o
@@ -68,7 +73,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
             | Bgp.Notification e -> Fsm.Notif_msg e
             | Bgp.Keepalive -> Fsm.Keepalive_msg
             in
-            Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
+            (* Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg)); *)
             tcp_flow_reader t callback
             >>= fun () ->
             callback event
@@ -99,7 +104,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | None -> begin
       let task = fun () ->
         Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
-        S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, 179)
+        S.TCPV4.create_connection (S.tcpv4 t.socket) (t.host_id, Key_gen.port ())
       in
       let wrapped_callback = function
         | Error _ -> 
@@ -168,7 +173,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let drop_tcp_connection t =
-    Bgp_log.debug (fun m -> m "drop TCP connection.");
     t.listen_tcp_conn <- false;
     
     (match t.conn_starter with
@@ -176,7 +180,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Some d -> 
       Bgp_log.debug (fun m -> m "close conn starter."); 
       t.conn_starter <- None;
-      Device.stop d;);
+      Device.stop d);
 
     (match t.tcp_flow_reader with
     | None -> ()
@@ -205,6 +209,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Start_conn_retry_timer -> 
       if (t.fsm.conn_retry_time > 0) then begin
         let callback () =
+          t.conn_retry_timer <- None;
           Bgp_log.info (fun m -> m "TCP connection timeouts.");
           handle_event t Connection_retry_timer_expired
         in
@@ -214,7 +219,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Stop_conn_retry_timer -> begin
       match t.conn_retry_timer with
       | None -> Lwt.return_unit
-      | Some t -> Device.stop t; Lwt.return_unit
+      | Some d -> t.conn_retry_timer <- None; Device.stop d; Lwt.return_unit
     end
     | Reset_conn_retry_timer -> begin
       (match t.conn_retry_timer with
@@ -222,7 +227,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       | Some t -> Device.stop t);
       if (t.fsm.conn_retry_time > 0) then begin
         let callback () =
-          Bgp_log.debug (fun m -> m "connection retry timer expired.");
+          t.conn_retry_timer <- None;
+          Bgp_log.info (fun m -> m "connection retry timer expired.");
           handle_event t Connection_retry_timer_expired
         in
         t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
@@ -231,40 +237,72 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     end
     | Start_hold_timer ht -> 
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (create_timer ht (fun () -> handle_event t Hold_timer_expired));
+        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired));
       Lwt.return_unit
     | Stop_hold_timer -> begin
+      Bgp_log.info (fun m -> m "hold timer expires.");
       match t.hold_timer with
       | None -> Lwt.return_unit
-      | Some t -> Device.stop t; Lwt.return_unit
+      | Some d -> t.hold_timer <- None; Device.stop d; Lwt.return_unit
     end
     | Reset_hold_timer ht -> begin
       (match t.hold_timer with
       | None -> ()
-      | Some t -> Device.stop t);
+      | Some d -> Device.stop d);
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (create_timer ht (fun () -> handle_event t Hold_timer_expired));
+        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired));
       Lwt.return_unit
     end
     | Start_keepalive_timer -> 
       if (t.fsm.keepalive_time > 0) then 
-        t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
+        t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time 
+                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired));
       Lwt.return_unit
     | Stop_keepalive_timer -> begin
       match t.keepalive_timer with
       | None -> Lwt.return_unit
-      | Some t -> Device.stop t; Lwt.return_unit
+      | Some d -> t.keepalive_timer <- None; Device.stop d; Lwt.return_unit
     end
     | Reset_keepalive_timer -> begin
       (match t.keepalive_timer with
       | None -> ()
       | Some t -> Device.stop t);
       if (t.fsm.keepalive_time > 0) then 
-        t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time (fun () -> handle_event t Keepalive_timer_expired));
+        t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time 
+                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired));
       Lwt.return_unit
     end
+    | Process_update_msg u -> begin
+      let converted = Util.Bgp_to_Rib.convert_update u in
+      match t.input_rib with
+      | None -> Lwt.fail_with "Input RIB not initiated."
+      | Some rib -> Rib.Adj_rib.handle_update rib converted
+    end
+    | Initiate_rib ->
+      let input_rib = 
+        let callback u = Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.conn_id)) in
+        Rib.Adj_rib.create t.conn_id callback
+      in
+      t.input_rib <- Some input_rib;
 
+      let output_rib =
+        let callback u = 
+          let converted = Util.Rib_to_Bgp.convert_update u in
+          send_msg t (Bgp.Update converted)
+        in
+        Rib.Adj_rib.create t.conn_id callback
+      in
+      t.output_rib <- Some output_rib;
+
+      Rib.Loc_rib.subscribe t.loc_rib output_rib
+    | Release_rib ->
+      t.input_rib <- None;
+      match t.output_rib with
+      | None -> Lwt.return_unit
+      | Some rib -> t.output_rib <- None; Rib.Loc_rib.unsubscribe t.loc_rib rib
+  
   and handle_event t event =
+    Bgp_log.debug (fun m -> m "%s" (Fsm.event_to_string event));
     let new_fsm, actions = Fsm.handle t.fsm event in
     t.fsm <- new_fsm;
     (* Spawn threads to perform actions from left to right *)
@@ -275,7 +313,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let start_bgp host_id my_id my_as socket =
     let fsm = Fsm.create 30 45 15 in
     let flow = None in
-    let t = { 
+    let t = {
+      conn_id = 0;
       host_id; my_id; my_as; 
       socket; fsm; flow;
       listen_tcp_conn = false; 
@@ -284,6 +323,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       keepalive_timer = None;
       conn_starter = None;
       tcp_flow_reader = None;
+      input_rib = None;
+      output_rib = None;
+      loc_rib = Rib.Loc_rib.create;
     } in
 
     (* Start listening to BGP port. *)
@@ -306,8 +348,30 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         S.disconnect socket
         >>= fun () ->
         Lwt.return_unit
-      | "show" ->
+      | "show fsm" ->
         Bgp_log.info (fun m -> m "status: %s" (Fsm.to_string t.fsm));
+        loop ()
+      | "show device" ->
+        let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
+        let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
+        let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
+        let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
+        let dev5 = if not (t.tcp_flow_reader = None) then "Flow reader" else "" in 
+        let dev6 = if (t.listen_tcp_conn) then "Listen tcp conneciton." else "" in 
+        let str_list = List.filter (fun x -> not (x = "")) ["Running device:"; dev1; dev2; dev3; dev4; dev5; dev6] in
+        Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list));
+        loop ()
+      | "show rib" ->
+        (match t.input_rib with
+        | None -> Bgp_log.warn (fun m -> m "No IN RIB.");
+        | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)));
+
+        Bgp_log.info (fun m -> m "%s" (Rib.Loc_rib.to_string t.loc_rib));
+
+        (match t.output_rib with
+        | None -> Bgp_log.warn (fun m -> m "No OUT RIB.");
+        | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)));
+        
         loop ()
       | _ -> Lwt.return_unit >>= loop
     in

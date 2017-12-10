@@ -32,6 +32,26 @@ type event =
 | Update_msg of Bgp.update
 | Update_msg_err of Bgp.update_message_error
 
+let event_to_string = function
+  | Manual_start -> "Manual_start"
+  | Manual_stop -> "Manual_stop"
+  | Connection_retry_timer_expired -> "Conn retry timer expired."
+  | Hold_timer_expired -> "Hold timer expired"
+  | Keepalive_timer_expired -> "Keppalive timer expired"
+  | Tcp_CR_Acked -> "TCP CR Acked"
+  | Tcp_connection_confirmed -> "Tcp connection confirmed"
+  | Tcp_connection_fail -> "Tcp connection failure"
+  | BGP_open o -> Printf.sprintf "BGP OPEN: %s" (Bgp.opent_to_string o)
+  | Bgp_header_err _ -> "BGP Header err"
+  | Bgp_open_msg_err _ -> "Open Message err"
+  | Notif_msg_ver_err -> "Notif version error"
+  | Notif_msg e -> Printf.sprintf "Notif msg: %s" (Bgp.to_string (Bgp.Notification e))
+  | Keepalive_msg -> Printf.sprintf "Keepalive msg"
+  | Update_msg u -> Printf.sprintf "Update msg: %s" (Bgp.update_to_string u)
+  | Update_msg_err _ -> "Update msg err"
+;;
+
+
 type action =
 | Initiate_tcp_connection
 | Listen_tcp_connection
@@ -47,6 +67,9 @@ type action =
 | Start_keepalive_timer
 | Stop_keepalive_timer
 | Reset_keepalive_timer
+| Process_update_msg of Bgp.update
+| Initiate_rib
+| Release_rib
 
 let create conn_retry_time hold_time keepalive_time = {
   state = IDLE;
@@ -214,7 +237,7 @@ let handle_open_sent ({ state; conn_retry_counter; conn_retry_time; hold_time; k
     let open Bgp in
     let remote_ht = o.hold_time in
     let nego_hold_time = if hold_time > remote_ht then remote_ht else hold_time in
-    let actions = [Stop_conn_retry_timer; Send_msg Bgp.Keepalive; Start_keepalive_timer; Start_hold_timer nego_hold_time] in
+    let actions = [Stop_conn_retry_timer; Send_msg Bgp.Keepalive; Start_keepalive_timer; Reset_hold_timer nego_hold_time] in
     let new_fsm = {
       state = OPEN_CONFIRMED;
       conn_retry_counter;
@@ -317,7 +340,7 @@ let handle_open_confirmed  ({ state; conn_retry_counter; conn_retry_time; hold_t
     } in
     (new_fsm, actions)
   | Keepalive_msg ->
-    let actions = [Reset_hold_timer hold_time] in
+    let actions = [Reset_hold_timer hold_time; Initiate_rib] in
     let new_fsm = {
       state = ESTABLISHED;
       conn_retry_counter;
@@ -347,6 +370,7 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
   | Manual_stop -> 
     let actions = [
       Send_msg (Bgp.Notification Bgp.Cease); 
+      Release_rib;
       Drop_tcp_connection;
       Stop_conn_retry_timer;
     ] in
@@ -361,6 +385,7 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
   | Hold_timer_expired ->
     let actions = [
       Send_msg (Bgp.Notification (Bgp.Hold_timer_expired)); 
+      Release_rib;
       Stop_conn_retry_timer;
       Drop_tcp_connection
     ] in
@@ -376,7 +401,7 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
     let actions = [Send_msg Bgp.Keepalive; Start_keepalive_timer] in
     (fsm, actions)
   | Tcp_connection_fail | Notif_msg _ ->
-    let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
+    let actions = [Stop_conn_retry_timer; Release_rib; Drop_tcp_connection] in
     let new_fsm = {
       state = IDLE;
       conn_retry_counter = conn_retry_counter + 1;
@@ -386,7 +411,7 @@ let handle_established ({ state; conn_retry_counter; conn_retry_time; hold_time;
     } in
     (new_fsm, actions)
   | Update_msg u ->
-    (fsm, [Reset_hold_timer hold_time])
+    (fsm, [Reset_hold_timer hold_time; Process_update_msg u])
   | Keepalive_msg ->
     let actions = [Reset_hold_timer hold_time] in
     (fsm, actions)
