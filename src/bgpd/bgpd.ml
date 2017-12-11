@@ -371,6 +371,20 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)));
         
         loop ()
+      | "show gc" ->
+        let word_to_KB ws = ws * 8 / 1024 in
+
+        let gc_stat = Gc.stat () in
+        let open Gc in
+        let allocation = Printf.sprintf "Minor: %f, Promoted: %f, Major %f" 
+                                gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
+        let size = Printf.sprintf "Heap size: %d, Stack size: %d" 
+                                (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in
+        let collection = Printf.sprintf "Minor collection: %d, Major collection: %d" 
+                                gc_stat.minor_collections gc_stat.major_collections in
+        Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
+        
+        loop ()
       | _ -> Lwt.return_unit >>= loop
     in
     loop ()
@@ -382,7 +396,4 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let local_asn = Key_gen.local_asn () in  
     start_bgp remote_id local_id local_asn s
   ;;
-
-
-
 end

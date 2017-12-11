@@ -73,9 +73,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let rec loop () = 
-    OS.Time.sleep_ns (Duration.of_sec 30) 
+    OS.Time.sleep_ns (Duration.of_sec 60) 
     >>= fun () ->
-    Rec_log.info (fun m -> m "30 seconds mark.");
     loop ()
   ;;
 
@@ -85,8 +84,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let open Bgp in
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.host ()));
-      my_as = Asn 12345;
+      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()));
+      my_as = Asn (Key_gen.local_asn ());
       options = [];
       hold_time = 180;
     } in
@@ -95,20 +94,23 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     read_tcp_msg flow ()
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive)
-    (* >>= fun () ->
-    read_tcp_msg flow () *)
     >>= fun () ->
     Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
-    (* read_loop flow () *)
   ;;
 
   let start s =
-    let port = 50000 in
-    let _host = Ipaddr.V4.of_string_exn (Key_gen.host ()) in
-
+    let port = Key_gen.local_port () in
     S.listen_tcpv4 s ~port (fun flow -> start_receive flow);
+
+    let _ = 
+      S.TCPV4.create_connection (S.tcpv4 s) (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
+      >>= function
+      | Error _ -> Rec_log.info (fun m -> m "Can't connect to remote."); Lwt.return_unit
+      | Ok flow -> start_receive flow
+    in
+
     loop ()
-  ;;    
+  ;;
 end
 
 

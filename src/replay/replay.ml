@@ -9,27 +9,32 @@ module Prefix_set = Set.Make (String)
 let replay_log = Logs.Src.create "Replay" ~doc:"Logging for Replay"
 module Replay_log = (val Logs.src_log replay_log : Logs.LOG)
 
-module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
-  let host () = Key_gen.host ();;
-  let my_as () = Int32.of_int (Key_gen.asn ());;
-  let bgp_id () = 
-    let raw = Key_gen.id () in
+module  Main (S: Mirage_stack_lwt.V4) = struct
+  let remote_id () = 
+    let raw = Key_gen.remote_id () in
+    Ipaddr.V4.of_string_exn raw
+  ;;
+
+  let local_asn () = Int32.of_int (Key_gen.local_asn ())
+
+  let local_id () = 
+    let raw = Key_gen.local_id () in
     let ip = Ipaddr.V4.of_string_exn raw in
     Ipaddr.V4.to_int32 ip
   ;;
 
   let filename () = Key_gen.filename ();;
 
-  let is_quick () = Key_gen.mode ();;
+  let is_quick () = Key_gen.quick ();;
 
-  let time f c =
+  let time f =
     let t = Unix.gettimeofday () in
     f () >>= fun () ->
     Replay_log.info (fun m -> m "Execution time: %fs\n" (Unix.gettimeofday () -. t));
     Lwt.return_unit
   ;;
   
-  let read_tcp_msg flow c = fun () -> 
+  let read_tcp_msg flow =
     S.TCPV4.read flow 
     >>= fun s -> 
     (match s with 
@@ -44,8 +49,10 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
-  let write_tcp_msg flow c = fun buf ->
-    S.TCPV4.write flow buf >>= function
+  let write_tcp_msg flow msg =
+    Replay_log.info (fun m -> m "Send msg: %s" (Bgp.to_string msg));
+    S.TCPV4.write flow (Bgp.gen_msg ~test:true msg)
+    >>= function
     | Error _ -> 
       S.TCPV4.close flow
       >>= fun () -> 
@@ -53,10 +60,10 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     | Ok _ -> Lwt.return_unit
   ;;
 
-  let rec read_loop flow c = fun () ->
-    read_tcp_msg flow c () 
-    >>=
-    read_loop flow c
+  let rec read_loop flow =
+    read_tcp_msg flow
+    >>= fun () ->
+    read_loop flow
   ;;
 
   let ip4_of_ints a b c d =
@@ -68,19 +75,19 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     | Update {withdrawn; path_attrs; nlri} ->
       let modify_attr (flags, pl) seen = 
         let modified = match pl with
-          | Next_hop _ -> Next_hop (bgp_id ())
+          | Next_hop _ -> Next_hop (local_id ())
           | As4_path l_segment -> (match l_segment with
-            | [] -> As4_path [Seq [my_as ()]]
+            | [] -> As4_path [Seq [local_asn ()]]
             | hd::tl -> (match hd with
-              | Set l -> As4_path [Set (List.cons (my_as ()) l)]
-              | Seq l -> As4_path [Seq (List.cons (my_as ()) l)]
+              | Set l -> As4_path [Set (List.cons (local_asn ()) l)]
+              | Seq l -> As4_path [Seq (List.cons (local_asn ()) l)]
             ))
           | As_path l_segment -> 
             (match l_segment with
-            | [] -> As4_path [Seq [my_as ()]]
+            | [] -> As4_path [Seq [local_asn ()]]
             | hd::tl -> (match hd with
-              | Set l -> As4_path [Set (List.cons (my_as ()) l)]
-              | Seq l -> As4_path [Seq (List.cons (my_as ()) l)]
+              | Set l -> As4_path [Set (List.cons (local_asn ()) l)]
+              | Seq l -> As4_path [Seq (List.cons (local_asn ()) l)]
             ))
           | attr -> attr
         in List.cons (flags, modified) seen
@@ -119,7 +126,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       else modified in
       
       let with_next_hop = if not (contain_next_hop with_as_path) then
-        let next_hop = (flags, Next_hop (bgp_id ())) in
+        let next_hop = (flags, Next_hop (local_id ())) in
         List.append with_as_path [next_hop]
       else with_as_path in
 
@@ -143,10 +150,11 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       after_nlri
   ;;
 
-  let feed_update ?(is_quick=true) flow c () =
+  let feed_update ?(is_quick=true) flow () =
     (* global packet counter *)
     let npackets = ref 0 in
-  
+    let total = Key_gen.total () in
+    
     (* open file, create buf *)
     let fn = filename () in
     
@@ -167,20 +175,13 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       | None -> Lwt.return_unit
       | Some packet ->
         incr npackets;
-        let p2 = modify_packet packet in
-        let buf = Bgp.gen_msg ~test:true p2 in
-        let () = Bgp.parse_buffer_to_t buf |> function
-          | Error e -> 
-            (match e with
-            | General e -> Replay_log.info (fun m -> m "%s" (Bgp.to_string (Bgp.Notification e)))
-            | _ -> Replay_log.info (fun m -> m "Notification error"))
-          | Ok v -> Replay_log.info (fun m -> m "%s" (Bgp.to_string v))
-        in
-        (* Cstruct.hexdump buf; *)
-        write_tcp_msg flow c buf
+        let msg = modify_packet packet in
+        write_tcp_msg flow msg
     in
     
-    let rec get_packet ?(is_quick=true) prev prefix_set packets = match packets () with
+    let rec replay ?(is_quick=true) prev prefix_set packets =
+      if (!npackets > total && not (total = 0)) then Lwt.return prefix_set
+      else match packets () with
       | None -> Lwt.return prefix_set
       | Some mrt -> (match mrt with
         | (header, Mrt.Bgp4mp bgp4mp) -> 
@@ -192,47 +193,63 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
             | Some v -> begin
               let updated_pfx_set = update_prefix_set prefix_set v in
               (if (time > prev) && (not is_quick) && (prev != 0) then 
-                OS.Time.sleep_ns (Duration.of_us (time - prev)) >>= fun () -> feed_packet (Int64.of_int time) (Some v)
-              else feed_packet (Int64.of_int time) (Some v)) >>= fun () ->
-              get_packet ~is_quick time updated_pfx_set packets
+                OS.Time.sleep_ns (Duration.of_us (time - prev)) 
+                >>= fun () -> 
+                feed_packet (Int64.of_int time) (Some v)
+              else feed_packet (Int64.of_int time) (Some v)) 
+              >>= fun () ->
+              replay ~is_quick time updated_pfx_set packets
             end
-            | None -> get_packet ~is_quick prev prefix_set packets)
-          | _ -> get_packet ~is_quick prev prefix_set packets)
-        | _ -> get_packet ~is_quick prev prefix_set packets)
+            | None -> replay ~is_quick prev prefix_set packets)
+          | _ -> replay ~is_quick prev prefix_set packets)
+        | _ -> replay ~is_quick prev prefix_set packets)
     in
+    replay ~is_quick 0 (Prefix_set.empty) packets 
     
-    get_packet ~is_quick 0 (Prefix_set.empty) packets >>= fun prefix_set ->
-
-    (* done! *)
-    Replay_log.info (fun m -> m "num packets %d\n%!" !npackets);
-    Replay_log.info (fun m -> m "num prefixes %d\n" (List.length (Prefix_set.elements prefix_set)));
+    >>= fun prefix_set ->
+    Replay_log.info (fun m -> m "num packets %d, num prefixes %d" !npackets (List.length (Prefix_set.elements prefix_set)));
+    Unix.close fd;
     Lwt.return_unit
   ;;
 
-  let start_bgp flow c : unit Lwt.t = 
+  let start_bgp flow : unit Lwt.t = 
     let o = {
       version=4;
-      my_as=Bgp.Asn (Int32.to_int (my_as ()));
+      my_as=Bgp.Asn (Int32.to_int (local_asn ()));
       hold_time=180;
-      bgp_id = bgp_id ();
+      bgp_id = local_id ();
       options=[]
     } 
     in
-    let o = Bgp.gen_open o in
-    write_tcp_msg flow c o >>=
-    read_tcp_msg flow c >>= fun () ->
-    let k = Bgp.gen_keepalive () in
-    write_tcp_msg flow c k >>= fun () ->
-    Lwt.join [read_loop flow c (); time (feed_update ~is_quick:(is_quick ()) flow c) c]
+    read_tcp_msg flow
+    >>= fun () ->
+    write_tcp_msg flow (Bgp.Open o)
+    >>= fun () ->
+    read_tcp_msg flow 
+    >>= fun () ->
+    write_tcp_msg flow (Bgp.Keepalive) 
+    >>= fun () ->
+    Lwt.join [read_loop flow; time (feed_update ~is_quick:(is_quick ()) flow)]
   ;;
 
-  let start c s =
-    let port = 179 in
-    let host = Ipaddr.V4.of_string_exn (host ()) in
-    let tcp_s = S.tcpv4 s in
-    S.TCPV4.create_connection tcp_s (host, port) >>= function
-      | Ok flow -> start_bgp flow c
-      | Error err -> failwith "Connection failure"
+  let start s =    
+    let callback flow = start_bgp flow in
+    S.listen_tcpv4 s (Key_gen.local_port ()) callback;
+    
+    let _ = 
+      S.TCPV4.create_connection (S.tcpv4 s) (remote_id (), Key_gen.remote_port ())
+      >>= function
+      | Ok flow -> start_bgp flow
+      | Error _ -> Replay_log.info (fun m -> m "Can't connect to remote."); Lwt.return_unit
+    in
+
+    let rec loop () = 
+      OS.Time.sleep_ns (Duration.of_sec 60)
+      >>= fun () ->
+      loop ()
+    in
+
+    loop ()
   ;;
 end
 

@@ -1,20 +1,39 @@
 open Mirage
-let host = 
-  let doc = Key.Arg.info ~doc:"This is the remote bgp speaker's ip address." ["host"] in
-  Key.(create "host" Arg.(opt string "172.19.0.2" doc))
+let remote_id = 
+  let doc = Key.Arg.info ~doc:"This is the remote bgp speaker's ip address." ["remote_id"] in
+  Key.(create "remote_id" Arg.(opt string "172.19.0.2" doc))
 ;;
 
-let id = 
-  let doc = Key.Arg.info ~doc:"This is the bgp identifier, i.e. ip address." ["id"] in
-  Key.(create "id" Arg.(opt string "172.19.0.3" doc))
+let remote_port = 
+  let doc = Key.Arg.info ~doc:"This is the remote bgp speaker's port." ["remote_port"] in
+  Key.(create "remote_port" Arg.(opt int 179 doc))
 ;;
 
-let asn = 
-  let doc = Key.Arg.info ~doc:"This is the asn number for this bgp speaker." ["asn"] in
-  Key.(create "asn" Arg.(opt int 64513 doc))
+let local_id = 
+  let doc = Key.Arg.info ~doc:"This is the bgp identifier, i.e. ip address." ["local_id"] in
+  Key.(create "local_id" Arg.(opt string "172.19.0.3" doc))
 ;;
 
-let main = foreign ~keys:[Key.abstract host; Key.abstract id; Key.abstract asn] "Receive.Main" (stackv4 @-> job)
+let local_port = 
+  let doc = Key.Arg.info ~doc:"This is the local bgp speaker's port." ["local_port"] in
+  Key.(create "local_port" Arg.(opt int 179 doc))
+;;
+
+let local_asn = 
+  let doc = Key.Arg.info ~doc:"This is the asn number for this bgp speaker." ["local_asn"] in
+  Key.(create "local_asn" Arg.(opt int 2 doc))
+;;
+
+let main = 
+  let keys = [
+    Key.abstract remote_id;
+    Key.abstract remote_port;
+    Key.abstract local_port;
+    Key.abstract local_id;
+    Key.abstract local_asn;
+  ] in
+  foreign ~keys "Receive.Main" (stackv4 @-> job)
+;;
 
 let stack = generic_stackv4 default_network
 
