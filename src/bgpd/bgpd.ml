@@ -403,7 +403,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
 
         let gc_stat = Gc.stat () in
         let open Gc in
-        let allocation = Printf.sprintf "Minor: %f, Promoted: %f, Major %f" 
+        let allocation = Printf.sprintf "Minor: %.0f, Promoted: %.0f, Major %.0f" 
                                 gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
         let size = Printf.sprintf "Heap size: %d KB, Stack size: %d KB" 
                                 (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in

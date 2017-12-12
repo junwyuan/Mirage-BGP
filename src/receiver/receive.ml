@@ -14,7 +14,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
   
-  let read_tcp_msg flow () = 
+  let read_tcp_msg flow = 
     S.TCPV4.read flow
     >>= fun read_result ->
     let rec parse_all_msg buf = 
@@ -49,8 +49,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Ok _ -> Lwt.return_unit
   ;;
 
-  let rec read_loop flow = fun () ->
-    read_tcp_msg flow () >>=
+  let rec read_loop flow = 
+    read_tcp_msg flow 
+    >>= fun () ->
     read_loop flow
   ;;
 
@@ -92,43 +93,43 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start_receive_passive flow =
-    read_tcp_msg flow ()
+    read_tcp_msg flow
     >>= fun () ->
     let open Bgp in
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()));
+      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.local_id ()));
       my_as = Asn (Key_gen.local_asn ());
       options = [];
       hold_time = 180;
     } in
     write_tcp_msg flow (Bgp.Open o)
     >>= fun () ->
-    read_tcp_msg flow ()
+    read_tcp_msg flow
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
+    Lwt.join [read_loop flow; write_keepalive flow (); write_update flow]
   ;;
 
   let start_receive_active flow =
     let open Bgp in
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()));
+      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.local_id ()));
       my_as = Asn (Key_gen.local_asn ());
       options = [];
       hold_time = 180;
     } in
     write_tcp_msg flow (Bgp.Open o)
     >>= fun () ->
-    read_tcp_msg flow ()
+    read_tcp_msg flow 
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    read_tcp_msg flow ()
+    read_tcp_msg flow
     >>= fun () ->
-    Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
+    Lwt.join [read_loop flow; write_keepalive flow (); write_update flow]
   ;;
 
   let start s =
