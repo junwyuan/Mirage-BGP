@@ -14,23 +14,35 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
   
-  let read_tcp_msg flow = fun () -> 
-    S.TCPV4.read flow >>= fun s -> 
-      (match s with 
-      | Ok (`Data buf) -> 
-        (match Bgp.parse buf () with
-        | None -> failwith "no msg"
-        | Some v -> Lwt.return (Bgp.to_string v))
-      | Error _ -> S.TCPV4.close flow >>= fun () -> Lwt.return "Read fail"
-      | _ -> S.TCPV4.close flow >>= fun () ->  Lwt.return "Connection closed.") 
-      >>= fun s ->
-      Rec_log.info (fun m -> m "%s" s);
+  let read_tcp_msg flow () = 
+    S.TCPV4.read flow
+    >>= fun read_result ->
+    let rec parse_all_msg buf = 
+      match Bgp.parse_buffer_to_t buf with
+      | None -> ()
+      | Some (Error err) ->  
+        Rec_log.warn (fun m -> m "Message parsing error.");
+      | Some (Ok (msg, len)) ->
+        Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
+        parse_all_msg (Cstruct.shift buf len)
+    in
+
+    match read_result with 
+    | Ok (`Data buf) -> 
+      parse_all_msg buf;
       Lwt.return_unit
+    | Error _ -> 
+      Rec_log.debug (fun m -> m "Read fail");
+      S.TCPV4.close flow
+    | Ok (`Eof) -> 
+      Rec_log.debug (fun m -> m "Connection closed");
+      S.TCPV4.close flow
   ;;
 
   let write_tcp_msg flow = fun msg ->
     Rec_log.info (fun m -> m "send TCP message %s" (Bgp.to_string msg));
-    S.TCPV4.write flow (Bgp.gen_msg msg) >>= function
+    S.TCPV4.write flow (Bgp.gen_msg msg) 
+    >>= function
     | Error _ ->
       Rec_log.debug (fun m -> m "fail to send TCP message."); 
       S.TCPV4.close flow 
@@ -45,8 +57,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let rec write_keepalive flow = fun () ->
     OS.Time.sleep_ns (Duration.of_sec 30) 
     >>= fun () ->
-    write_tcp_msg flow Bgp.Keepalive >>=
-    write_keepalive flow
+    write_tcp_msg flow Bgp.Keepalive 
+    >>= fun () ->
+    write_keepalive flow ()
   ;;
 
   let ip4_of_ints a b c d =
