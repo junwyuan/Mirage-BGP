@@ -76,7 +76,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         ] 
     in
     let nlri = [(Afi.IPv4 (ip4_of_ints 192 168 0 0), 24)] in
-    let flags = {optional=false; transitive=false; partial=false; extlen=false} in
+    let flags = {optional=false; transitive=true; partial=false; extlen=false} in
     let path_attrs = [
       flags, Origin IGP;
       flags, As_path [Set [2_l; 5_l; 3_l]; Seq [10_l; 20_l; 30_l]];
