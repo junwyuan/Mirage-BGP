@@ -19,8 +19,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
 
   let local_id () = 
     let raw = Key_gen.local_id () in
-    let ip = Ipaddr.V4.of_string_exn raw in
-    Ipaddr.V4.to_int32 ip
+    Ipaddr.V4.of_string_exn raw
   ;;
 
   let filename () = Key_gen.filename ();;
@@ -30,7 +29,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let time f =
     let t = Unix.gettimeofday () in
     f () >>= fun () ->
-    Replay_log.info (fun m -> m "Execution time: %fs\n" (Unix.gettimeofday () -. t));
+    Replay_log.info (fun m -> m "Execution time: %fs" (Unix.gettimeofday () -. t));
     Lwt.return_unit
   ;;
   
@@ -73,9 +72,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let modify_packet t = match t with
     | Open _ | Notification _ | Keepalive -> t
     | Update {withdrawn; path_attrs; nlri} ->
+      let local_id_int32 = Ipaddr.V4.to_int32 (local_id ()) in
       let modify_attr (flags, pl) seen = 
         let modified = match pl with
-          | Next_hop _ -> Next_hop (local_id ())
+          | Next_hop _ -> Next_hop local_id_int32
           | As4_path l_segment -> (match l_segment with
             | [] -> As4_path [Seq [local_asn ()]]
             | hd::tl -> (match hd with
@@ -126,7 +126,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       else modified in
       
       let with_next_hop = if not (contain_next_hop with_as_path) then
-        let next_hop = (flags, Next_hop (local_id ())) in
+        let next_hop = (flags, Next_hop local_id_int32) in
         List.append with_as_path [next_hop]
       else with_as_path in
 
@@ -150,7 +150,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       after_nlri
   ;;
 
-  let feed_update ?(is_quick=true) flow () =
+  let start_replay ?(is_quick=true) flow () =
     (* global packet counter *)
     let npackets = ref 0 in
     let total = Key_gen.total () in
@@ -165,7 +165,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       Cstruct.of_bigarray ba
     in
     
-    Replay_log.info (fun m -> m "file length %d\n%!" (Cstruct.len buf));
+    Replay_log.info (fun m -> m "file length %d KB" ((Cstruct.len buf) / 1024));
     
     (* generate packet iterator *)
     let packets = Mrt.parse buf in
@@ -180,7 +180,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     in
     
     let rec replay ?(is_quick=true) prev prefix_set packets =
-      if (!npackets > total && not (total = 0)) then Lwt.return prefix_set
+      if (!npackets >= total && not (total = 0)) then Lwt.return prefix_set
       else match packets () with
       | None -> Lwt.return prefix_set
       | Some mrt -> (match mrt with
@@ -204,7 +204,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           | _ -> replay ~is_quick prev prefix_set packets)
         | _ -> replay ~is_quick prev prefix_set packets)
     in
-    replay ~is_quick 0 (Prefix_set.empty) packets 
+    replay ~is_quick 0 (Prefix_set.empty) packets
     
     >>= fun prefix_set ->
     Replay_log.info (fun m -> m "num packets %d, num prefixes %d" !npackets (List.length (Prefix_set.elements prefix_set)));
@@ -212,12 +212,35 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
+  let rec plain_feed ?(is_quick=true) flow i =
+    let withdrawn = [] in
+    let path_attrs = 
+      let open Bgp in
+      let flags = { optional=false; transitive=true; extlen=false; partial=false } in
+      let origin = Origin EGP in
+      let next_hop = Next_hop (Ipaddr.V4.to_int32 (local_id ())) in
+      let as_path = As_path [Seq [1_l; 2_l; 3_l]] in
+      List.map (fun pa -> (flags, pa)) [origin; next_hop; as_path]
+    in
+    let nlri =
+      let s = Printf.sprintf "192.168.%d.%d" ((i lsr 8) land 0xff) (i land 0xff) in
+      [(Afi.IPv4 (Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn s)), 16)]
+    in
+    let u = { withdrawn; path_attrs; nlri } in
+    
+    if (i > 256) then Lwt.return_unit
+    else 
+      write_tcp_msg flow (Bgp.Update u)
+      >>= fun () ->
+      plain_feed flow (i + 1) 
+  ;;
+
   let start_bgp flow : unit Lwt.t = 
     let o = {
       version=4;
       my_as=Bgp.Asn (Int32.to_int (local_asn ()));
       hold_time=180;
-      bgp_id = local_id ();
+      bgp_id = Ipaddr.V4.to_int32 (local_id ());
       options=[]
     } 
     in
@@ -229,19 +252,26 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive) 
     >>= fun () ->
-    Lwt.join [read_loop flow; time (feed_update ~is_quick:(is_quick ()) flow)]
+    Lwt.join [read_loop flow; time (start_replay ~is_quick:(is_quick ()) flow)]
   ;;
 
   let start s =    
     let callback flow = start_bgp flow in
     S.listen_tcpv4 s (Key_gen.local_port ()) callback;
     
-    let _ = 
+    let init_conn = 
       S.TCPV4.create_connection (S.tcpv4 s) (remote_id (), Key_gen.remote_port ())
       >>= function
       | Ok flow -> start_bgp flow
-      | Error _ -> Replay_log.info (fun m -> m "Can't connect to remote."); Lwt.return_unit
+      | Error _ ->  Lwt.return_unit
     in
+    let timeout = 
+      OS.Time.sleep_ns (Duration.of_sec 1)
+      >>= fun () ->
+      Replay_log.info (fun m -> m "Can't connect to remote.");
+      Lwt.return_unit
+    in
+    let _ = Lwt.pick [timeout; init_conn] in
 
     let rec loop () = 
       OS.Time.sleep_ns (Duration.of_sec 60)

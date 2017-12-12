@@ -10,7 +10,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let time f c =
     let t = Sys.time () in
     f () >>= fun () ->
-    Rec_log.info (fun m -> m "Execution time: %fs\n" (Sys.time() -. t));
+    Rec_log.info (fun m -> m "execution time: %fs\n" (Sys.time() -. t));
     Lwt.return_unit
   ;;
   
@@ -78,7 +78,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     loop ()
   ;;
 
-  let start_receive flow =
+  let start_receive_passive flow =
     read_tcp_msg flow ()
     >>= fun () ->
     let open Bgp in
@@ -98,16 +98,43 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
   ;;
 
+  let start_receive_active flow =
+    let open Bgp in
+    let o = {
+      version = 4;
+      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()));
+      my_as = Asn (Key_gen.local_asn ());
+      options = [];
+      hold_time = 180;
+    } in
+    write_tcp_msg flow (Bgp.Open o)
+    >>= fun () ->
+    read_tcp_msg flow ()
+    >>= fun () ->
+    write_tcp_msg flow (Bgp.Keepalive)
+    >>= fun () ->
+    read_tcp_msg flow ()
+    >>= fun () ->
+    Lwt.join [read_loop flow (); write_keepalive flow (); write_update flow]
+  ;;
+
   let start s =
     let port = Key_gen.local_port () in
-    S.listen_tcpv4 s ~port (fun flow -> start_receive flow);
+    S.listen_tcpv4 s ~port (fun flow -> start_receive_passive flow);
 
-    let _ = 
+    let init_conn = 
       S.TCPV4.create_connection (S.tcpv4 s) (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
       >>= function
       | Error _ -> Rec_log.info (fun m -> m "Can't connect to remote."); Lwt.return_unit
-      | Ok flow -> start_receive flow
+      | Ok flow -> start_receive_active flow
     in
+    let timeout = 
+      OS.Time.sleep_ns (Duration.of_sec 1)
+      >>= fun () ->
+      Rec_log.info (fun m -> m "Can't connect to remote.");
+      Lwt.return_unit
+    in
+    let _ = Lwt.pick [timeout; init_conn] in
 
     loop ()
   ;;

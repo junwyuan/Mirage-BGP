@@ -48,47 +48,57 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let rec tcp_flow_reader t callback =
-    (match t.conn_starter with
-    | None -> ()
-    | Some _ -> Bgp_log.warn (fun m -> m "new flow reader when there exists another conn starter."));
-
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow -> begin
       let task () = S.TCPV4.read flow in
+      
+      let rec parse_all_msg buf = 
+        match Bgp.parse_buffer_to_t buf with
+        | None -> ()
+        | Some (Error err) ->  
+          (* TODO *)
+          Bgp_log.warn (fun m -> m "Message parsing error.");
+        | Some (Ok (msg, len)) ->
+          let event = match msg with
+          | Bgp.Open o -> Fsm.BGP_open o
+          | Bgp.Update u -> Fsm.Update_msg u
+          | Bgp.Notification e -> Fsm.Notif_msg e
+          | Bgp.Keepalive -> Fsm.Keepalive_msg
+          in
+          Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
 
-      let wrapped_callback result =
-        match result with
-        | Ok (`Data buf) -> begin
-          match Bgp.parse_buffer_to_t buf with
-          | Error err -> begin 
-            (* TODO *)
-            tcp_flow_reader t callback
-          end
-          | Ok msg ->
-            let event = match msg with
-            | Bgp.Open o -> Fsm.BGP_open o
-            | Bgp.Update u -> Fsm.Update_msg u
-            | Bgp.Notification e -> Fsm.Notif_msg e
-            | Bgp.Keepalive -> Fsm.Keepalive_msg
-            in
-            Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
+          let _ = callback event in
+          parse_all_msg (Cstruct.shift buf len)
+      in  
 
-            let _ = callback event in
-            tcp_flow_reader t callback
-        end 
-      | Error _ -> 
-        Bgp_log.debug (fun m -> m "fail to read from TCP.");
-        t.tcp_flow_reader <- None;
-        callback Fsm.Tcp_connection_fail      
-      | Ok (`Eof) -> 
-        Bgp_log.debug (fun m -> m "TCP connection closed by remote.");
-        t.tcp_flow_reader <- None;
-        callback Fsm.Tcp_connection_fail
+      let wrapped_callback read_result =
+        match read_result with
+        | Ok (`Data buf) -> 
+          let () = parse_all_msg buf in
+          tcp_flow_reader t callback
+        | Error _ -> 
+          Bgp_log.debug (fun m -> m "fail to read from TCP.");
+          t.tcp_flow_reader <- None;
+          callback Fsm.Tcp_connection_fail      
+        | Ok (`Eof) -> 
+          Bgp_log.debug (fun m -> m "TCP connection closed by remote.");
+          t.tcp_flow_reader <- None;
+          callback Fsm.Tcp_connection_fail
       in
       t.tcp_flow_reader <- Some (Device.create task wrapped_callback);
       Lwt.return_unit
     end
+  ;;
+
+  let start_tcp_flow_reader t callback = 
+    match t.tcp_flow_reader with
+    | None -> (match t.flow with
+      | None -> Bgp_log.warn (fun m -> m "new flow reader is created when no tcp flow."); Lwt.return_unit
+      | Some _ -> tcp_flow_reader t callback)
+    | Some _ -> 
+      Bgp_log.warn (fun m -> m "new flow reader is created when thee exists another flow reader."); 
+      Lwt.return_unit
   ;;
 
   let init_tcp_connection t callback =
@@ -360,6 +370,23 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list));
         loop ()
       | "show rib" ->
+        let input = 
+          match t.input_rib with
+          | None -> "No IN RIB."
+          | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib.size rib)
+        in
+
+        let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
+
+        let output = 
+          match t.output_rib with
+          | None -> "No OUT RIB"
+          | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib.size rib)
+        in
+        
+        Bgp_log.info (fun m -> m "%s" (String.concat ", " [input; loc; output]));
+        loop ()
+      | "show rib detail" ->
         (match t.input_rib with
         | None -> Bgp_log.warn (fun m -> m "No IN RIB.");
         | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)));
@@ -378,14 +405,15 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         let open Gc in
         let allocation = Printf.sprintf "Minor: %f, Promoted: %f, Major %f" 
                                 gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
-        let size = Printf.sprintf "Heap size: %d, Stack size: %d" 
+        let size = Printf.sprintf "Heap size: %d KB, Stack size: %d KB" 
                                 (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in
-        let collection = Printf.sprintf "Minor collection: %d, Major collection: %d" 
-                                gc_stat.minor_collections gc_stat.major_collections in
+        let collection = Printf.sprintf "Minor collection: %d, Major collection: %d, Compaction: %d" 
+                                gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
         Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
         
         loop ()
-      | _ -> Lwt.return_unit >>= loop
+      | _ -> 
+        Lwt.return_unit >>= loop
     in
     loop ()
   ;;

@@ -21,6 +21,7 @@ module Adj_rib : sig
   val create : remote_id -> (update -> unit Lwt.t) -> t
   val handle_update : t -> update -> unit Lwt.t
   val to_string : t -> string
+  val size : t -> int
 end = struct
   type t = {
     remote_id: remote_id;
@@ -71,6 +72,12 @@ end = struct
     in
 
     Printf.sprintf "Adj_RIB \n Remote: %s \n Prefixes: %s" (Ipaddr.V4.to_string t.remote_id) pfxs_str
+  ;;
+
+  let size t = 
+    let f _ _ acc = acc + 1 in
+    Prefix_map.fold f t.db 0
+  ;;
 end
 
 module Loc_rib : sig  
@@ -87,6 +94,7 @@ module Loc_rib : sig
   val create : t
   val handle_signal : t -> signal -> unit Lwt.t
   val to_string : t -> string
+  val size : t -> int
 end = struct
   (* Logging *)
   let rib_log = Logs.Src.create ~doc:"Loc-ocamlRIB logging" "Loc-RIB"
@@ -218,6 +226,11 @@ end = struct
     in
       
     Printf.sprintf "Loc-RIB \n Connections: %s \n Routes:  %s" subs_str pfxs_str
+  ;;
+
+  let size t = 
+    let f _ _ acc = acc + 1 in
+    Prefix_map.fold f t.db 0
   ;;
 end
 
