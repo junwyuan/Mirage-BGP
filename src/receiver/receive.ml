@@ -39,6 +39,31 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       S.TCPV4.close flow
   ;;
 
+  let rec read_loop flow = 
+    S.TCPV4.read flow
+    >>= fun read_result ->
+    let rec parse_all_msg buf = 
+      match Bgp.parse_buffer_to_t buf with
+      | None -> ()
+      | Some (Error err) ->  
+        Rec_log.warn (fun m -> m "Message parsing error.");
+      | Some (Ok (msg, len)) ->
+        Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
+        parse_all_msg (Cstruct.shift buf len)
+    in
+
+    match read_result with 
+    | Ok (`Data buf) -> 
+      parse_all_msg buf;
+      read_loop flow
+    | Error _ -> 
+      Rec_log.debug (fun m -> m "Read fail");
+      S.TCPV4.close flow
+    | Ok (`Eof) -> 
+      Rec_log.debug (fun m -> m "Connection closed");
+      S.TCPV4.close flow
+  ;;
+
   let write_tcp_msg flow = fun msg ->
     Rec_log.info (fun m -> m "send TCP message %s" (Bgp.to_string msg));
     S.TCPV4.write flow (Bgp.gen_msg msg) 
@@ -49,18 +74,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Ok _ -> Lwt.return_unit
   ;;
 
-  let rec read_loop flow = 
-    read_tcp_msg flow 
-    >>= fun () ->
-    read_loop flow
-  ;;
-
-  let rec write_keepalive flow = fun () ->
+  let rec write_keepalive flow =
     OS.Time.sleep_ns (Duration.of_sec 30) 
     >>= fun () ->
-    write_tcp_msg flow Bgp.Keepalive 
+    Lwt.catch (fun () -> write_tcp_msg flow Bgp.Keepalive) 
+              (fun _ -> Rec_log.info (fun m -> m "write exn"); Lwt.return_unit)
     >>= fun () ->
-    write_keepalive flow ()
+    write_keepalive flow
   ;;
 
   let ip4_of_ints a b c d =
@@ -80,7 +100,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let path_attrs = [
       flags, Origin IGP;
       flags, As_path [Set [2_l; 5_l; 3_l]; Seq [10_l; 20_l; 30_l]];
-      flags, Next_hop (ip4_of_ints 192 168 1 253);
+      flags, Next_hop (Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.local_id ())));
     ] in 
     let u = Update {withdrawn; path_attrs; nlri} in
     write_tcp_msg flow u
@@ -109,7 +129,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     write_tcp_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    Lwt.join [read_loop flow; write_keepalive flow (); write_update flow]
+    Lwt.join [read_loop flow; write_keepalive flow]
   ;;
 
   let start_receive_active flow =
@@ -129,7 +149,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     read_tcp_msg flow
     >>= fun () ->
-    Lwt.join [read_loop flow; write_keepalive flow (); write_update flow]
+    Lwt.join [read_loop flow; write_keepalive flow]
   ;;
 
   let start s =
@@ -139,8 +159,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let init_conn = 
       S.TCPV4.create_connection (S.tcpv4 s) (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
       >>= function
-      | Error _ -> Rec_log.info (fun m -> m "Can't connect to remote."); Lwt.return_unit
-      | Ok flow -> start_receive_active flow
+      | Error _ -> Lwt.return_unit
+      | Ok flow -> Rec_log.info (fun m -> m "Connect to remote"); start_receive_active flow
     in
     let timeout = 
       OS.Time.sleep_ns (Duration.of_sec 1)
