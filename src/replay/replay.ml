@@ -235,7 +235,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       plain_feed flow (i + 1) 
   ;;
 
-  let start_bgp flow : unit Lwt.t = 
+  let start_bgp_passive flow : unit Lwt.t = 
     let o = {
       version=4;
       my_as=Bgp.Asn (Int32.to_int (local_asn ()));
@@ -255,23 +255,41 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.join [read_loop flow; time (start_replay ~is_quick:(is_quick ()) flow)]
   ;;
 
+  let start_bgp_active flow : unit Lwt.t = 
+    let o = {
+      version=4;
+      my_as=Bgp.Asn (Int32.to_int (local_asn ()));
+      hold_time=180;
+      bgp_id = Ipaddr.V4.to_int32 (local_id ());
+      options=[]
+    } 
+    in
+    write_tcp_msg flow (Bgp.Open o)
+    >>= fun () ->
+    read_tcp_msg flow 
+    >>= fun () ->
+    write_tcp_msg flow (Bgp.Keepalive) 
+    >>= fun () ->
+    read_tcp_msg flow
+    >>= fun () ->
+    Lwt.join [read_loop flow; time (start_replay ~is_quick:(is_quick ()) flow)]
+  ;;
+
   let start s =    
-    let callback flow = start_bgp flow in
+    let callback flow = start_bgp_passive flow in
     S.listen_tcpv4 s (Key_gen.local_port ()) callback;
     
-    let init_conn = 
+    let _ = 
       S.TCPV4.create_connection (S.tcpv4 s) (remote_id (), Key_gen.remote_port ())
       >>= function
-      | Ok flow -> start_bgp flow
-      | Error _ ->  Lwt.return_unit
+      | Ok flow -> start_bgp_active flow
+      | Error err -> 
+        (match err with 
+        | `Refused -> Replay_log.info (fun m -> m "Conn refused")
+        | `Timeout -> Replay_log.info (fun m -> m "Conn timeout")
+        | _ -> ());
+        Lwt.return_unit
     in
-    let timeout = 
-      OS.Time.sleep_ns (Duration.of_sec 1)
-      >>= fun () ->
-      Replay_log.info (fun m -> m "Can't connect to remote.");
-      Lwt.return_unit
-    in
-    let _ = Lwt.pick [timeout; init_conn] in
 
     let rec loop () = 
       OS.Time.sleep_ns (Duration.of_sec 60)
