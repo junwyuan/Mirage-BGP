@@ -160,7 +160,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     read_tcp_msg flow
     >>= fun () ->
-    Lwt.join [read_loop flow; write_keepalive flow]
+    Lwt.join [
+      Lwt.catch (fun () -> read_loop flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit);
+      write_keepalive flow
+    ]
   ;;
 
   let start s =
@@ -173,7 +176,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       | Error _ -> Lwt.return_unit
       | Ok flow -> 
         Rec_log.info (fun m -> m "Connect to remote"); 
-        Lwt.catch (fun () -> start_receive_active flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit)
+        start_receive_active flow
     in
 
     loop ()
