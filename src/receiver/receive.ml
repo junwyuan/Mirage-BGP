@@ -21,7 +21,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       match Bgp.parse_buffer_to_t buf with
       | None -> ()
       | Some (Error err) ->  
-        Rec_log.warn (fun m -> m "Message parsing error.");
+        Rec_log.warn (fun m -> m "Message format error.");
       | Some (Ok (msg, len)) ->
         Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
         parse_all_msg (Cstruct.shift buf len)
@@ -50,7 +50,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         match Bgp.parse_buffer_to_t buf with
         | None -> Lwt.return_unit
         | Some (Error err) ->  
-          Rec_log.warn (fun m -> m "Message parsing error.");
+          Rec_log.warn (fun m -> m "Message format error.");
           Lwt.return_unit
         | Some (Ok (msg, len)) ->
           Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
