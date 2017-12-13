@@ -56,9 +56,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Ok (`Data buf) -> 
       parse_all_msg buf;
       read_loop flow
-    | Error _ -> 
-      Rec_log.debug (fun m -> m "Read fail");
-      S.TCPV4.close flow
+    | Error err -> 
+      (match err with 
+      | `Refused -> Rec_log.debug (fun m -> m "Read refused")
+      | `Timeout -> Rec_log.debug (fun m -> m "Read time out")
+      | _ -> ());
+      S.TCPV4.pp_error Format.err_formatter err;
+      Lwt.return_unit
     | Ok (`Eof) -> 
       Rec_log.debug (fun m -> m "Connection closed");
       S.TCPV4.close flow
@@ -68,7 +72,12 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Rec_log.info (fun m -> m "send TCP message %s" (Bgp.to_string msg));
     S.TCPV4.write flow (Bgp.gen_msg msg) 
     >>= function
-    | Error _ ->
+    | Error err ->
+      (match err with
+      | `Timeout -> Rec_log.info (fun m -> m "Write time out")
+      | `Refused -> Rec_log.info (fun m -> m "Write refused.")
+      | `Closed -> Rec_log.info (fun m -> m "Connection closed") 
+      | _ -> ());
       Rec_log.debug (fun m -> m "fail to send TCP message."); 
       S.TCPV4.close flow 
     | Ok _ -> Lwt.return_unit
