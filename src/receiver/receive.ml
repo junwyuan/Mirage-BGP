@@ -171,7 +171,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       S.TCPV4.create_connection (S.tcpv4 s) (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
       >>= function
       | Error _ -> Lwt.return_unit
-      | Ok flow -> Rec_log.info (fun m -> m "Connect to remote"); start_receive_active flow
+      | Ok flow -> 
+        Rec_log.info (fun m -> m "Connect to remote"); 
+        Lwt.catch (fun () -> start_receive_active flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit)
     in
 
     loop ()
