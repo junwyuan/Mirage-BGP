@@ -31,12 +31,15 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Ok (`Data buf) -> 
       parse_all_msg buf;
       Lwt.return_unit
-    | Error _ -> 
-      Rec_log.debug (fun m -> m "Read fail");
-      S.TCPV4.close flow
+    | Error err ->
+      (match err with 
+      | `Refused -> Rec_log.debug (fun m -> m "Read refused")
+      | `Timeout -> Rec_log.debug (fun m -> m "Read time out")
+      | _ -> ()); 
+      Lwt.return_unit
     | Ok (`Eof) -> 
       Rec_log.debug (fun m -> m "Connection closed");
-      S.TCPV4.close flow
+      Lwt.return_unit
   ;;
 
   let rec read_loop flow = 
@@ -65,7 +68,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       Lwt.return_unit
     | Ok (`Eof) -> 
       Rec_log.debug (fun m -> m "Connection closed");
-      S.TCPV4.close flow
+      Lwt.return_unit
   ;;
 
   let write_tcp_msg flow = fun msg ->
@@ -78,8 +81,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       | `Refused -> Rec_log.info (fun m -> m "Write refused.")
       | `Closed -> Rec_log.info (fun m -> m "Connection closed") 
       | _ -> ());
-      Rec_log.debug (fun m -> m "fail to send TCP message."); 
-      S.TCPV4.close flow 
+      Lwt.return_unit
     | Ok _ -> Lwt.return_unit
   ;;
 
@@ -165,19 +167,12 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let port = Key_gen.local_port () in
     S.listen_tcpv4 s ~port (fun flow -> start_receive_passive flow);
 
-    let init_conn = 
+    let _ = 
       S.TCPV4.create_connection (S.tcpv4 s) (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
       >>= function
       | Error _ -> Lwt.return_unit
       | Ok flow -> Rec_log.info (fun m -> m "Connect to remote"); start_receive_active flow
     in
-    let timeout = 
-      OS.Time.sleep_ns (Duration.of_sec 1)
-      >>= fun () ->
-      Rec_log.info (fun m -> m "Can't connect to remote.");
-      Lwt.return_unit
-    in
-    let _ = Lwt.pick [timeout; init_conn] in
 
     loop ()
   ;;
