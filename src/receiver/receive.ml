@@ -46,28 +46,32 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     S.TCPV4.read flow
     >>= fun read_result ->
     let rec parse_all_msg buf = 
-      match Bgp.parse_buffer_to_t buf with
-      | None -> ()
-      | Some (Error err) ->  
-        Rec_log.warn (fun m -> m "Message parsing error.");
-      | Some (Ok (msg, len)) ->
-        Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
-        parse_all_msg (Cstruct.shift buf len)
+      Lwt.catch (fun () ->
+        match Bgp.parse_buffer_to_t buf with
+        | None -> Lwt.return_unit
+        | Some (Error err) ->  
+          Rec_log.warn (fun m -> m "Message parsing error.");
+          Lwt.return_unit
+        | Some (Ok (msg, len)) ->
+          Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
+          parse_all_msg (Cstruct.shift buf len)
+      )
+      (fun exn -> Rec_log.info (fun m -> m "catch parsing exn"); Lwt.return_unit)
     in
 
     match read_result with 
     | Ok (`Data buf) -> 
-      parse_all_msg buf;
+      parse_all_msg buf
+      >>= fun () ->
       read_loop flow
     | Error err -> 
       (match err with 
       | `Refused -> Rec_log.debug (fun m -> m "Read refused")
       | `Timeout -> Rec_log.debug (fun m -> m "Read time out")
       | _ -> ());
-      S.TCPV4.pp_error Format.err_formatter err;
       Lwt.return_unit
     | Ok (`Eof) -> 
-      Rec_log.debug (fun m -> m "Connection closed");
+      Rec_log.debug (fun m -> m "Read: connection closed");
       Lwt.return_unit
   ;;
 
@@ -79,7 +83,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       (match err with
       | `Timeout -> Rec_log.info (fun m -> m "Write time out")
       | `Refused -> Rec_log.info (fun m -> m "Write refused.")
-      | `Closed -> Rec_log.info (fun m -> m "Connection closed") 
+      | `Closed -> Rec_log.info (fun m -> m "Write connection closed") 
       | _ -> ());
       Lwt.return_unit
     | Ok _ -> Lwt.return_unit
