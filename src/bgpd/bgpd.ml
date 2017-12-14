@@ -26,7 +26,6 @@ end
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
-
   module Id_map = Map.Make(Ipaddr.V4)
   
   type t = {
@@ -35,7 +34,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     local_asn: int;
     socket: S.t;
     mutable fsm: Fsm.t;
-    mutable listen_tcp_conn: bool;
     mutable flow: Bgp_flow.t option;
     mutable conn_retry_timer: Device.t option;
     mutable hold_timer: Device.t option;
@@ -256,9 +254,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     send_msg t (Bgp.Open o) 
   ;;
 
-  let drop_tcp_connection t =
-    t.listen_tcp_conn <- false;
-    
+  let drop_tcp_connection t =    
     (match t.conn_starter with
     | None -> ()
     | Some d -> 
@@ -289,7 +285,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Send_open_msg -> send_open_msg t
     | Send_msg msg -> send_msg t msg
     | Drop_tcp_connection -> drop_tcp_connection t
-    | Listen_tcp_connection -> t.listen_tcp_conn <- true; Lwt.return_unit
     | Start_conn_retry_timer -> 
       if (t.fsm.conn_retry_time > 0) then begin
         let callback () =
@@ -420,8 +415,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
       let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
       let dev5 = if not (t.tcp_flow_reader = None) then "Flow reader" else "" in 
-      let dev6 = if (t.listen_tcp_conn) then "Listen tcp conneciton." else "" in 
-      let str_list = List.filter (fun x -> not (x = "")) ["Running device:"; dev1; dev2; dev3; dev4; dev5; dev6] in
+      let str_list = List.filter (fun x -> not (x = "")) ["Running device:"; dev1; dev2; dev3; dev4; dev5] in
       Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list));
       loop t
     | "show rib" ->
@@ -477,7 +471,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let t = {
       remote_id; local_id; local_asn; 
       socket; fsm; flow;
-      listen_tcp_conn = false; 
       conn_retry_timer = None; 
       hold_timer = None; 
       keepalive_timer = None;

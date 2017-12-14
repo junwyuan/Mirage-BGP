@@ -55,7 +55,6 @@ let event_to_string = function
 
 type action =
 | Initiate_tcp_connection
-| Listen_tcp_connection
 | Drop_tcp_connection
 | Send_open_msg
 | Send_msg of Bgp.t
@@ -122,7 +121,7 @@ let set_keepalive_time time t = {
 
 let handle_idle fsm = function
   | Manual_start -> 
-    let actions = [Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
+    let actions = [Start_conn_retry_timer; Initiate_tcp_connection] in
     let new_fsm = fsm 
       |> set_state CONNECT 
       |> set_conn_retry_counter 0 
@@ -141,7 +140,7 @@ let handle_connect fsm = function
     in
     (new_fsm, actions)
   | Connection_retry_timer_expired ->
-    let actions = [Drop_tcp_connection; Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
+    let actions = [Drop_tcp_connection; Start_conn_retry_timer; Initiate_tcp_connection] in
     let new_fsm = fsm |> set_state CONNECT in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
@@ -171,7 +170,7 @@ let handle_active fsm = function
     in
     (new_fsm, actions)
   | Connection_retry_timer_expired ->
-    let actions = [Start_conn_retry_timer; Initiate_tcp_connection; Listen_tcp_connection] in
+    let actions = [Start_conn_retry_timer; Initiate_tcp_connection] in
     let new_fsm = fsm |> set_state CONNECT in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
@@ -215,7 +214,7 @@ let handle_open_sent fsm = function
     in
     (new_fsm, actions)
   | Tcp_connection_fail ->
-    let actions = [Drop_tcp_connection; Start_conn_retry_timer; Listen_tcp_connection] in
+    let actions = [Drop_tcp_connection; Start_conn_retry_timer] in
     let new_fsm = fsm |> set_state ACTIVE in
     (new_fsm, actions)
   | BGP_open o ->
