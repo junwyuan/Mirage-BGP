@@ -5,7 +5,4 @@ PKG magic-mime mirage-types-lwt duration
 PKG cstruct.ppx
 
 S **/
-S **/lib/**
-
-B **/_build/lib/**
 B **/_build/**
