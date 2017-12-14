@@ -11,8 +11,13 @@ let remote_port =
 ;;
 
 let local_id = 
-  let doc = Key.Arg.info ~doc:"This is the bgp identifier, i.e. ip address." ["local_id"] in
+  let doc = Key.Arg.info ~doc:"This is local bgp identifier, i.e. ip address." ["local_id"] in
   Key.(create "local_id" Arg.(opt string "172.19.0.3" doc))
+;;
+
+let local_port = 
+  let doc = Key.Arg.info ~doc:"This is the local bgp speaker's port." ["local_port"] in
+  Key.(create "local_port" Arg.(opt int 179 doc))
 ;;
 
 let local_asn = 
@@ -20,7 +25,10 @@ let local_asn =
   Key.(create "local_asn" Arg.(opt int 2 doc))
 ;;
 
-let main = foreign ~keys:[Key.abstract remote_id; Key.abstract local_id; Key.abstract local_asn; Key.abstract remote_port]  "Bgpd.Main" (stackv4 @-> job)
+let main = foreign 
+           ~keys:[Key.abstract remote_id; Key.abstract local_id; Key.abstract local_asn; 
+                 Key.abstract local_port; Key.abstract remote_port]  
+           "Bgpd.Main" (stackv4 @-> job)
 
 let stack = generic_stackv4 default_network
 

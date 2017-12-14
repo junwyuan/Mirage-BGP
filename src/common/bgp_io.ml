@@ -21,6 +21,7 @@ module type S = sig
   val read : t -> (Bgp.t, read_error) Result.result Lwt.t
   val write : t -> Bgp.t -> (unit, write_error) Result.result Lwt.t
   val close : t -> unit Lwt.t
+  val dst : t -> Ipaddr.V4.t * int
 end
 
 let io_log = Logs.Src.create "IO" ~doc:"IO LOG"
@@ -114,4 +115,6 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   ;;
 
   let close t = S.TCPV4.close t.flow
+
+  let dst t = S.TCPV4.dst t.flow
 end

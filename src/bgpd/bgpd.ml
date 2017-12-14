@@ -26,6 +26,8 @@ end
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
+
+  module Id_map = Map.Make(Ipaddr.V4)
   
   type t = {
     remote_id: Ipaddr.V4.t;
@@ -33,8 +35,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     local_asn: int;
     socket: S.t;
     mutable fsm: Fsm.t;
-    mutable flow: Bgp_flow.t option;
     mutable listen_tcp_conn: bool;
+    mutable flow: Bgp_flow.t option;
     mutable conn_retry_timer: Device.t option;
     mutable hold_timer: Device.t option;
     mutable keepalive_timer: Device.t option;
@@ -44,6 +46,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     mutable output_rib: Rib.Adj_rib.t option;
     mutable loc_rib: Rib.Loc_rib.t;
   }
+
+  type id_map = t Id_map.t
 
   let create_timer time callback : Device.t =
     Device.create (fun () -> OS.Time.sleep_ns (Duration.of_sec time)) callback
@@ -97,40 +101,69 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let init_tcp_connection t callback =
-    (match t.conn_starter with
-    | None -> ()
-    | Some _ -> Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter."));
-
-    match t.flow with
-    | Some _ -> 
+    Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
+    if not (t.conn_starter = None) then begin
+      Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter.");
+      Lwt.return_unit
+    end
+    else if not (t.flow = None) then begin
       Bgp_log.warn (fun m -> m "new connection is initiated when there exists an old connection.");
       Lwt.return_unit
-    | None -> begin
+    end
+    else begin
       let task = fun () ->
-        Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
         Bgp_flow.create_connection t.socket (t.remote_id, Key_gen.remote_port ())
       in
-      let wrapped_callback = function
+      let wrapped_callback result =
+        t.conn_starter <- None;
+        match result with
         | Error err ->
           (match err with
-          | `Timeout -> Bgp_log.debug (fun m -> m "Write timeout.")
-          | `Refused -> Bgp_log.debug (fun m -> m "Write refused.")
+          | `Timeout -> Bgp_log.debug (fun m -> m "Connection init timeout.")
+          | `Refused -> Bgp_log.debug (fun m -> m "Connection init refused.")
           | _ -> ());
-
-          t.conn_starter <- None;
+          
           callback (Fsm.Tcp_connection_fail)
         | Ok flow -> begin
-          match t.flow with
-          | None ->
-            Bgp_log.debug (fun m -> m "Connect to remote %s:%d." (Ipaddr.V4.to_string (t.remote_id)) (Key_gen.remote_port ()));
-            t.flow <- Some flow;
-            t.conn_starter <- None;
-            callback Fsm.Tcp_CR_Acked
+          Bgp_log.debug (fun m -> m "Connected to remote %s" (Ipaddr.V4.to_string t.remote_id));
+          let connection = t in
+          let open Fsm in
+          match connection.fsm.state with
+          | IDLE -> 
+            Bgp_log.debug (fun m -> m "Drop connection to remote %s because fsm is at IDLE" (Ipaddr.V4.to_string t.remote_id));
+            Bgp_flow.close flow
+          | CONNECT ->
+            connection.flow <- Some flow;
+            callback Tcp_CR_Acked
             >>= fun () ->
-            flow_reader t callback
-          | Some _ -> 
-            Bgp_log.warn (fun m -> m "new connection is established when there exists an old connection. Discard new connection");
-            t.conn_starter <- None;
+            flow_reader connection callback
+          | ACTIVE ->
+            connection.flow <- Some flow;
+            callback Tcp_CR_Acked
+            >>= fun () ->
+            flow_reader connection callback
+          | OPEN_SENT | OPEN_CONFIRMED -> 
+            if (Ipaddr.V4.compare connection.local_id connection.remote_id < 0) then begin
+              Bgp_log.debug (fun m -> m "Connection collision detected and dump new connection.");
+              Bgp_flow.close flow
+            end
+            else begin
+              Bgp_log.debug (fun m -> m "Connection collision detected and dump existing connection.");
+              callback Open_collision_dump
+              >>= fun () ->
+              let new_fsm = {
+                state = CONNECT;
+                conn_retry_counter = connection.fsm.conn_retry_counter;
+                conn_retry_time = connection.fsm.conn_retry_time;
+                hold_time = connection.fsm.hold_time;
+                keepalive_time = connection.fsm.keepalive_time;
+              } in
+              connection.flow <- Some flow;
+              connection.fsm <- new_fsm;
+              callback Tcp_CR_Acked
+            end
+          | ESTABLISHED -> 
+            Bgp_log.debug (fun m -> m "Connection collision detected and dump new connection.");
             Bgp_flow.close flow
         end
       in
@@ -139,18 +172,57 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     end
   ;;      
 
-  let listen_tcp_connection t callback =
+  let listen_tcp_connection s id_map callback =
     let on_connect flow =
-      if (t.listen_tcp_conn) then begin
-        Bgp_log.debug (fun m -> m "accept incoming TCP connection from peer.");
-        t.flow <- Some flow;
-        callback Fsm.Tcp_connection_confirmed
-        >>= fun () ->
-        flow_reader t callback
+      let remote_id, _ = Bgp_flow.dst flow in
+      Bgp_log.debug (fun m -> m "receive incoming connection from remote %s" (Ipaddr.V4.to_string remote_id));
+      match Id_map.mem remote_id id_map with
+      | false -> 
+        Bgp_log.debug (fun m -> m "Refuse connection because remote id %s is unknown." (Ipaddr.V4.to_string remote_id));
+        Bgp_flow.close flow
+      | true -> begin
+        let connection = Id_map.find remote_id id_map in
+        let open Fsm in
+        match connection.fsm.state with
+        | IDLE -> 
+          Bgp_log.debug (fun m -> m "Refuse connection %s because fsm is at IDLE." (Ipaddr.V4.to_string remote_id));
+          Bgp_flow.close flow
+        | CONNECT ->
+          connection.flow <- Some flow;
+          callback connection Tcp_connection_confirmed
+          >>= fun () ->
+          flow_reader connection (callback connection)
+        | ACTIVE ->
+          connection.flow <- Some flow;
+          callback connection Tcp_connection_confirmed
+          >>= fun () ->
+          flow_reader connection (callback connection)
+        | OPEN_SENT | OPEN_CONFIRMED -> 
+          if (Ipaddr.V4.compare connection.local_id connection.remote_id > 0) then begin
+            Bgp_log.debug (fun m -> m "Collision detected and dump new connection.");
+            Bgp_flow.close flow
+          end
+          else begin
+            Bgp_log.debug (fun m -> m "Collision detected and dump existing connection.");
+            callback connection Open_collision_dump
+            >>= fun () ->
+            let new_fsm = {
+              state = CONNECT;
+              conn_retry_counter = connection.fsm.conn_retry_counter;
+              conn_retry_time = connection.fsm.conn_retry_time;
+              hold_time = connection.fsm.hold_time;
+              keepalive_time = connection.fsm.keepalive_time;
+            } in
+            connection.flow <- Some flow;
+            connection.fsm <- new_fsm;
+            callback connection Tcp_connection_confirmed
+          end
+        | ESTABLISHED -> 
+          Bgp_log.debug (fun m -> m "Connection collision detected and dump new connection.");
+          Bgp_flow.close flow
       end
-      else Lwt.return_unit (* Silently quit *)
     in
-    Bgp_flow.listen t.socket 50001 on_connect
+    Bgp_flow.listen s (Key_gen.local_port ()) on_connect
   ;;
                     
   let send_msg t msg = 
@@ -161,11 +233,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       >>= begin function
       | Error err ->
         (match err with
-        | `Timeout -> Bgp_log.debug (fun m -> m "Write time out")
-        | `Refused -> Bgp_log.debug (fun m -> m "Write refused.")
-        | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when write.") 
+        | `Timeout -> Bgp_log.debug (fun m -> m "Timeout when write %s" (Bgp.to_string msg))
+        | `Refused -> Bgp_log.debug (fun m -> m "Refused when Write %s" (Bgp.to_string msg))
+        | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when write %s." (Bgp.to_string msg)) 
         | _ -> ());
-        Bgp_log.debug (fun m -> m "fail to send TCP message %s" (Bgp.to_string msg));
         Lwt.return_unit
       | Ok () -> Lwt.return_unit
       end    
@@ -223,7 +294,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       if (t.fsm.conn_retry_time > 0) then begin
         let callback () =
           t.conn_retry_timer <- None;
-          Bgp_log.info (fun m -> m "TCP connection timeouts.");
           handle_event t Connection_retry_timer_expired
         in
         t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
@@ -241,7 +311,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       if (t.fsm.conn_retry_time > 0) then begin
         let callback () =
           t.conn_retry_timer <- None;
-          Bgp_log.info (fun m -> m "connection retry timer expired.");
           handle_event t Connection_retry_timer_expired
         in
         t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
@@ -322,7 +391,87 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
+  let rec loop t =
+    Lwt_io.read_line Lwt_io.stdin
+    >>= function
+    | "start" -> 
+      Bgp_log.info (fun m -> m "BGP starts.");
+      handle_event t (Fsm.Manual_start) 
+      >>= fun () -> 
+      loop t
+    | "stop" -> 
+      Bgp_log.info (fun m -> m "BGP stops.");
+      handle_event t (Fsm.Manual_stop)
+      >>= fun () ->
+      loop t
+    | "exit" -> 
+      handle_event t (Fsm.Manual_stop)
+      >>= fun () ->
+      Bgp_log.info (fun m -> m "BGP exits.");
+      S.disconnect t.socket
+      >>= fun () ->
+      Lwt.return_unit
+    | "show fsm" ->
+      Bgp_log.info (fun m -> m "status: %s" (Fsm.to_string t.fsm));
+      loop t
+    | "show device" ->
+      let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
+      let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
+      let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
+      let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
+      let dev5 = if not (t.tcp_flow_reader = None) then "Flow reader" else "" in 
+      let dev6 = if (t.listen_tcp_conn) then "Listen tcp conneciton." else "" in 
+      let str_list = List.filter (fun x -> not (x = "")) ["Running device:"; dev1; dev2; dev3; dev4; dev5; dev6] in
+      Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list));
+      loop t
+    | "show rib" ->
+      let input = 
+        match t.input_rib with
+        | None -> "No IN RIB."
+        | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib.size rib)
+      in
+
+      let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
+
+      let output = 
+        match t.output_rib with
+        | None -> "No OUT RIB"
+        | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib.size rib)
+      in
+      
+      Bgp_log.info (fun m -> m "%s" (String.concat ", " [input; loc; output]));
+      loop t
+    | "show rib detail" ->
+      (match t.input_rib with
+      | None -> Bgp_log.warn (fun m -> m "No IN RIB.");
+      | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)));
+
+      Bgp_log.info (fun m -> m "%s" (Rib.Loc_rib.to_string t.loc_rib));
+
+      (match t.output_rib with
+      | None -> Bgp_log.warn (fun m -> m "No OUT RIB.");
+      | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)));
+      
+      loop t
+    | "show gc" ->
+      let word_to_KB ws = ws * 8 / 1024 in
+
+      let gc_stat = Gc.stat () in
+      let open Gc in
+      let allocation = Printf.sprintf "Minor: %.0f, Promoted: %.0f, Major %.0f" 
+                              gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
+      let size = Printf.sprintf "Heap size: %d KB, Stack size: %d KB" 
+                              (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in
+      let collection = Printf.sprintf "Minor collection: %d, Major collection: %d, Compaction: %d" 
+                              gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
+      Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
+      
+      loop t
+    | _ -> loop t
+  ;;
+
   let start_bgp remote_id local_id local_asn socket =
+
     let fsm = Fsm.create 30 45 15 in
     let flow = None in
     let t = {
@@ -339,86 +488,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       loc_rib = Rib.Loc_rib.create;
     } in
 
+
+    let id_map = Id_map.add t.remote_id t Id_map.empty in
+
     (* Start listening to BGP port. *)
-    listen_tcp_connection t (handle_event t);
+    listen_tcp_connection socket id_map handle_event;
 
-    (* This is the command loop *)
-    let rec loop () =
-      Lwt_io.read_line Lwt_io.stdin
-      >>= function
-      | "start" -> 
-        Bgp_log.info (fun m -> m "BGP starts.");
-        handle_event t (Fsm.Manual_start) >>= loop
-      | "stop" -> 
-        Bgp_log.info (fun m -> m "BGP stops.");
-        handle_event t (Fsm.Manual_stop) >>= loop
-      | "exit" -> 
-        handle_event t (Fsm.Manual_stop)
-        >>= fun () ->
-        Bgp_log.info (fun m -> m "BGP exits.");
-        S.disconnect socket
-        >>= fun () ->
-        Lwt.return_unit
-      | "show fsm" ->
-        Bgp_log.info (fun m -> m "status: %s" (Fsm.to_string t.fsm));
-        loop ()
-      | "show device" ->
-        let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
-        let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
-        let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
-        let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
-        let dev5 = if not (t.tcp_flow_reader = None) then "Flow reader" else "" in 
-        let dev6 = if (t.listen_tcp_conn) then "Listen tcp conneciton." else "" in 
-        let str_list = List.filter (fun x -> not (x = "")) ["Running device:"; dev1; dev2; dev3; dev4; dev5; dev6] in
-        Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list));
-        loop ()
-      | "show rib" ->
-        let input = 
-          match t.input_rib with
-          | None -> "No IN RIB."
-          | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib.size rib)
-        in
-
-        let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
-
-        let output = 
-          match t.output_rib with
-          | None -> "No OUT RIB"
-          | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib.size rib)
-        in
-        
-        Bgp_log.info (fun m -> m "%s" (String.concat ", " [input; loc; output]));
-        loop ()
-      | "show rib detail" ->
-        (match t.input_rib with
-        | None -> Bgp_log.warn (fun m -> m "No IN RIB.");
-        | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)));
-
-        Bgp_log.info (fun m -> m "%s" (Rib.Loc_rib.to_string t.loc_rib));
-
-        (match t.output_rib with
-        | None -> Bgp_log.warn (fun m -> m "No OUT RIB.");
-        | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)));
-        
-        loop ()
-      | "show gc" ->
-        let word_to_KB ws = ws * 8 / 1024 in
-
-        let gc_stat = Gc.stat () in
-        let open Gc in
-        let allocation = Printf.sprintf "Minor: %.0f, Promoted: %.0f, Major %.0f" 
-                                gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
-        let size = Printf.sprintf "Heap size: %d KB, Stack size: %d KB" 
-                                (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in
-        let collection = Printf.sprintf "Minor collection: %d, Major collection: %d, Compaction: %d" 
-                                gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
-        Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
-        
-        loop ()
-      | _ -> 
-        Lwt.return_unit >>= loop
-    in
-    loop ()
+    loop t
   ;;
 
   let start s =

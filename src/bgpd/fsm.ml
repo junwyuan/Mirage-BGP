@@ -26,6 +26,7 @@ type event =
 | BGP_open of Bgp.opent
 | Bgp_header_err of Bgp.message_header_error
 | Bgp_open_msg_err of Bgp.open_message_error
+| Open_collision_dump
 | Notif_msg_ver_err
 | Notif_msg of Bgp.msg_fmt_error
 | Keepalive_msg
@@ -44,12 +45,12 @@ let event_to_string = function
 | BGP_open o -> Printf.sprintf "BGP OPEN: %s" (Bgp.opent_to_string o)
 | Bgp_header_err _ -> "BGP Header err"
 | Bgp_open_msg_err _ -> "Open Message err"
+| Open_collision_dump -> "Open collision dump"
 | Notif_msg_ver_err -> "Notif version error"
 | Notif_msg e -> Printf.sprintf "Notif msg: %s" (Bgp.to_string (Bgp.Notification e))
 | Keepalive_msg -> Printf.sprintf "Keepalive msg"
 | Update_msg u -> Printf.sprintf "Update msg: %s" (Bgp.update_to_string u)
 | Update_msg_err _ -> "Update msg err"
-
 
 
 type action =
@@ -174,7 +175,11 @@ let handle_active fsm = function
     let new_fsm = fsm |> set_state CONNECT in
     (new_fsm, actions)
   | Tcp_CR_Acked | Tcp_connection_confirmed ->
-    let actions = [Send_open_msg; Start_hold_timer 240] in
+    let actions = [
+      Send_open_msg;
+      Stop_conn_retry_timer;
+      Start_hold_timer 240
+    ] in
     let new_fsm = fsm |> set_state OPEN_SENT in
     (new_fsm, actions)
   | Tcp_connection_fail ->
@@ -233,6 +238,17 @@ let handle_open_sent fsm = function
     let new_fsm = fsm 
       |> set_state IDLE 
       |> set_conn_retry_counter (fsm.conn_retry_counter + 1) 
+    in
+    (new_fsm, actions)
+  | Open_collision_dump ->
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Cease);
+      Stop_conn_retry_timer;
+      Drop_tcp_connection;
+    ] in
+    let new_fsm = fsm
+      |> set_state IDLE 
+      |> set_conn_retry_counter (fsm.conn_retry_counter + 1)
     in
     (new_fsm, actions)
   | Notif_msg_ver_err ->
@@ -303,6 +319,19 @@ let handle_open_confirmed fsm = function
       Drop_tcp_connection
     ] in
     let new_fsm = fsm |> set_state IDLE in
+    (new_fsm, actions)
+  | Open_collision_dump ->
+    let actions = [
+      Send_msg (Bgp.Notification Bgp.Cease);
+      Stop_conn_retry_timer;
+      Stop_hold_timer;
+      Stop_keepalive_timer;
+      Drop_tcp_connection;
+    ] in
+    let new_fsm = fsm
+      |> set_state IDLE 
+      |> set_conn_retry_counter (fsm.conn_retry_counter + 1)
+    in
     (new_fsm, actions)
   | Keepalive_msg ->
     let actions = [Reset_hold_timer fsm.hold_time; Initiate_rib] in
@@ -413,14 +442,5 @@ let to_string t =
                 state_msg t.conn_retry_counter t.conn_retry_time t.hold_time t.keepalive_time
 ;;
   
-
-
-
-
-
-
-
-
-    
-
+let state t = t.state
 
