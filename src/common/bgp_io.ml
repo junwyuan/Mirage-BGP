@@ -64,7 +64,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
     let parse t b =
       let msg_len = Bgp.get_h_len b in
       let msg_buf, rest = Cstruct.split b msg_len in
-      if Cstruct.len rest > 0 then t.buf <- Some rest;
+      if Cstruct.len rest > 0 then t.buf <- Some rest else t.buf <- None;
       let parsed = Bgp.parse_buffer_to_t msg_buf in
       match parsed with 
       | Result.Ok msg -> Lwt.return (Ok msg)

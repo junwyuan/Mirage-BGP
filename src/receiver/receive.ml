@@ -15,13 +15,15 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Rec_log.info (fun m -> m "execution time: %fs\n" (Sys.time() -. t));
     Lwt.return_unit
   ;;
-  
+  let count = ref 0
+
   let read_tcp_base flow callback = 
     Bgp_flow.read flow
     >>= fun read_result ->
     match read_result with 
     | Ok msg -> 
-      Rec_log.info (fun m -> m "Receive: %s" (Bgp.to_string msg));
+      count := !count + 1;
+      Rec_log.info (fun m -> m "Receive pkg %d: %s" (!count) (Bgp.to_string msg));
       callback ()
     | Error err ->
       (match err with 
@@ -96,6 +98,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start_receive_passive flow =
+    Rec_log.info (fun m -> m "Accept incoming connection from remote.");
     read_flow_once flow
     >>= fun () ->
     let open Bgp in
@@ -130,10 +133,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     write_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    read_flow_loop flow
+    read_flow_once flow
     >>= fun () ->
     Lwt.join [
-      Lwt.catch (fun () -> read_flow_once flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit);
+      Lwt.catch (fun () -> read_flow_loop flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit);
       write_keepalive flow
     ]
   ;;
