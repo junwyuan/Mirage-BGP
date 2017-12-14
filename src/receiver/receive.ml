@@ -54,7 +54,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       | `Refused -> Rec_log.info (fun m -> m "Write refused.")
       | `Closed -> Rec_log.info (fun m -> m "Connection closed when write.") 
       | _ -> ());
-      Lwt.return_unit
+      Lwt.fail_with "TCP FAIL"
     | Ok _ -> Lwt.return_unit
   ;;
 
