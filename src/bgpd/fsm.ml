@@ -27,7 +27,7 @@ type event =
 | Bgp_header_err of Bgp.message_header_error
 | Bgp_open_msg_err of Bgp.open_message_error
 | Notif_msg_ver_err
-| Notif_msg of Bgp.error
+| Notif_msg of Bgp.msg_fmt_error
 | Keepalive_msg
 | Update_msg of Bgp.update
 | Update_msg_err of Bgp.update_message_error

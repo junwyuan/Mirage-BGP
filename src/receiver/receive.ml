@@ -6,6 +6,8 @@ let rec_log = Logs.Src.create "receiver" ~doc:"Receiver log"
 module Rec_log = (val Logs.src_log rec_log : Logs.LOG)
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
+  module Bgp_flow = Bgp_io.Make(S)
+
   let start_time = Unix.gettimeofday ();;
   let time f c =
     let t = Sys.time () in
@@ -14,76 +16,43 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
   
-  let read_tcp_msg flow = 
-    S.TCPV4.read flow
+  let read_tcp_base flow callback = 
+    Bgp_flow.read flow
     >>= fun read_result ->
-    let rec parse_all_msg buf = 
-      match Bgp.parse_buffer_to_t buf with
-      | None -> ()
-      | Some (Error err) ->  
-        Rec_log.warn (fun m -> m "Message format error.");
-      | Some (Ok (msg, len)) ->
-        Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
-        parse_all_msg (Cstruct.shift buf len)
-    in
-
     match read_result with 
-    | Ok (`Data buf) -> 
-      parse_all_msg buf;
-      Lwt.return_unit
+    | Ok msg -> 
+      Rec_log.info (fun m -> m "Receive: %s" (Bgp.to_string msg));
+      callback ()
     | Error err ->
       (match err with 
       | `Refused -> Rec_log.debug (fun m -> m "Read refused")
-      | `Timeout -> Rec_log.debug (fun m -> m "Read time out")
+      | `Timeout -> Rec_log.debug (fun m -> m "Read timeout")
+      | `Closed -> Rec_log.debug (fun m -> m "Connection closed when read.")
+      | `BGP_MSG_ERR err ->
+        (match err with
+        | Bgp.Parsing_error -> Rec_log.debug (fun m -> m "Parsing error")
+        | _ -> Rec_log.debug (fun m -> m "Msg format error"))
       | _ -> ()); 
       Lwt.return_unit
-    | Ok (`Eof) -> 
-      Rec_log.debug (fun m -> m "Connection closed");
-      Lwt.return_unit
   ;;
 
-  let rec read_loop flow = 
-    S.TCPV4.read flow
-    >>= fun read_result ->
-    let rec parse_all_msg buf = 
-      Lwt.catch (fun () ->
-        match Bgp.parse_buffer_to_t buf with
-        | None -> Lwt.return_unit
-        | Some (Error err) ->  
-          Rec_log.warn (fun m -> m "Message format error.");
-          Lwt.return_unit
-        | Some (Ok (msg, len)) ->
-          Rec_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
-          parse_all_msg (Cstruct.shift buf len)
-      )
-      (fun exn -> Rec_log.info (fun m -> m "catch parsing exn"); Lwt.return_unit)
-    in
-
-    match read_result with 
-    | Ok (`Data buf) -> 
-      parse_all_msg buf
-      >>= fun () ->
-      read_loop flow
-    | Error err -> 
-      (match err with 
-      | `Refused -> Rec_log.debug (fun m -> m "Read refused")
-      | `Timeout -> Rec_log.debug (fun m -> m "Read time out")
-      | _ -> ());
-      Lwt.return_unit
-    | Ok (`Eof) -> 
-      Rec_log.debug (fun m -> m "Read: connection closed");
-      Lwt.return_unit
+  let read_flow_once flow = 
+    read_tcp_base flow (fun () -> Lwt.return_unit)
   ;;
 
-  let write_tcp_msg flow = fun msg ->
+  let rec read_flow_loop flow = 
+    read_tcp_base flow (fun () -> read_flow_loop flow)
+  ;;
+
+  let write_msg flow = fun msg ->
     Rec_log.info (fun m -> m "send TCP message %s" (Bgp.to_string msg));
-    S.TCPV4.write flow (Bgp.gen_msg msg) 
+    Bgp_flow.write flow msg 
     >>= function
     | Error err ->
       (match err with
       | `Timeout -> Rec_log.info (fun m -> m "Write time out")
       | `Refused -> Rec_log.info (fun m -> m "Write refused.")
-      | `Closed -> Rec_log.info (fun m -> m "Write connection closed") 
+      | `Closed -> Rec_log.info (fun m -> m "Connection closed when write.") 
       | _ -> ());
       Lwt.return_unit
     | Ok _ -> Lwt.return_unit
@@ -92,8 +61,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let rec write_keepalive flow =
     OS.Time.sleep_ns (Duration.of_sec 30) 
     >>= fun () ->
-    Lwt.catch (fun () -> write_tcp_msg flow Bgp.Keepalive) 
-              (fun _ -> Rec_log.info (fun m -> m "write exn"); Lwt.return_unit)
+    write_msg flow Bgp.Keepalive
     >>= fun () ->
     write_keepalive flow
   ;;
@@ -118,7 +86,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       flags, Next_hop (Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.local_id ())));
     ] in 
     let u = Update {withdrawn; path_attrs; nlri} in
-    write_tcp_msg flow u
+    write_msg flow u
   ;;
 
   let rec loop () = 
@@ -128,7 +96,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start_receive_passive flow =
-    read_tcp_msg flow
+    read_flow_once flow
     >>= fun () ->
     let open Bgp in
     let o = {
@@ -138,13 +106,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       options = [];
       hold_time = 180;
     } in
-    write_tcp_msg flow (Bgp.Open o)
+    write_msg flow (Bgp.Open o)
     >>= fun () ->
-    read_tcp_msg flow
+    read_flow_once flow
     >>= fun () ->
-    write_tcp_msg flow (Bgp.Keepalive)
+    write_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    Lwt.join [read_loop flow; write_keepalive flow]
+    Lwt.join [read_flow_loop flow; write_keepalive flow]
   ;;
 
   let start_receive_active flow =
@@ -156,28 +124,33 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       options = [];
       hold_time = 180;
     } in
-    write_tcp_msg flow (Bgp.Open o)
+    write_msg flow (Bgp.Open o)
     >>= fun () ->
-    read_tcp_msg flow 
+    read_flow_once flow 
     >>= fun () ->
-    write_tcp_msg flow (Bgp.Keepalive)
+    write_msg flow (Bgp.Keepalive)
     >>= fun () ->
-    read_tcp_msg flow
+    read_flow_loop flow
     >>= fun () ->
     Lwt.join [
-      Lwt.catch (fun () -> read_loop flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit);
+      Lwt.catch (fun () -> read_flow_once flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit);
       write_keepalive flow
     ]
   ;;
 
   let start s =
     let port = Key_gen.local_port () in
-    S.listen_tcpv4 s ~port (fun flow -> start_receive_passive flow);
+    Bgp_flow.listen s port (fun flow -> start_receive_passive flow);
 
     let _ = 
-      S.TCPV4.create_connection (S.tcpv4 s) (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
+      Bgp_flow.create_connection s (Ipaddr.V4.of_string_exn (Key_gen.remote_id ()), Key_gen.remote_port ())
       >>= function
-      | Error _ -> Lwt.return_unit
+      | Error err -> 
+        (match err with
+        | `Timeout -> Rec_log.info (fun m -> m "Conn timeout")
+        | `Refused -> Rec_log.info (fun m -> m "Conn refused")
+        | _ -> ());
+        Lwt.return_unit
       | Ok flow -> 
         Rec_log.info (fun m -> m "Connect to remote"); 
         start_receive_active flow

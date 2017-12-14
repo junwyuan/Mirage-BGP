@@ -25,13 +25,15 @@ module Device = struct
 end
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
+  module Bgp_flow = Bgp_io.Make(S)
+  
   type t = {
     remote_id: Ipaddr.V4.t;
     local_id: Ipaddr.V4.t;
     local_asn: int;
     socket: S.t;
     mutable fsm: Fsm.t;
-    mutable flow: S.TCPV4.flow option;
+    mutable flow: Bgp_flow.t option;
     mutable listen_tcp_conn: bool;
     mutable conn_retry_timer: Device.t option;
     mutable hold_timer: Device.t option;
@@ -47,19 +49,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Device.create (fun () -> OS.Time.sleep_ns (Duration.of_sec time)) callback
   ;;
 
-  let rec tcp_flow_reader t callback =
+  let rec flow_reader t callback =
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow -> begin
-      let task () = S.TCPV4.read flow in
-      
-      let rec parse_all_msg buf = 
-        match Bgp.parse_buffer_to_t buf with
-        | None -> ()
-        | Some (Error err) ->  
-          (* TODO *)
-          Bgp_log.warn (fun m -> m "Message parsing error.");
-        | Some (Ok (msg, len)) ->
+      let task () = Bgp_flow.read flow in
+      let wrapped_callback read_result =
+        match read_result with
+        | Ok msg -> 
           let event = match msg with
           | Bgp.Open o -> Fsm.BGP_open o
           | Bgp.Update u -> Fsm.Update_msg u
@@ -67,22 +64,20 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           | Bgp.Keepalive -> Fsm.Keepalive_msg
           in
           Bgp_log.info (fun m -> m "receive message %s" (Bgp.to_string msg));
-
           let _ = callback event in
-          parse_all_msg (Cstruct.shift buf len)
-      in  
-
-      let wrapped_callback read_result =
-        match read_result with
-        | Ok (`Data buf) -> 
-          let () = parse_all_msg buf in
-          tcp_flow_reader t callback
-        | Error _ -> 
-          Bgp_log.debug (fun m -> m "fail to read from TCP.");
-          t.tcp_flow_reader <- None;
-          callback Fsm.Tcp_connection_fail      
-        | Ok (`Eof) -> 
-          Bgp_log.debug (fun m -> m "TCP connection closed by remote.");
+          flow_reader t callback
+        | Error err ->
+          let open Bgp_flow in
+          (match err with
+          | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when read.")
+          | `Refused -> Bgp_log.debug (fun m -> m "Read refused.");
+          | `Timeout -> Bgp_log.debug (fun m -> m "Read timeout.");
+          | `BGP_MSG_ERR err -> begin
+            match err with
+            | Bgp.Parsing_error -> Bgp_log.warn (fun m -> m "Message parsing error")
+            | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> Bgp_log.warn (fun m -> m "Message format error")
+          end
+          | _ -> ());
           t.tcp_flow_reader <- None;
           callback Fsm.Tcp_connection_fail
       in
@@ -95,7 +90,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     match t.tcp_flow_reader with
     | None -> (match t.flow with
       | None -> Bgp_log.warn (fun m -> m "new flow reader is created when no tcp flow."); Lwt.return_unit
-      | Some _ -> tcp_flow_reader t callback)
+      | Some _ -> flow_reader t callback)
     | Some _ -> 
       Bgp_log.warn (fun m -> m "new flow reader is created when thee exists another flow reader."); 
       Lwt.return_unit
@@ -113,26 +108,30 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | None -> begin
       let task = fun () ->
         Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
-        S.TCPV4.create_connection (S.tcpv4 t.socket) (t.remote_id, Key_gen.remote_port ())
+        Bgp_flow.create_connection t.socket (t.remote_id, Key_gen.remote_port ())
       in
       let wrapped_callback = function
-        | Error _ -> 
-          Bgp_log.debug (fun m -> m "fail to set up TCP connection.");
+        | Error err ->
+          (match err with
+          | `Timeout -> Bgp_log.debug (fun m -> m "Write timeout.")
+          | `Refused -> Bgp_log.debug (fun m -> m "Write refused.")
+          | _ -> ());
+
           t.conn_starter <- None;
           callback (Fsm.Tcp_connection_fail)
         | Ok flow -> begin
           match t.flow with
           | None ->
-            Bgp_log.debug (fun m -> m "TCP connection succeeds.");
+            Bgp_log.debug (fun m -> m "Connect to remote %s:%d." (Ipaddr.V4.to_string (t.remote_id)) (Key_gen.remote_port ()));
             t.flow <- Some flow;
             t.conn_starter <- None;
-            tcp_flow_reader t callback
-            >>= fun () ->
             callback Fsm.Tcp_CR_Acked
+            >>= fun () ->
+            flow_reader t callback
           | Some _ -> 
             Bgp_log.warn (fun m -> m "new connection is established when there exists an old connection. Discard new connection");
             t.conn_starter <- None;
-            S.TCPV4.close flow
+            Bgp_flow.close flow
         end
       in
       t.conn_starter <- Some (Device.create task wrapped_callback);
@@ -141,26 +140,31 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;      
 
   let listen_tcp_connection t callback =
-    let on_connect = fun flow -> 
+    let on_connect flow =
       if (t.listen_tcp_conn) then begin
         Bgp_log.debug (fun m -> m "accept incoming TCP connection from peer.");
         t.flow <- Some flow;
-        tcp_flow_reader t callback
-        >>= fun () ->
         callback Fsm.Tcp_connection_confirmed
+        >>= fun () ->
+        flow_reader t callback
       end
       else Lwt.return_unit (* Silently quit *)
     in
-    S.listen_tcpv4 t.socket ~port:50001 on_connect
+    Bgp_flow.listen t.socket 50001 on_connect
   ;;
                     
   let send_msg t msg = 
     match t.flow with
     | Some flow ->
       Bgp_log.info (fun m -> m "send message %s" (Bgp.to_string msg));
-      S.TCPV4.write flow (Bgp.gen_msg msg) 
+      Bgp_flow.write flow msg
       >>= begin function
-      | Error _ ->
+      | Error err ->
+        (match err with
+        | `Timeout -> Bgp_log.debug (fun m -> m "Write time out")
+        | `Refused -> Bgp_log.debug (fun m -> m "Write refused.")
+        | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when write.") 
+        | _ -> ());
         Bgp_log.debug (fun m -> m "fail to send TCP message %s" (Bgp.to_string msg));
         Lwt.return_unit
       | Ok () -> Lwt.return_unit
@@ -194,16 +198,16 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     (match t.tcp_flow_reader with
     | None -> ()
     | Some d -> 
-      Bgp_log.debug (fun m -> m "close tcp flow reader."); 
+      Bgp_log.debug (fun m -> m "close flow reader."); 
       t.tcp_flow_reader <- None;
       Device.stop d);
     
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow ->
-      Bgp_log.debug (fun m -> m "close tcp flow."); 
+      Bgp_log.debug (fun m -> m "close flow."); 
       t.flow <- None; 
-      S.TCPV4.close flow;
+      Bgp_flow.close flow;
   ;;
 
   let rec perform_action t action =
@@ -249,7 +253,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired));
       Lwt.return_unit
     | Stop_hold_timer -> begin
-      Bgp_log.info (fun m -> m "hold timer expires.");
       match t.hold_timer with
       | None -> Lwt.return_unit
       | Some d -> t.hold_timer <- None; Device.stop d; Lwt.return_unit
