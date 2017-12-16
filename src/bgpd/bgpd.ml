@@ -551,7 +551,16 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       input_rib = None;
       output_rib = None;
       loc_rib;
-      stat;
+      stat = {
+        sent_open = 0;
+        sent_update = 0;
+        sent_keepalive = 0;
+        sent_notif = 0;
+        rec_open = 0;
+        rec_update = 0;
+        rec_keepalive = 0;
+        rec_notif = 0;
+      } 
     } in
     let t2 = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.0.4"; 
@@ -569,7 +578,16 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       input_rib = None;
       output_rib = None;
       loc_rib;
-      stat;
+      stat = {  
+        sent_open = 0;
+        sent_update = 0;
+        sent_keepalive = 0;
+        sent_notif = 0;
+        rec_open = 0;
+        rec_update = 0;
+        rec_keepalive = 0;
+        rec_notif = 0;
+      }
     } in
 
     let id_map = Id_map.empty 
