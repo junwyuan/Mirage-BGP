@@ -4,6 +4,11 @@ open Lwt.Infix
 let bgpd_src = Logs.Src.create "BGP" ~doc:"BGP logging"
 module Bgp_log = (val Logs.src_log bgpd_src : Logs.LOG)
 
+let peer_tag : Ipaddr.V4.t Logs.Tag.def =
+  Logs.Tag.def "peer" ~doc:"Peer id" (fun ppf id -> Format.fprintf ppf "%s" (Ipaddr.V4.to_string id))
+
+let stamp id = Logs.Tag.(empty |> add peer_tag id)
+
 (* This is to simulate a cancellable lwt thread *)
 module Device = struct
   type t = unit Lwt.t
@@ -30,6 +35,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   
   type t = {
     remote_id: Ipaddr.V4.t;
+    remote_asn: int;
     local_id: Ipaddr.V4.t;
     local_asn: int;
     socket: S.t;
@@ -51,6 +57,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Device.create (fun () -> OS.Time.sleep_ns (Duration.of_sec time)) callback
   ;;
 
+  
+  
+
   let rec flow_reader t callback =
     match t.flow with
     | None -> Lwt.return_unit
@@ -71,13 +80,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         | Error err ->
           let open Bgp_flow in
           (match err with
-          | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when read.")
-          | `Refused -> Bgp_log.debug (fun m -> m "Read refused.");
-          | `Timeout -> Bgp_log.debug (fun m -> m "Read timeout.");
+          | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when read." ~tags:(stamp t.remote_id))
+          | `Refused -> Bgp_log.debug (fun m -> m "Read refused." ~tags:(stamp t.remote_id));
+          | `Timeout -> Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
           | `BGP_MSG_ERR err -> begin
             match err with
-            | Bgp.Parsing_error -> Bgp_log.warn (fun m -> m "Message parsing error")
-            | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> Bgp_log.warn (fun m -> m "Message format error")
+            | Bgp.Parsing_error -> Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id))
+            | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id))
           end
           | _ -> ());
           t.tcp_flow_reader <- None;
@@ -91,21 +100,23 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let start_tcp_flow_reader t callback = 
     match t.tcp_flow_reader with
     | None -> (match t.flow with
-      | None -> Bgp_log.warn (fun m -> m "new flow reader is created when no tcp flow."); Lwt.return_unit
+      | None -> 
+        Bgp_log.warn (fun m -> m "new flow reader is created when no tcp flow." ~tags:(stamp t.remote_id)); 
+        Lwt.return_unit
       | Some _ -> flow_reader t callback)
     | Some _ -> 
-      Bgp_log.warn (fun m -> m "new flow reader is created when thee exists another flow reader."); 
+      Bgp_log.warn (fun m -> m "new flow reader is created when thee exists another flow reader." ~tags:(stamp t.remote_id)); 
       Lwt.return_unit
   ;;
 
   let init_tcp_connection t callback =
-    Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer.");
+    Bgp_log.debug (fun m -> m "try setting up TCP connection with remote peer." ~tags:(stamp t.remote_id));
     if not (t.conn_starter = None) then begin
-      Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter.");
+      Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter." ~tags:(stamp t.remote_id));
       Lwt.return_unit
     end
     else if not (t.flow = None) then begin
-      Bgp_log.warn (fun m -> m "new connection is initiated when there exists an old connection.");
+      Bgp_log.warn (fun m -> m "new connection is initiated when there exists an old connection." ~tags:(stamp t.remote_id));
       Lwt.return_unit
     end
     else begin
@@ -117,8 +128,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         match result with
         | Error err ->
           (match err with
-          | `Timeout -> Bgp_log.debug (fun m -> m "Connection init timeout.")
-          | `Refused -> Bgp_log.debug (fun m -> m "Connection init refused.")
+          | `Timeout -> Bgp_log.debug (fun m -> m "Connection init timeout." ~tags:(stamp t.remote_id))
+          | `Refused -> Bgp_log.debug (fun m -> m "Connection init refused." ~tags:(stamp t.remote_id))
           | _ -> ());
           
           callback (Fsm.Tcp_connection_fail)
@@ -142,11 +153,11 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
             flow_reader connection callback
           | OPEN_SENT | OPEN_CONFIRMED -> 
             if (Ipaddr.V4.compare connection.local_id connection.remote_id < 0) then begin
-              Bgp_log.debug (fun m -> m "Connection collision detected and dump new connection.");
+              Bgp_log.debug (fun m -> m "Connection collision detected and dump new connection." ~tags:(stamp t.remote_id));
               Bgp_flow.close flow
             end
             else begin
-              Bgp_log.debug (fun m -> m "Connection collision detected and dump existing connection.");
+              Bgp_log.debug (fun m -> m "Connection collision detected and dump existing connection." ~tags:(stamp t.remote_id));
               callback Open_collision_dump
               >>= fun () ->
               let new_fsm = {
@@ -231,9 +242,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       >>= begin function
       | Error err ->
         (match err with
-        | `Timeout -> Bgp_log.debug (fun m -> m "Timeout when write %s" (Bgp.to_string msg))
-        | `Refused -> Bgp_log.debug (fun m -> m "Refused when Write %s" (Bgp.to_string msg))
-        | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when write %s." (Bgp.to_string msg)) 
+        | `Timeout -> Bgp_log.debug (fun m -> m "Timeout when write %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id))
+        | `Refused -> Bgp_log.debug (fun m -> m "Refused when Write %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id))
+        | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when write %s." (Bgp.to_string msg) ~tags:(stamp t.remote_id)) 
         | _ -> ());
         Lwt.return_unit
       | Ok () -> Lwt.return_unit
@@ -258,21 +269,21 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     (match t.conn_starter with
     | None -> ()
     | Some d -> 
-      Bgp_log.debug (fun m -> m "close conn starter."); 
+      Bgp_log.debug (fun m -> m "close conn starter." ~tags:(stamp t.remote_id)); 
       t.conn_starter <- None;
       Device.stop d);
 
     (match t.tcp_flow_reader with
     | None -> ()
     | Some d -> 
-      Bgp_log.debug (fun m -> m "close flow reader."); 
+      Bgp_log.debug (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
       t.tcp_flow_reader <- None;
       Device.stop d);
     
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow ->
-      Bgp_log.debug (fun m -> m "close flow."); 
+      Bgp_log.debug (fun m -> m "close flow." ~tags:(stamp t.remote_id)); 
       t.flow <- None; 
       Bgp_flow.close flow;
   ;;
@@ -386,29 +397,22 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
-  let rec loop t =
+  let rec command_loop t =
     Lwt_io.read_line Lwt_io.stdin
     >>= function
     | "start" -> 
-      Bgp_log.info (fun m -> m "BGP starts.");
+      Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
       handle_event t (Fsm.Manual_start) 
       >>= fun () -> 
-      loop t
+      command_loop t
     | "stop" -> 
-      Bgp_log.info (fun m -> m "BGP stops.");
+      Bgp_log.info (fun m -> m "BGP stops." ~tags:(stamp t.remote_id));
       handle_event t (Fsm.Manual_stop)
       >>= fun () ->
-      loop t
-    | "exit" -> 
-      handle_event t (Fsm.Manual_stop)
-      >>= fun () ->
-      Bgp_log.info (fun m -> m "BGP exits.");
-      S.disconnect t.socket
-      >>= fun () ->
-      Lwt.return_unit
+      command_loop t
     | "show fsm" ->
-      Bgp_log.info (fun m -> m "status: %s" (Fsm.to_string t.fsm));
-      loop t
+      Bgp_log.info (fun m -> m "status: %s" (Fsm.to_string t.fsm) ~tags:(stamp t.remote_id));
+      command_loop t
     | "show device" ->
       let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
       let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
@@ -416,8 +420,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
       let dev5 = if not (t.tcp_flow_reader = None) then "Flow reader" else "" in 
       let str_list = List.filter (fun x -> not (x = "")) ["Running device:"; dev1; dev2; dev3; dev4; dev5] in
-      Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list));
-      loop t
+      Bgp_log.info (fun m -> m "%s" (String.concat "\n" str_list) ~tags:(stamp t.remote_id));
+      command_loop t
     | "show rib" ->
       let input = 
         match t.input_rib with
@@ -433,20 +437,26 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib.size rib)
       in
       
-      Bgp_log.info (fun m -> m "%s" (String.concat ", " [input; loc; output]));
-      loop t
+      Bgp_log.info (fun m -> m "%s" (String.concat ", " [input; loc; output]) ~tags:(stamp t.remote_id));
+      command_loop t
     | "show rib detail" ->
-      (match t.input_rib with
-      | None -> Bgp_log.warn (fun m -> m "No IN RIB.");
-      | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)));
+      let input = 
+        match t.input_rib with
+        | None -> "No IN RIB."
+        | Some rib -> Printf.sprintf "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)
+      in
 
-      Bgp_log.info (fun m -> m "%s" (Rib.Loc_rib.to_string t.loc_rib));
+      let loc = Printf.sprintf "%s" (Rib.Loc_rib.to_string t.loc_rib) in
 
-      (match t.output_rib with
-      | None -> Bgp_log.warn (fun m -> m "No OUT RIB.");
-      | Some rib -> Bgp_log.info (fun m -> m "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)));
+      let output = 
+        match t.output_rib with
+        | None -> "No OUT RIB."
+        | Some rib -> Printf.sprintf "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)
+      in
+
+      Bgp_log.info (fun m -> m "%s" (String.concat "\n" [input; loc; output]) ~tags:(stamp t.remote_id));
       
-      loop t
+      command_loop t
     | "show gc" ->
       let word_to_KB ws = ws * 8 / 1024 in
 
@@ -460,17 +470,42 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
                               gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
       Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
       
-      loop t
-    | _ -> loop t
+      command_loop t
+    | "exit" -> Lwt.return_unit
+    | _ -> command_loop t
   ;;
 
-  let start_bgp remote_id local_id local_asn socket =
 
-    let fsm = Fsm.create 30 45 15 in
-    let flow = None in
-    let t = {
-      remote_id; local_id; local_asn; 
-      socket; fsm; flow;
+  let rec pick_router id_map =
+    Lwt_io.read_line Lwt_io.stdin
+    >>= fun s ->
+    match Ipaddr.V4.of_string s with
+    | None -> 
+      Bgp_log.info (fun m -> m "Invalid ID"); 
+      pick_router id_map
+    | Some id ->
+      match (Id_map.mem id id_map) with
+      | false -> 
+        Bgp_log.info (fun m -> m "Peer not present");
+        pick_router id_map
+      | true ->
+        let t = Id_map.find id id_map in 
+        command_loop t
+        >>= fun () ->
+        pick_router id_map
+  ;;
+        
+  let start s =
+    let loc_rib = Rib.Loc_rib.create in
+    let fsm = Fsm.create 240 90 30 in
+    let t1 = {
+      remote_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
+      remote_asn = 2;
+      local_id = Ipaddr.V4.of_string_exn "172.19.0.2"; 
+      local_asn = 1;
+      socket = s; 
+      fsm; 
+      flow = None;
       conn_retry_timer = None; 
       hold_timer = None; 
       keepalive_timer = None;
@@ -478,22 +513,34 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       tcp_flow_reader = None;
       input_rib = None;
       output_rib = None;
-      loc_rib = Rib.Loc_rib.create;
+      loc_rib;
+    } in
+    let t2 = {
+      remote_id = Ipaddr.V4.of_string_exn "172.19.0.4"; 
+      remote_asn = 3;
+      local_id = Ipaddr.V4.of_string_exn "172.19.0.2"; 
+      local_asn = 1;
+      socket = s; 
+      fsm; 
+      flow = None;
+      conn_retry_timer = None; 
+      hold_timer = None; 
+      keepalive_timer = None;
+      conn_starter = None;
+      tcp_flow_reader = None;
+      input_rib = None;
+      output_rib = None;
+      loc_rib;
     } in
 
-
-    let id_map = Id_map.add t.remote_id t Id_map.empty in
+    let id_map = Id_map.empty 
+      |> Id_map.add t1.remote_id t1
+      |> Id_map.add t2.remote_id t2
+    in
 
     (* Start listening to BGP port. *)
-    listen_tcp_connection socket id_map handle_event;
+    listen_tcp_connection s id_map handle_event;
 
-    loop t
-  ;;
-
-  let start s =
-    let remote_id = Ipaddr.V4.of_string_exn (Key_gen.remote_id ()) in
-    let local_id = Ipaddr.V4.of_string_exn (Key_gen.local_id ()) in
-    let local_asn = Key_gen.local_asn () in  
-    start_bgp remote_id local_id local_asn s
+    pick_router id_map
   ;;
 end

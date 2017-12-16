@@ -1,10 +1,10 @@
 type state =
-| IDLE
-| CONNECT
-| ACTIVE
-| OPEN_SENT
-| OPEN_CONFIRMED
-| ESTABLISHED
+  | IDLE
+  | CONNECT
+  | ACTIVE
+  | OPEN_SENT
+  | OPEN_CONFIRMED
+  | ESTABLISHED
 
 type t = {
   state: state;
@@ -15,61 +15,61 @@ type t = {
 }
 
 type event = 
-| Manual_start
-| Manual_stop
-| Connection_retry_timer_expired
-| Hold_timer_expired
-| Keepalive_timer_expired
-| Tcp_CR_Acked
-| Tcp_connection_confirmed
-| Tcp_connection_fail
-| BGP_open of Bgp.opent
-| Bgp_header_err of Bgp.message_header_error
-| Bgp_open_msg_err of Bgp.open_message_error
-| Open_collision_dump
-| Notif_msg_ver_err
-| Notif_msg of Bgp.msg_fmt_error
-| Keepalive_msg
-| Update_msg of Bgp.update
-| Update_msg_err of Bgp.update_message_error
+  | Manual_start
+  | Manual_stop
+  | Connection_retry_timer_expired
+  | Hold_timer_expired
+  | Keepalive_timer_expired
+  | Tcp_CR_Acked
+  | Tcp_connection_confirmed
+  | Tcp_connection_fail
+  | BGP_open of Bgp.opent
+  | Bgp_header_err of Bgp.message_header_error
+  | Bgp_open_msg_err of Bgp.open_message_error
+  | Open_collision_dump
+  | Notif_msg_ver_err
+  | Notif_msg of Bgp.msg_fmt_error
+  | Keepalive_msg
+  | Update_msg of Bgp.update
+  | Update_msg_err of Bgp.update_message_error
 
 let event_to_string = function
-| Manual_start -> "Manual_start"
-| Manual_stop -> "Manual_stop"
-| Connection_retry_timer_expired -> "Conn retry timer expired."
-| Hold_timer_expired -> "Hold timer expired"
-| Keepalive_timer_expired -> "Keppalive timer expired"
-| Tcp_CR_Acked -> "TCP CR Acked"
-| Tcp_connection_confirmed -> "Tcp connection confirmed"
-| Tcp_connection_fail -> "Tcp connection failure"
-| BGP_open o -> Printf.sprintf "BGP OPEN: %s" (Bgp.opent_to_string o)
-| Bgp_header_err _ -> "BGP Header err"
-| Bgp_open_msg_err _ -> "Open Message err"
-| Open_collision_dump -> "Open collision dump"
-| Notif_msg_ver_err -> "Notif version error"
-| Notif_msg e -> Printf.sprintf "Notif msg: %s" (Bgp.to_string (Bgp.Notification e))
-| Keepalive_msg -> Printf.sprintf "Keepalive msg"
-| Update_msg u -> Printf.sprintf "Update msg: %s" (Bgp.update_to_string u)
-| Update_msg_err _ -> "Update msg err"
+  | Manual_start -> "Manual_start"
+  | Manual_stop -> "Manual_stop"
+  | Connection_retry_timer_expired -> "Conn retry timer expired."
+  | Hold_timer_expired -> "Hold timer expired"
+  | Keepalive_timer_expired -> "Keppalive timer expired"
+  | Tcp_CR_Acked -> "TCP CR Acked"
+  | Tcp_connection_confirmed -> "Tcp connection confirmed"
+  | Tcp_connection_fail -> "Tcp connection failure"
+  | BGP_open o -> Printf.sprintf "BGP OPEN: %s" (Bgp.opent_to_string o)
+  | Bgp_header_err _ -> "BGP Header err"
+  | Bgp_open_msg_err _ -> "Open Message err"
+  | Open_collision_dump -> "Open collision dump"
+  | Notif_msg_ver_err -> "Notif version error"
+  | Notif_msg e -> Printf.sprintf "Notif msg: %s" (Bgp.to_string (Bgp.Notification e))
+  | Keepalive_msg -> Printf.sprintf "Keepalive msg"
+  | Update_msg u -> Printf.sprintf "Update msg: %s" (Bgp.update_to_string u)
+  | Update_msg_err _ -> "Update msg err"
 
 
 type action =
-| Initiate_tcp_connection
-| Drop_tcp_connection
-| Send_open_msg
-| Send_msg of Bgp.t
-| Start_conn_retry_timer
-| Stop_conn_retry_timer
-| Reset_conn_retry_timer
-| Start_hold_timer of int
-| Stop_hold_timer
-| Reset_hold_timer of int
-| Start_keepalive_timer
-| Stop_keepalive_timer
-| Reset_keepalive_timer
-| Process_update_msg of Bgp.update
-| Initiate_rib
-| Release_rib
+  | Initiate_tcp_connection
+  | Drop_tcp_connection
+  | Send_open_msg
+  | Send_msg of Bgp.t
+  | Start_conn_retry_timer
+  | Stop_conn_retry_timer
+  | Reset_conn_retry_timer
+  | Start_hold_timer of int
+  | Stop_hold_timer
+  | Reset_hold_timer of int
+  | Start_keepalive_timer
+  | Stop_keepalive_timer
+  | Reset_keepalive_timer
+  | Process_update_msg of Bgp.update
+  | Initiate_rib
+  | Release_rib
 
 let create conn_retry_time hold_time keepalive_time = {
   state = IDLE;
