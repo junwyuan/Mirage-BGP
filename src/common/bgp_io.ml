@@ -61,7 +61,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
     S.listen_tcpv4 s port wrapped
   ;;
 
-  let read t : (Bgp.t, read_error) Result.result Lwt.t = 
+  let rec read t : (Bgp.t, read_error) Result.result Lwt.t = 
     let parse t b =
       let msg_len = Bgp.get_h_len b in
       let msg_buf, rest = Cstruct.split b msg_len in
@@ -86,11 +86,16 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           Lwt.fail_with "This is a marker. This situation should never occur in BGP_IO.read"
       end
       | Ok (`Data b) -> begin
-        if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
+        (* if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
           Io_log.err (fun m -> m "This is a marker. Unexpected situation occurs. The message read has size smaller than minimum."); 
           Lwt.fail_with "This is a marker. This situation should never occur in BGP_IO.read"
         end
-        else parse t b 
+        else parse t b  *)
+        if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
+          Io_log.warn (fun m -> m "This is a marker. Unexpected situation occurs. The message read has size smaller than minimum.");
+          t.buf <- Some b;
+          read t
+        end else parse t b
       end)
     | Some b ->
       if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then

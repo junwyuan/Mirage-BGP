@@ -491,26 +491,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       Bgp_log.info (fun m -> m "Unrecognised command %s" s);
       command_loop id_map
   ;;
-
-(* 
-  let rec pick_router id_map =
-    Lwt_io.read_line Lwt_io.stdin
-    >>= fun s ->
-    match Ipaddr.V4.of_string s with
-    | None -> 
-      Bgp_log.info (fun m -> m "Invalid ID"); 
-      pick_router id_map
-    | Some id ->
-      match (Id_map.mem id id_map) with
-      | false -> 
-        Bgp_log.info (fun m -> m "Peer not present");
-        pick_router id_map
-      | true ->
-        let t = Id_map.find id id_map in 
-        command_loop t
-        >>= fun () ->
-        pick_router id_map
-  ;; *)
         
   let start s =
     let loc_rib = Rib.Loc_rib.create in
@@ -526,9 +506,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       rec_notif = 0;
     } in
     let t1 = {
-      remote_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
+      remote_id = Ipaddr.V4.of_string_exn "172.19.10.1"; 
       remote_asn = 2;
-      local_id = Ipaddr.V4.of_string_exn "172.19.0.2"; 
+      local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
       local_asn = 1;
       socket = s; 
       fsm; 
@@ -553,9 +533,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       } 
     } in
     let t2 = {
-      remote_id = Ipaddr.V4.of_string_exn "172.19.0.4"; 
+      remote_id = Ipaddr.V4.of_string_exn "172.19.10.2"; 
       remote_asn = 3;
-      local_id = Ipaddr.V4.of_string_exn "172.19.0.2"; 
+      local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
       local_asn = 1;
       socket = s; 
       fsm; 
