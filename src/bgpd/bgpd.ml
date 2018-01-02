@@ -149,12 +149,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           | IDLE -> 
             Bgp_log.info (fun m -> m "Drop connection to remote %s because fsm is at IDLE" (Ipaddr.V4.to_string t.remote_id));
             Bgp_flow.close flow
-          | CONNECT ->
-            connection.flow <- Some flow;
-            callback Tcp_CR_Acked
-            >>= fun () ->
-            flow_reader connection callback
-          | ACTIVE ->
+          | CONNECT | ACTIVE ->
             connection.flow <- Some flow;
             callback Tcp_CR_Acked
             >>= fun () ->
@@ -204,12 +199,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         | IDLE -> 
           Bgp_log.info (fun m -> m "Refuse connection %s because fsm is at IDLE." (Ipaddr.V4.to_string remote_id));
           Bgp_flow.close flow
-        | CONNECT ->
-          connection.flow <- Some flow;
-          callback connection Tcp_connection_confirmed
-          >>= fun () ->
-          flow_reader connection (callback connection)
-        | ACTIVE ->
+        | CONNECT | ACTIVE ->
           connection.flow <- Some flow;
           callback connection Tcp_connection_confirmed
           >>= fun () ->
