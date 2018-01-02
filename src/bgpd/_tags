@@ -2,6 +2,6 @@ true: package(result), package(cstruct), package(cstruct.ppx), package(lwt), pac
 <test/*.*>: package(alcotest)
 <test.*>: package(lwt.unix)
 <rib.*>: package(logs)
-"lib": include
 "common": include
+"common/lib": include
 "test": include
