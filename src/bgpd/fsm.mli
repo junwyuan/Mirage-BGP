@@ -18,6 +18,8 @@ type event =
   | Manual_start
   | Manual_stop
   | Automatic_start
+  | Manual_start_passive_tcp
+  | Automatic_start_passive_tcp
   | Automatic_stop
   | Connection_retry_timer_expired
   | Hold_timer_expired
