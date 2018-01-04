@@ -30,24 +30,30 @@ let filename =
   Key.(create "filename" Arg.(opt string "" doc))
 ;;
 
-let quick = 
-  let doc = Key.Arg.info ~doc:"This is the replay mode." ["quick"] in
-  Key.(create "quick" Arg.(opt bool true doc))
+let burst = 
+  let doc = Key.Arg.info ~doc:"This is the replay mode." ["burst"] in
+  Key.(create "burst" Arg.(opt bool true doc))
 ;;
+
+let speaker = 
+  let doc = Key.Arg.info ~doc:"Connect to DUT or Quagga." ["speaker"] in
+  Key.(create "speaker" Arg.(opt string "dev" doc))
+;;
+
 
 let total =
   let doc = Key.Arg.info ~doc:"Total number of packages replayed" ["total"] in
-  Key.(create "total" Arg.(opt int 0 doc))
+  Key.(create "total" Arg.(opt int 10000 doc))
 ;;
-
 
 let main = 
   let keys = [ 
-    Key.abstract local_asn; 
+    (* Key.abstract local_asn;  *)
     Key.abstract local_port;
-    Key.abstract local_id;
-    Key.abstract filename; 
-    Key.abstract quick;
+    (* Key.abstract local_id; *)
+    Key.abstract filename;
+    Key.abstract burst;
+    Key.abstract speaker;
     Key.abstract total;
   ] in
   foreign ~keys "Monitor.Main" (stackv4 @-> job)
@@ -56,6 +62,6 @@ let main =
 let stack = generic_stackv4 default_network
 
 let () =
-  register "monitor" [
+  register "throughput" [
     main $ stack
   ]

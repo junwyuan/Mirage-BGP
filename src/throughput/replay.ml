@@ -14,29 +14,34 @@ module Ip_gen = struct
     (Afi.IPv4 s, s)
 end
 
-
-let relay1_id = Ipaddr.V4.of_string_exn "127.0.0.1"
-let relay1_port = 50000
-let relay2_id = Ipaddr.V4.of_string_exn "127.0.0.1"
-let relay2_port = 50003
-
-
 (* Logging *)
 let replay_log = Logs.Src.create "Replay" ~doc:"Logging for Replay"
 module Replay_log = (val Logs.src_log replay_log : Logs.LOG)
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
-
-  let local_asn () = Int32.of_int (Key_gen.local_asn ())
+  let remote_id () = Ipaddr.V4.of_string_exn "127.0.0.1"
 
   let local_id () = 
-    let raw = Key_gen.local_id () in
-    Ipaddr.V4.of_string_exn raw
+    match Key_gen.speaker () with
+    | "quagga" -> Relay.quagga_relay1.id
+    | _ -> Relay.dev_relay1.id
+  ;;
+
+  let remote_port () = 
+    match Key_gen.speaker () with
+    | "quagga" -> Relay.quagga_relay1.port
+    | _ -> Relay.dev_relay1.port
+  ;;
+
+  let local_asn () = 
+    match Key_gen.speaker () with
+    | "quagga" -> Relay.quagga_relay1.as_no
+    | _ -> Relay.dev_relay1.as_no
   ;;
 
   let filename () = Key_gen.filename ();;
 
-  let is_quick () = Key_gen.quick ();;
+  let is_burst () = Key_gen.burst ();;
 
   let time f =
     let t = Unix.gettimeofday () in
@@ -163,8 +168,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       let after_nlri = List.fold_left (fun acc x -> Prefix_set.add (Afi.prefix_to_string x) acc) after_wd nlri in
       after_nlri
   ;;
-
-  let marker = 
+  let marker () = 
     let withdrawn = [] in
     let nlri = [(Afi.IPv4 (Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn "10.0.0.0")), 8)] in
     let flags = {
@@ -176,7 +180,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let path_attrs = [
       (flags, Origin EGP);
       (flags, Next_hop local_id_int32);
-      (flags, As_path [Bgp.Seq [4_l; 2_l; 3_l]])
+      (flags, As_path [Bgp.Seq [local_asn (); 2_l; 3_l]])
     ] in
     Update {withdrawn; nlri; path_attrs}
   ;;
@@ -217,7 +221,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       if (!npackets >= total && not (total = 0)) then Lwt.return prefix_set
       else match packets () with
       | None -> 
-        write_tcp_msg flow marker
+        write_tcp_msg flow (marker ())
         >>= fun () ->
         Lwt.return prefix_set
       | Some mrt -> (match mrt with
@@ -250,8 +254,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let rec plain_feed flow count seed =
-    if count >= 10000 then 
-      write_tcp_msg flow marker
+    if count >= (Key_gen.total ()) then 
+      write_tcp_msg flow (marker ())
       >>= fun () ->
       Lwt.return_unit
     else 
@@ -275,7 +279,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let start_bgp_active flow : unit Lwt.t = 
     let o = {
       version=4;
-      my_as=Bgp.Asn 4;
+      my_as=Bgp.Asn (Int32.to_int (local_asn ()));
       hold_time=180;
       bgp_id = Ipaddr.V4.to_int32 (local_id ());
       options=[]
@@ -293,9 +297,11 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start s =    
-    S.TCPV4.create_connection (S.tcpv4 s) (relay1_id, relay1_port)
+    S.TCPV4.create_connection (S.tcpv4 s) (remote_id (), remote_port ())
     >>= function
-    | Ok flow -> start_bgp_active flow
+    | Ok flow -> 
+      Replay_log.info (fun m -> m "Connect to remote");
+      start_bgp_active flow
     | Error err -> 
       (match err with 
       | `Refused -> Replay_log.info (fun m -> m "Conn refused")

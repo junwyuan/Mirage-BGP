@@ -2,16 +2,31 @@ open Lwt.Infix
 open Printf
 open Bgp
 
-let relay1_id = Ipaddr.V4.of_string_exn "127.0.0.1"
-let relay1_port = 50002
-let relay2_id = Ipaddr.V4.of_string_exn "127.0.0.1"
-let relay2_port = 50001
-
 let rec_log = Logs.Src.create "receiver" ~doc:"Receiver log"
 module Rec_log = (val Logs.src_log rec_log : Logs.LOG)
 
 module  Main (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
+
+  let remote_id () = Ipaddr.V4.of_string_exn "127.0.0.1"
+
+  let local_id () = 
+    match Key_gen.speaker () with
+    | "quagga" -> Relay.quagga_relay2.id
+    | _ -> Relay.dev_relay2.id
+  ;;
+
+  let remote_port () = 
+    match Key_gen.speaker () with
+    | "quagga" -> Relay.quagga_relay2.port
+    | _ -> Relay.dev_relay2.port
+  ;;
+
+  let local_asn () = 
+    match Key_gen.speaker () with
+    | "quagga" -> Relay.quagga_relay2.as_no
+    | _ -> Relay.dev_relay2.as_no
+  ;;
 
   let count = ref 0
 
@@ -96,7 +111,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let path_attrs = [
       flags, Origin IGP;
       flags, As_path [Set [2_l; 5_l; 3_l]; Seq [10_l; 20_l; 30_l]];
-      flags, Next_hop (Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.local_id ())));
+      flags, Next_hop (Ipaddr.V4.to_int32 (local_id ()));
     ] in 
     let u = Update {withdrawn; path_attrs; nlri} in
     write_msg flow u
@@ -108,7 +123,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     loop ()
   ;;
 
-  let start_receive_passive flow =
+  (* let start_receive_passive flow =
     Rec_log.info (fun m -> m "Accept incoming connection from remote.");
     read_flow_once flow
     >>= fun () ->
@@ -116,7 +131,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let o = {
       version = 4;
       bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn "172.19.10.2");
-      my_as = Asn (Key_gen.local_asn ());
+      my_as = Asn (local_asn ());
       options = [];
       hold_time = 180;
     } in
@@ -127,14 +142,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     write_msg flow (Bgp.Keepalive)
     >>= fun () ->
     Lwt.join [read_flow_loop flow; write_keepalive flow]
-  ;;
+  ;; *)
 
   let start_receive_active flow =
     let open Bgp in
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 (Ipaddr.V4.of_string_exn (Key_gen.local_id ()));
-      my_as = Asn 5;
+      bgp_id = Ipaddr.V4.to_int32 (local_id ());
+      my_as = Asn (Int32.to_int (local_asn ()));
       options = [];
       hold_time = 180;
     } in
@@ -148,12 +163,12 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     let _ =  write_keepalive flow in
     Lwt.join [
-      Lwt.catch (fun () -> read_flow_loop flow) (fun exn -> Rec_log.err (fun m -> m "Some exn catched"); Lwt.return_unit);
+      read_flow_loop flow
     ]
   ;;
  
   let start s = 
-    Bgp_flow.create_connection s (relay2_id, relay2_port)
+    Bgp_flow.create_connection s (remote_id (), remote_port ())
     >>= function
     | Error err -> 
       (match err with
@@ -164,7 +179,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Ok flow -> 
       Rec_log.info (fun m -> m "Connect to remote"); 
       start_receive_active flow
-
   ;;
 end
 
