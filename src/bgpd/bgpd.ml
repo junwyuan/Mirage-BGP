@@ -275,21 +275,21 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     (match t.conn_starter with
     | None -> ()
     | Some d -> 
-      Bgp_log.info (fun m -> m "close conn starter." ~tags:(stamp t.remote_id)); 
+      Bgp_log.debug (fun m -> m "close conn starter." ~tags:(stamp t.remote_id)); 
       t.conn_starter <- None;
       Device.stop d);
 
     (match t.flow_reader with
     | None -> ()
     | Some d -> 
-      Bgp_log.info (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
+      Bgp_log.debug (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
       t.flow_reader <- None;
       Device.stop d);
     
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow ->
-      Bgp_log.info (fun m -> m "close flow." ~tags:(stamp t.remote_id)); 
+      Bgp_log.debug (fun m -> m "close flow." ~tags:(stamp t.remote_id)); 
       t.flow <- None; 
       Bgp_flow.close flow;
   ;;
@@ -408,8 +408,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       match event with
       | Fsm.Manual_stop -> Lwt.return_unit
       | _ ->
-      (* Automatic restart *)
-      handle_event t Fsm.Automatic_start_passive_tcp
+        (* Automatic restart *)
+        Bgp_log.info (fun m -> m "BGP automatic restarts." ~tags:(stamp t.remote_id));
+        handle_event t Fsm.Automatic_start_passive_tcp
     end
     | _ -> Lwt.return_unit
   ;;
