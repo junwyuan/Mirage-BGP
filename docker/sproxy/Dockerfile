@@ -1,9 +1,6 @@
 FROM haproxy:1.7-alpine
-MAINTAINER Tecnativa <info@tecnativa.com>
 
 COPY haproxy.cfg /usr/local/etc/haproxy/haproxy.cfg
-EXPOSE 8001
-ENV LISTEN=:8001 TALK=172.17.0.2:8001
 
 # Metadata
 ARG VCS_REF
