@@ -10,19 +10,22 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
 
   let remote_id () = Ipaddr.V4.of_string_exn "127.0.0.1"
 
-  let local_id () = 
+  let local_id () =
+    let open Relay in
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay2.id
     | _ -> Relay.dev_relay2.id
   ;;
 
   let remote_port () = 
+    let open Relay in
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay2.port
     | _ -> Relay.dev_relay2.port
   ;;
 
   let local_asn () = 
+    let open Relay in
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay2.as_no
     | _ -> Relay.dev_relay2.as_no
