@@ -17,6 +17,8 @@ type t = {
 type event = 
   | Manual_start
   | Manual_stop
+  | Automatic_start
+  | Automatic_stop
   | Connection_retry_timer_expired
   | Hold_timer_expired
   | Keepalive_timer_expired
@@ -36,6 +38,8 @@ type event =
 let event_to_string = function
   | Manual_start -> "Manual_start"
   | Manual_stop -> "Manual_stop"
+  | Automatic_start -> "Automatic start"
+  | Automatic_stop -> "Automatic stop"
   | Connection_retry_timer_expired -> "Conn retry timer expired."
   | Hold_timer_expired -> "Hold timer expired"
   | Keepalive_timer_expired -> "Keppalive timer expired"
@@ -120,18 +124,19 @@ let set_keepalive_time time t = {
 }
 
 let handle_idle fsm = function
-  | Manual_start -> 
+  | Manual_start | Automatic_start -> 
     let actions = [Start_conn_retry_timer; Initiate_tcp_connection] in
     let new_fsm = fsm 
       |> set_state CONNECT 
       |> set_conn_retry_counter 0 
     in
     (new_fsm, actions)
+  | Manual_stop | Automatic_stop -> (fsm, [])
   | _ -> (fsm, [])
 ;;
 
 let handle_connect fsm = function
-  | Manual_start -> (fsm, [])
+  | Manual_start | Automatic_start -> (fsm, [])
   | Manual_stop ->
     let actions = [Drop_tcp_connection; Stop_conn_retry_timer] in
     let new_fsm = fsm 
@@ -149,7 +154,7 @@ let handle_connect fsm = function
     (new_fsm, actions)
   | Tcp_connection_fail ->
     let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
-    let new_fsm = fsm |> set_state ACTIVE in
+    let new_fsm = fsm |> set_state IDLE in
     (new_fsm, actions)
   | _ ->
     let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
@@ -161,7 +166,7 @@ let handle_connect fsm = function
 ;;
 
 let handle_active fsm = function
-  | Manual_start -> (fsm, [])
+  | Manual_start | Automatic_start -> (fsm, [])
   | Manual_stop ->
     let actions = [Drop_tcp_connection; Stop_conn_retry_timer] in
     let new_fsm = fsm 
@@ -198,7 +203,7 @@ let handle_active fsm = function
 ;;
 
 let handle_open_sent fsm = function
-  | Manual_start -> (fsm, [])
+  | Manual_start | Automatic_start  -> (fsm, [])
   | Manual_stop -> 
     let actions = [Send_msg (Bgp.Notification Bgp.Cease); Stop_conn_retry_timer; Drop_tcp_connection] in
     let new_fsm = fsm 
@@ -268,7 +273,7 @@ let handle_open_sent fsm = function
 ;;
 
 let handle_open_confirmed fsm = function
-  | Manual_start -> (fsm, [])
+  | Manual_start | Automatic_start -> (fsm, [])
   | Manual_stop -> 
     let actions = [
       Send_msg (Bgp.Notification Bgp.Cease); 
@@ -352,7 +357,7 @@ let handle_open_confirmed fsm = function
 ;;        
 
 let handle_established fsm = function
-  | Manual_start -> (fsm, [])
+  | Manual_start | Automatic_start -> (fsm, [])
   | Manual_stop -> 
     let actions = [
       Send_msg (Bgp.Notification Bgp.Cease); 
