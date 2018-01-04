@@ -93,8 +93,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           | `Timeout -> Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
           | `BGP_MSG_ERR err -> begin
             match err with
-            | Bgp.Parsing_error -> Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id))
-            | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id))
+            | Bgp.Parsing_error -> 
+              Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id))
+            | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> 
+              Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id))
           end
           | _ -> ());
           t.flow_reader <- None;
@@ -401,7 +403,15 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     (* Spawn threads to perform actions from left to right *)
     let _ = List.fold_left (fun acc act -> List.cons (perform_action t act) acc) [] actions in
     
-    Lwt.return_unit
+    match Fsm.state t.fsm with
+    | Fsm.IDLE -> begin
+      match event with
+      | Fsm.Manual_stop -> Lwt.return_unit
+      | _ ->
+      (* Automatic restart *)
+      handle_event t Fsm.Automatic_start
+    end
+    | _ -> Lwt.return_unit
   ;;
 
   let rec command_loop id_map =
@@ -501,7 +511,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let fsm = Fsm.create 240 90 30 in
     let t1 = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.3"; 
-      remote_asn = 2;
+      remote_asn = 4;
       local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
       local_asn = 1;
       socket = s; 
@@ -528,7 +538,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     } in
     let t2 = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.4"; 
-      remote_asn = 3;
+      remote_asn = 5;
       local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
       local_asn = 1;
       socket = s; 
@@ -561,6 +571,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
 
     (* Start listening to BGP port. *)
     listen_tcp_connection s id_map handle_event;
+    
+    (* Automatic start *)
+    let f t =
+      Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
+      handle_event t (Fsm.Automatic_start)
+    in
+    let _ = Id_map.map f id_map in
 
     command_loop id_map
   ;;

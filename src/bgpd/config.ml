@@ -28,9 +28,9 @@ let local_asn =
 let main = foreign 
             ~keys:[ 
               Key.abstract remote_port;
+              Key.abstract local_port;
               Key.abstract local_id; 
               Key.abstract local_asn; 
-              Key.abstract local_port; 
             ]
            "Bgpd.Main" (stackv4 @-> job)
 
