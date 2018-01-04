@@ -82,8 +82,8 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         | `Refused -> Lwt.return (Error `Refused)
         | `Timeout -> Lwt.return (Error `Timeout)
         | _ -> 
-          Io_log.err (fun m -> m "This is a marker. Unknown TCP exception occurs in BGP_IO.read."); 
-          Lwt.fail_with "This is a marker. This situation should never occur in BGP_IO.read"
+          Io_log.err (fun m -> m "Unknown TCP exception occurs in BGP_IO.read."); 
+          Lwt.fail_with "Unknown TCP exception occurs in BGP_IO.read."
       end
       | Ok (`Data b) -> begin
         (* if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
@@ -92,7 +92,6 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         end
         else parse t b  *)
         if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
-          Io_log.warn (fun m -> m "This is a marker. Unexpected situation occurs. The message read has size smaller than minimum.");
           t.buf <- Some b;
           read t
         end else parse t b
@@ -102,15 +101,17 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         S.TCPV4.read t.flow
         >>= fun result ->
         match result with
-        | Ok (`Data buf) -> parse t (Cstruct.concat [b; buf]) 
+        | Ok (`Data buf) ->
+          t.buf <- Some (Cstruct.concat [b; buf]);
+          read t
         | Ok (`Eof) -> Lwt.return (Error `Closed)
         | Error err -> begin
           match err with 
           | `Refused -> Lwt.return (Error `Refused)
           | `Timeout -> Lwt.return (Error `Timeout)
           | _ -> 
-            Io_log.err (fun m -> m "This is a marker. Unknown TCP exception occurs in BGP_IO.read."); 
-            Lwt.fail_with "This is a marker. This situation should never occur in BGP_IO.read"
+            Io_log.err (fun m -> m "Unknown TCP exception occurs in BGP_IO.read."); 
+            Lwt.fail_with "Unknown TCP exception occurs in BGP_IO.read."
         end
       else parse t b
   ;;
