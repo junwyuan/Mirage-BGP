@@ -409,7 +409,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       | Fsm.Manual_stop -> Lwt.return_unit
       | _ ->
       (* Automatic restart *)
-      handle_event t Fsm.Automatic_start
+      handle_event t Fsm.Automatic_start_passive_tcp
     end
     | _ -> Lwt.return_unit
   ;;
@@ -575,7 +575,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     (* Automatic start *)
     let f t =
       Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
-      handle_event t (Fsm.Automatic_start)
+      handle_event t Fsm.Automatic_start_passive_tcp
     in
     let _ = Id_map.map f id_map in
 
