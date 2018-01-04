@@ -1,6 +1,5 @@
 (* The underlying data store is a binary tree *)
 module Prefix = Ipaddr.V4.Prefix
-
 module Prefix_map = Map.Make(Prefix)
 
 type update = {
@@ -80,16 +79,18 @@ end = struct
   ;;
 end
 
-module Loc_rib : sig  
+module Id_map = Map.Make(Ipaddr.V4)
+
+module Loc_rib : sig
   type t = {
-    mutable subs: Adj_rib.t list;
+    mutable subs: Adj_rib.t Id_map.t;
     mutable db: (Bgp.path_attrs * remote_id) Prefix_map.t;
   }
 
   type signal = 
-  | Update of (update * remote_id)
-  | Subscribe of Adj_rib.t
-  | Unsubscribe of Adj_rib.t
+    | Update of (update * remote_id)
+    | Subscribe of Adj_rib.t
+    | Unsubscribe of Adj_rib.t
 
   val create : t
   val handle_signal : t -> signal -> unit Lwt.t
@@ -101,33 +102,45 @@ end = struct
   module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 
   type t = {
-    mutable subs: Adj_rib.t list;
+    mutable subs: Adj_rib.t Id_map.t;
     mutable db: (Bgp.path_attrs * remote_id) Prefix_map.t;
   }
 
   type signal = 
-  | Update of (update * remote_id)
-  | Subscribe of Adj_rib.t
-  | Unsubscribe of Adj_rib.t
+    | Update of (update * remote_id)
+    | Subscribe of Adj_rib.t
+    | Unsubscribe of Adj_rib.t
 
-  let is_subscribed t remote_id = 
+  let is_subscribed t rib = 
     let open Adj_rib in
-    List.exists (fun x -> x.remote_id = remote_id) t.subs
+    Id_map.mem rib.remote_id t.subs
   ;;
 
   let invoke_callback t (update, remote_id) =
     let open Adj_rib in
-    let filtered = List.filter (fun x -> not (x.remote_id = remote_id)) t.subs in 
-    Lwt.join (List.map (fun rib -> Adj_rib.handle_update rib update) filtered)
+    let f k v acc = 
+      match k = remote_id with
+      | true -> acc
+      | false -> List.cons (Adj_rib.handle_update v update) acc
+    in
+    Lwt.join (Id_map.fold f t.subs [])
   ;;
 
   let subscribe t rib = 
     let open Adj_rib in
-    if (is_subscribed t rib.remote_id) then 
+    match (is_subscribed t rib) with
+    | true ->
       Rib_log.warn (fun m -> m "Duplicated rib subscription for remote %s" 
-                            (Ipaddr.V4.to_string rib.remote_id))
-    else t.subs <- List.cons rib t.subs;
-    Lwt.return_unit
+                            (Ipaddr.V4.to_string rib.remote_id));
+      Lwt.return_unit        
+    | false ->
+      t.subs <- Id_map.add rib.remote_id rib t.subs;
+      
+      let f p (pa, _) acc = 
+        let update = { withdrawn = []; path_attrs = pa; nlri = [p] } in
+        List.cons (Adj_rib.handle_update rib update) acc
+      in
+      Lwt.join (Prefix_map.fold f t.db [])
   ;;
 
   let remove_assoc_pfxes db remote_id = 
@@ -140,24 +153,26 @@ end = struct
 
   let unsubscribe t rib =
     let open Adj_rib in
-    if (not (List.exists (fun x -> rib.remote_id = x.remote_id) t.subs)) then begin
+    match not (is_subscribed t rib) with
+    | true ->
       Rib_log.warn (fun m -> m "No rib subscription for remote %s" 
                                 (Ipaddr.V4.to_string rib.remote_id));
       Lwt.return_unit
-    end
-    else begin
-      t.subs <- List.filter (fun x -> x.remote_id != rib.remote_id) t.subs;  
+    | false -> 
+      (* Update subscribed ribs *)
+      t.subs <- Id_map.remove rib.remote_id t.subs;
+      (* Update db *)
       let new_db, withdrawn = remove_assoc_pfxes t.db rib.remote_id in
       t.db <- new_db;
+      (* Send withdraw to other peers *)
       let update = { withdrawn; path_attrs = []; nlri = [] } in
       invoke_callback t (update, rib.remote_id)
-    end
   ;;
   
   let is_better x y = true
 
   let create = {
-    subs = [];
+    subs = Id_map.empty;
     db = Prefix_map.empty;
   }
 
@@ -221,7 +236,7 @@ end = struct
 
     let subs_str = 
       let open Adj_rib in
-      let tmp = List.map (fun rib -> Printf.sprintf "%s" (Ipaddr.V4.to_string rib.remote_id)) t.subs in
+      let tmp = List.map (fun (x, _) -> Ipaddr.V4.to_string x) (Id_map.bindings t.subs) in
       String.concat " " tmp
     in
       

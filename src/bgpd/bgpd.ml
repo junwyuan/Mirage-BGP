@@ -13,10 +13,10 @@ let stamp id = Logs.Tag.(empty |> add peer_tag id)
 module Device = struct
   type t = unit Lwt.t
 
-  let create f callback : t =
+  let create task callback : t =
     let t, u = Lwt.task () in
     let _ = 
-      f () >>= fun x ->
+      task () >>= fun x ->
       Lwt.wakeup u x;
       Lwt.return_unit
     in
@@ -56,7 +56,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     mutable hold_timer: Device.t option;
     mutable keepalive_timer: Device.t option;
     mutable conn_starter: Device.t option;
-    mutable tcp_flow_reader: Device.t option;
+    mutable flow_reader: Device.t option;
     mutable input_rib: Rib.Adj_rib.t option;
     mutable output_rib: Rib.Adj_rib.t option;
     mutable loc_rib: Rib.Loc_rib.t;
@@ -97,16 +97,16 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
             | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id))
           end
           | _ -> ());
-          t.tcp_flow_reader <- None;
+          t.flow_reader <- None;
           callback Fsm.Tcp_connection_fail
       in
-      t.tcp_flow_reader <- Some (Device.create task wrapped_callback);
+      t.flow_reader <- Some (Device.create task wrapped_callback);
       Lwt.return_unit
     end
   ;;
 
-  let start_tcp_flow_reader t callback = 
-    match t.tcp_flow_reader with
+  let start_flow_reader t callback = 
+    match t.flow_reader with
     | None -> (match t.flow with
       | None -> 
         Bgp_log.warn (fun m -> m "new flow reader is created when no tcp flow." ~tags:(stamp t.remote_id)); 
@@ -138,7 +138,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           (match err with
           | `Timeout -> Bgp_log.info (fun m -> m "Connection init timeout." ~tags:(stamp t.remote_id))
           | `Refused -> Bgp_log.info (fun m -> m "Connection init refused." ~tags:(stamp t.remote_id))
-          | _ -> ());
+          | _ -> Bgp_log.info (fun m -> m "Unknown connection init error." ~tags:(stamp t.remote_id)));
           
           callback (Fsm.Tcp_connection_fail)
         | Ok flow -> begin
@@ -277,11 +277,11 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       t.conn_starter <- None;
       Device.stop d);
 
-    (match t.tcp_flow_reader with
+    (match t.flow_reader with
     | None -> ()
     | Some d -> 
       Bgp_log.info (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
-      t.tcp_flow_reader <- None;
+      t.flow_reader <- None;
       Device.stop d);
     
     match t.flow with
@@ -394,9 +394,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   
   and handle_event t event =
     let new_fsm, actions = Fsm.handle t.fsm event in
+    
+    (* Update finite state machine before performing any action. *)
     t.fsm <- new_fsm;
+    
     (* Spawn threads to perform actions from left to right *)
     let _ = List.fold_left (fun acc act -> List.cons (perform_action t act) acc) [] actions in
+    
     Lwt.return_unit
   ;;
 
@@ -425,7 +429,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
           let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
           let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
-          let dev5 = if not (t.tcp_flow_reader = None) then "Flow reader" else "" in 
+          let dev5 = if not (t.flow_reader = None) then "Flow reader" else "" in 
           let str_list = List.filter (fun x -> not (x = "")) [dev1; dev2; dev3; dev4; dev5] in
           Printf.sprintf "Running Dev: %s" (String.concat "; " str_list)
         in
@@ -495,18 +499,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   let start s =
     let loc_rib = Rib.Loc_rib.create in
     let fsm = Fsm.create 240 90 30 in
-    let stat = {
-      sent_open = 0;
-      sent_update = 0;
-      sent_keepalive = 0;
-      sent_notif = 0;
-      rec_open = 0;
-      rec_update = 0;
-      rec_keepalive = 0;
-      rec_notif = 0;
-    } in
     let t1 = {
-      remote_id = Ipaddr.V4.of_string_exn "172.19.10.1"; 
+      remote_id = Ipaddr.V4.of_string_exn "172.19.10.3"; 
       remote_asn = 2;
       local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
       local_asn = 1;
@@ -517,7 +511,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       hold_timer = None; 
       keepalive_timer = None;
       conn_starter = None;
-      tcp_flow_reader = None;
+      flow_reader = None;
       input_rib = None;
       output_rib = None;
       loc_rib;
@@ -533,7 +527,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       } 
     } in
     let t2 = {
-      remote_id = Ipaddr.V4.of_string_exn "172.19.10.2"; 
+      remote_id = Ipaddr.V4.of_string_exn "172.19.10.4"; 
       remote_asn = 3;
       local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
       local_asn = 1;
@@ -544,7 +538,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       hold_timer = None; 
       keepalive_timer = None;
       conn_starter = None;
-      tcp_flow_reader = None;
+      flow_reader = None;
       input_rib = None;
       output_rib = None;
       loc_rib;

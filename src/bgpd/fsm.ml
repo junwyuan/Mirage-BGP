@@ -149,7 +149,7 @@ let handle_connect fsm = function
     (new_fsm, actions)
   | Tcp_connection_fail ->
     let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in
-    let new_fsm = fsm |> set_state IDLE in
+    let new_fsm = fsm |> set_state ACTIVE in
     (new_fsm, actions)
   | _ ->
     let actions = [Stop_conn_retry_timer; Drop_tcp_connection] in

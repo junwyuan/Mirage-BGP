@@ -1,9 +1,9 @@
 open Mirage
 
-let remote_id = 
+(* let remote_id = 
   let doc = Key.Arg.info ~doc:"This is the remote bgp speaker's ip address." ["remote_id"] in
   Key.(create "remote_id" Arg.(opt string "172.19.0.2" doc))
-;;
+;; *)
 
 let remote_port = 
   let doc = Key.Arg.info ~doc:"This is the remote bgp speaker's port." ["remote_port"] in
@@ -26,8 +26,12 @@ let local_asn =
 ;;
 
 let main = foreign 
-           ~keys:[Key.abstract remote_id; Key.abstract local_id; Key.abstract local_asn; 
-                 Key.abstract local_port; Key.abstract remote_port]  
+            ~keys:[ 
+              Key.abstract remote_port;
+              Key.abstract local_id; 
+              Key.abstract local_asn; 
+              Key.abstract local_port; 
+            ]
            "Bgpd.Main" (stackv4 @-> job)
 
 let stack = generic_stackv4 default_network
