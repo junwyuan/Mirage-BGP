@@ -82,15 +82,10 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         | `Refused -> Lwt.return (Error `Refused)
         | `Timeout -> Lwt.return (Error `Timeout)
         | _ -> 
-          Io_log.err (fun m -> m "Unknown TCP exception occurs in BGP_IO.read."); 
-          Lwt.fail_with "Unknown TCP exception occurs in BGP_IO.read."
+          Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
+          Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?"
       end
       | Ok (`Data b) -> begin
-        (* if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
-          Io_log.err (fun m -> m "This is a marker. Unexpected situation occurs. The message read has size smaller than minimum."); 
-          Lwt.fail_with "This is a marker. This situation should never occur in BGP_IO.read"
-        end
-        else parse t b  *)
         if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
           t.buf <- Some b;
           read t
@@ -109,9 +104,9 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           match err with 
           | `Refused -> Lwt.return (Error `Refused)
           | `Timeout -> Lwt.return (Error `Timeout)
-          | _ -> 
-            Io_log.err (fun m -> m "Unknown TCP exception occurs in BGP_IO.read."); 
-            Lwt.fail_with "Unknown TCP exception occurs in BGP_IO.read."
+          | err ->
+            Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
+            Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?"
         end
       else parse t b
   ;;

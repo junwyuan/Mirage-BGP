@@ -282,14 +282,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     (match t.flow_reader with
     | None -> ()
     | Some d -> 
-      Bgp_log.debug (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
+      Bgp_log.debug  (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
       t.flow_reader <- None;
       Device.stop d);
     
     match t.flow with
     | None -> Lwt.return_unit
     | Some flow ->
-      Bgp_log.debug (fun m -> m "close flow." ~tags:(stamp t.remote_id)); 
+      Bgp_log.debug  (fun m -> m "close flow." ~tags:(stamp t.remote_id)); 
       t.flow <- None; 
       Bgp_flow.close flow;
   ;;

@@ -120,8 +120,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
               | Ok msg ->
                 match msg with
                 | Keepalive -> 
-                  Bgp_flow.close flow
-                  >>= fun () ->
                   let negotiated_ht = min o.hold_time default_hold_time in
                   let rec read_loop () =
                     Bgp_flow.read flow
@@ -131,7 +129,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                       match msg with
                       | Keepalive -> 
                         Bgp_flow.close flow 
-                        >>= fun () -> 
+                        >>= fun () ->
                         pass test_name
                       | _ -> read_loop ()
                     end
@@ -140,23 +138,24 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                 | _ -> fail test_name "wrong msg type"
   ;;
 
-  let run tests = 
-    let f acc test =
+  let rec run tests = 
+    match tests with
+    | test::other -> 
       test ()
       >>= fun () ->
       OS.Time.sleep_ns (Duration.of_sec 1)
       >>= fun () ->
-      acc
-    in
-    List.fold_left f Lwt.return_unit tests
+      run other
+    | [] -> Lwt.return_unit
   ;;
 
   let start s =
     Conf_log.info (fun m -> m "test starts");
     let tests = [test_create_session s; test_maintain_session s] in
-    test_create_session s ()
+    (* test_create_session s ()
     >>= fun () ->
-    OS.Time.sleep_ns (Duration.of_sec 5)
+    OS.Time.sleep_ns (Duration.of_sec 1)
     >>= fun () ->
-    test_maintain_session s ()
+    test_maintain_session s () *)
+    run tests
 end
