@@ -20,6 +20,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | _ -> Relay.dev_relay2
   ;;
 
+  let default_hold_time = 180
+
   let default_open_msg () = 
     let open Bgp in
     let open Relay in
@@ -28,7 +30,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       bgp_id = Ipaddr.V4.to_int32 ((relay1 ()).id);
       my_as = Asn (Int32.to_int ((relay1 ()).as_no));
       options = [];
-      hold_time = 180;
+      hold_time = default_hold_time;
     } in
     Bgp.Open o
   ;;
@@ -43,7 +45,16 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return_unit
   ;;
 
-  let test_create_session s = 
+  let timeout test_name time task =
+    let timer = 
+      OS.Time.sleep_ns (Duration.of_sec time)
+      >>= fun () ->
+      fail test_name "timeout"
+    in
+    Lwt.pick [timer; task ()]
+  ;;
+
+  let test_create_session s () = 
     let test_name = "create session" in
     let open Relay in
     Bgp_flow.create_connection s (relay_id (), (relay1 ()).port)
@@ -79,9 +90,73 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                 | _ -> fail test_name "wrong msg type"
   ;;
 
+  let test_maintain_session s () =
+    let test_name = "maintain session" in
+    let open Relay in
+    Bgp_flow.create_connection s (relay_id (), (relay1 ()).port)
+    >>= function
+    | Error _ -> fail test_name "tcp connect fail"
+    | Ok flow ->
+      Bgp_flow.write flow (default_open_msg ())
+      >>= function
+      | Error _ -> fail test_name "tcp write fail"
+      | Ok () ->
+        Bgp_flow.read flow
+        >>= function
+        | Error _ -> fail test_name "tcp read fail"
+        | Ok msg ->
+          let open Bgp in
+          match msg with
+          | Keepalive | Notification _ | Update _ -> 
+            fail test_name "wrong msg type"
+          | Open o ->
+            Bgp_flow.write flow Bgp.Keepalive
+            >>= function
+            | Error _ -> fail test_name "tcp write fail"
+            | Ok () ->
+              Bgp_flow.read flow
+              >>= function
+              | Error _ -> fail test_name "tcp read fail"
+              | Ok msg ->
+                match msg with
+                | Keepalive -> 
+                  Bgp_flow.close flow
+                  >>= fun () ->
+                  let negotiated_ht = min o.hold_time default_hold_time in
+                  let rec read_loop () =
+                    Bgp_flow.read flow
+                    >>= function
+                    | Error _ -> fail test_name "tcp read fail"
+                    | Ok msg -> begin
+                      match msg with
+                      | Keepalive -> 
+                        Bgp_flow.close flow 
+                        >>= fun () -> 
+                        pass test_name
+                      | _ -> read_loop ()
+                    end
+                  in
+                  timeout test_name negotiated_ht read_loop
+                | _ -> fail test_name "wrong msg type"
+  ;;
+
+  let run tests = 
+    let f acc test =
+      test ()
+      >>= fun () ->
+      OS.Time.sleep_ns (Duration.of_sec 1)
+      >>= fun () ->
+      acc
+    in
+    List.fold_left f Lwt.return_unit tests
+  ;;
 
   let start s =
     Conf_log.info (fun m -> m "test starts");
-    test_create_session s
-
+    let tests = [test_create_session s; test_maintain_session s] in
+    test_create_session s ()
+    >>= fun () ->
+    OS.Time.sleep_ns (Duration.of_sec 5)
+    >>= fun () ->
+    test_maintain_session s ()
 end
