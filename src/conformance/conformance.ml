@@ -35,13 +35,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let sample_id = Ipaddr.V4.of_string_exn "10.0.0.0"
 
-  let default_open_msg () = 
-    let open Bgp in
-    let open Relay in
+  let default_open_msg relay = 
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 ((relay1 ()).id);
-      my_as = Asn (Int32.to_int ((relay1 ()).as_no));
+      bgp_id = Ipaddr.V4.to_int32 relay.id;
+      my_as = Asn (Int32.to_int relay.as_no);
       options = [];
       hold_time = default_hold_time;
     } in
@@ -87,13 +85,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.pick [timer; task ()]
   ;;
 
-  let create_connection s (addr, port) test_name =
+  let create_connection s relay test_name =
     let open Relay in
-    Bgp_flow.create_connection s (addr, port)
+    Bgp_flow.create_connection s (relay_id (), relay.port)
     >>= function
     | Error _ -> fail test_name "tcp connect fail"
     | Ok flow ->
-      Bgp_flow.write flow (default_open_msg ())
+      Bgp_flow.write flow (default_open_msg relay)
       >>= function
       | Error _ -> fail test_name "tcp write fail"
       | Ok () ->
@@ -115,7 +113,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
               | Error _ -> fail test_name "tcp read fail"
               | Ok msg ->
                 match msg with
-                | Keepalive -> 
+                | Keepalive ->
                   Lwt.return (flow, o)
                 | _ -> fail test_name "wrong msg type"
   ;;
@@ -123,7 +121,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_create_session s () = 
     let test_name = "create session" in
     let open Relay in
-    create_connection s (relay_id (), (relay1 ()).port) test_name
+    create_connection s (relay1 ()) test_name
     >>= fun (flow, _) ->
     Bgp_flow.close flow
     >>= fun () ->
@@ -133,7 +131,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_maintain_session s () =
     let test_name = "maintain session" in
     let open Relay in
-    create_connection s (relay_id (), (relay1 ()).port) test_name
+    create_connection s (relay1 ()) test_name
     >>= fun (flow, o) ->
     let open Bgp in 
     let negotiated_ht = min o.hold_time default_hold_time in
@@ -155,13 +153,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_propagate_update_to_new_peer s () =
     let test_name = "propagate update to new peer" in
-    create_connection s (relay_id (), (relay1 ()).port) test_name
+    create_connection s (relay1 ()) test_name
     >>= fun (flow1, _) ->
     Bgp_flow.write flow1 (default_update ())
     >>= function
     | Error _ -> fail test_name "tcp write error"
     | Ok () ->
-      create_connection s (relay_id (), (relay2 ()).port) test_name
+      create_connection s (relay2 ()) test_name
       >>= fun (flow2, _) ->
       let rec read_loop () =
         Bgp_flow.read flow2
@@ -190,9 +188,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_propagate_update_to_old_peer s () =
     let test_name = "propagate update to old peer" in
-    create_connection s (relay_id (), (relay1 ()).port) test_name
+    create_connection s (relay1 ()) test_name
     >>= fun (flow1, _) ->
-    create_connection s (relay_id (), (relay2 ()).port) test_name
+    create_connection s (relay2 ()) test_name
     >>= fun (flow2, _) ->
     Bgp_flow.write flow1 (default_update ())
     >>= function
@@ -229,7 +227,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let test_name = "group propagate update to new peer" in
     let group_size = 500 in
     (* connect to first speaker *)
-    create_connection s (relay_id (), (relay1 ()).port) test_name
+    create_connection s (relay1 ()) test_name
     >>= fun (flow1, _) ->
 
     let rec plain_feed test_name flow count seed =
@@ -241,8 +239,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let open Bgp in
           let flags = { optional=false; transitive=true; extlen=false; partial=false } in
           let origin = Origin EGP in
-          let next_hop = Next_hop (Ipaddr.V4.to_int32 sample_id) in
-          let as_path = As_path [Seq [4_l; 2_l; 3_l]] in
+          let next_hop = Next_hop (Ipaddr.V4.to_int32 (relay1 ()).id) in
+          let as_path = As_path [Seq [(relay1 ()).as_no; 2_l; 3_l]] in
           List.map (fun pa -> (flags, pa)) [origin; next_hop; as_path]
         in
         let ip, n_seed = Ip_gen.next seed in
@@ -258,7 +256,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     plain_feed test_name flow1 0 Ip_gen.default_seed 
     >>= fun () ->
     (* connect to speaker2 *)
-    create_connection s (relay_id (), (relay2 ()).port) test_name
+    create_connection s (relay2 ()) test_name
     >>= fun (flow2, _) ->
     let rec read_loop set =
       Bgp_flow.read flow2
@@ -301,9 +299,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_route_withdraw s () =
     let test_name = "route withdrawn" in
-    create_connection s (relay_id (), (relay1 ()).port) test_name
+    create_connection s (relay1 ()) test_name
     >>= fun (flow1, _) ->
-    create_connection s (relay_id (), (relay2 ()).port) test_name
+    create_connection s (relay2 ()) test_name
     >>= fun (flow2, _) ->
     Bgp_flow.write flow1 (default_update ())
     >>= function
@@ -346,11 +344,16 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let rec run tests = 
+    let interval = 
+      match (Key_gen.speaker ()) with
+      | "quagga" -> 10
+      | _ -> 1
+    in
     match tests with
     | test::other -> 
       test ()
       >>= fun () ->
-      OS.Time.sleep_ns (Duration.of_sec 1)
+      OS.Time.sleep_ns (Duration.of_sec interval)
       >>= fun () ->
       run other
     | [] -> Lwt.return_unit
