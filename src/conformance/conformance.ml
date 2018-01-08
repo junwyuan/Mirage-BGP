@@ -223,7 +223,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     read_loop ()
   ;;
 
-
   module Int32_set = Set.Make(Int32)
 
   let test_propagate_group_update_to_new_peer s () =
@@ -300,6 +299,52 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     read_loop Int32_set.empty
   ;;
 
+  let test_route_withdraw s () =
+    let test_name = "route withdrawn" in
+    create_connection s (relay_id (), (relay1 ()).port) test_name
+    >>= fun (flow1, _) ->
+    create_connection s (relay_id (), (relay2 ()).port) test_name
+    >>= fun (flow2, _) ->
+    Bgp_flow.write flow1 (default_update ())
+    >>= function
+    | Error _ -> fail test_name "tcp write error"
+    | Ok () ->
+      let rec read_loop () =
+        Bgp_flow.read flow2
+        >>= function
+        | Error _ -> fail test_name "tcp read fail"
+        | Ok msg -> 
+          match msg with
+          | Keepalive -> read_loop ()
+          | Update { withdrawn; path_attrs; nlri } -> begin
+            match nlri with 
+            | [(Afi.IPv4 ip, _)] ->
+              if ip = Ipaddr.V4.to_int32 sample_id then 
+                Bgp_flow.close flow1
+                >>= fun () ->
+                Bgp_flow.read flow2
+                >>= function
+                | Error _ -> fail test_name "tcp read fail"
+                | Ok msg -> match msg with
+                  | Open _ | Keepalive | Notification _ -> fail test_name "wrong msg type"
+                  | Update { withdrawn } ->
+                    match withdrawn with
+                    | [(Afi.IPv4 ip, _)] ->
+                      if ip = Ipaddr.V4.to_int32 sample_id then
+                        Bgp_flow.close flow2
+                        >>= fun () ->
+                        pass test_name
+                      else fail test_name "incorrect withdrawn prefix"
+                    | _ -> fail test_name "incorrect withdrawns"
+              else
+                fail test_name "update message contain wrong info"
+            | _ -> fail test_name "update message contain wrong info"
+          end
+          | _ -> fail test_name "wrong msg type" 
+      in
+    read_loop ()
+  ;;
+
   let rec run tests = 
     match tests with
     | test::other -> 
@@ -318,7 +363,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_maintain_session s;
       test_propagate_update_to_old_peer s;
       test_propagate_update_to_new_peer s;
-      test_propagate_group_update_to_new_peer s
+      test_propagate_group_update_to_new_peer s;
+      test_route_withdraw s;
     ] in
     run tests
     >>= fun () ->
