@@ -401,7 +401,15 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     t.fsm <- new_fsm;
     
     (* Spawn threads to perform actions from left to right *)
-    let _ = List.fold_left (fun acc act -> List.cons (perform_action t act) acc) [] actions in
+    let rec loop = function
+      | [] -> Lwt.return_unit
+      | hd::tl -> 
+        perform_action t hd
+        >>= fun () ->
+        loop tl
+    in
+    let _ = loop actions in
+    (* let _ = List.fold_left (fun acc act -> List.cons (perform_action t act) acc) [] actions in *)
     
     match Fsm.state t.fsm with
     | Fsm.IDLE -> begin
