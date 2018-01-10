@@ -58,7 +58,8 @@ end = struct
   let handle_update t update = 
     let new_db, output = update_db t.db update in
     t.db <- new_db;
-    t.callback output
+    if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
+    else t.callback output
   ;;
 
   let to_string t =
@@ -215,7 +216,8 @@ end = struct
   let handle_update t (update, remote_id) =
     let new_db, output = update_db t.db (update, remote_id) in
     t.db <- new_db;
-    invoke_callback t (update, remote_id)
+    if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
+    else invoke_callback t (update, remote_id)
   ;;
 
   let handle_signal t = function
