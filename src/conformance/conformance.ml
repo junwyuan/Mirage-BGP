@@ -67,7 +67,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let fail test_name fail_reason = 
-    Conf_log.info (fun m -> m "Test %s fails: %s" test_name fail_reason);
+    Conf_log.err (fun m -> m "Test %s fails: %s" test_name fail_reason);
     Lwt.fail_with test_name
   ;;
 

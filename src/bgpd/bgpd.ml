@@ -379,7 +379,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       t.input_rib <- Some input_rib;
 
       let output_rib =
-        let callback u = 
+        let open Rib in
+        let callback ({ withdrawn; path_attrs; nlri} as u) = 
           let converted = Util.Rib_to_Bgp.convert_update u in
           send_msg t (Bgp.Update converted)
         in
@@ -401,15 +402,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     t.fsm <- new_fsm;
     
     (* Spawn threads to perform actions from left to right *)
-    let rec loop = function
+    let rec perform_actions = function
       | [] -> Lwt.return_unit
-      | hd::tl -> 
-        perform_action t hd
+      | hd::tl ->
+        Lwt.catch (fun () -> perform_action t hd) (fun exn -> Lwt.return_unit) 
         >>= fun () ->
-        loop tl
+        perform_actions tl
     in
-    let _ = loop actions in
-    (* let _ = List.fold_left (fun acc act -> List.cons (perform_action t act) acc) [] actions in *)
+    let _ = perform_actions actions in
     
     match Fsm.state t.fsm with
     | Fsm.IDLE -> begin
