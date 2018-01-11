@@ -261,7 +261,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start s =
-    let test_sizes = [1000; 10000; 50000; 100000] in
+    let test_sizes = [2000000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
