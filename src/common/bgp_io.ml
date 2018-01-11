@@ -154,8 +154,6 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
       else parse t b
   ;;
 
-  
-  
   let write t msg = 
     match msg with
     | Open _ | Keepalive | Notification _ -> S.TCPV4.write t.flow (Bgp.gen_msg msg)

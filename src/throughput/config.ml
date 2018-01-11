@@ -49,12 +49,12 @@ let total =
 let main = 
   let keys = [ 
     (* Key.abstract local_asn;  *)
-    Key.abstract local_port;
+    (* Key.abstract local_port; *)
     (* Key.abstract local_id; *)
-    Key.abstract filename;
+    (* Key.abstract filename; *)
     Key.abstract burst;
     Key.abstract speaker;
-    Key.abstract total;
+    (* Key.abstract total; *)
   ] in
   foreign ~keys "Monitor.Main" (stackv4 @-> job)
 ;;
