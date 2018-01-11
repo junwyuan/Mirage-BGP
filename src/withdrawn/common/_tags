@@ -1,0 +1,6 @@
+true: package(result), package(cstruct), package(cstruct.ppx), package(lwt), package(ipaddr), package(logs)
+<bgp_io.*>: package(mirage), package(mirage-types), package(mirage-stack-lwt)
+<bgp_io_test.*>: package(alcotest)
+<test.*>: package(lwt.unix)
+<rib.*>: package(logs)
+"lib": include
