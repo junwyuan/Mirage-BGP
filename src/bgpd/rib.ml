@@ -8,22 +8,23 @@ type update = {
   nlri: Prefix.t list;
 }
 
-type remote_id = Ipaddr.V4.t
+module Adj_rib = struct
 
-module Adj_rib : sig
+(* : sig
   type t = {
-    remote_id: remote_id;
+    remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
     mutable db: Bgp.path_attrs Prefix_map.t;
   }
 
-  val create : remote_id -> (update -> unit Lwt.t) -> t
+  val create : Ipaddr.V4.t -> (update -> unit Lwt.t) -> t
   val handle_update : t -> update -> unit Lwt.t
   val to_string : t -> string
   val size : t -> int
-end = struct
+end = struct *)
+
   type t = {
-    remote_id: remote_id;
+    remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
     mutable db: Bgp.path_attrs Prefix_map.t;
   }
@@ -80,35 +81,42 @@ end = struct
   ;;
 end
 
+module Util = struct
+
+end
+
 module Id_map = Map.Make(Ipaddr.V4)
 
-module Loc_rib : sig
+module Loc_rib = struct
+(* : sig
   type t = {
+    local_as: int32;
     mutable subs: Adj_rib.t Id_map.t;
-    mutable db: (Bgp.path_attrs * remote_id) Prefix_map.t;
+    mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
   }
 
   type signal = 
-    | Update of (update * remote_id)
+    | Update of (update * Ipaddr.V4.t)
     | Subscribe of Adj_rib.t
     | Unsubscribe of Adj_rib.t
 
-  val create : t
+  val create : int32 -> t
   val handle_signal : t -> signal -> unit Lwt.t
   val to_string : t -> string
   val size : t -> int
-end = struct
+end = struct *)
   (* Logging *)
   let rib_log = Logs.Src.create ~doc:"Loc-ocamlRIB logging" "Loc-RIB"
   module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 
   type t = {
+    local_as: int32;
     mutable subs: Adj_rib.t Id_map.t;
-    mutable db: (Bgp.path_attrs * remote_id) Prefix_map.t;
+    mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
   }
 
   type signal = 
-    | Update of (update * remote_id)
+    | Update of (update * Ipaddr.V4.t)
     | Subscribe of Adj_rib.t
     | Unsubscribe of Adj_rib.t
 
@@ -170,51 +178,118 @@ end = struct
       invoke_callback t (update, rib.remote_id)
   ;;
   
-  let is_better x y = true
+  let is_aspath_loop local_as segment_list =
+    let f = function
+      | Bgp.Seq l -> List.mem local_as l
+      | Bgp.Set l -> List.mem local_as l
+    in
+    List.exists f segment_list
+  ;;
 
-  let create = {
+  let get_aspath_len segment_list =
+    let rec loop len = function
+      | [] -> len
+      | segment::tl -> match segment with
+        | Bgp.Seq l -> loop (len + List.length l) tl
+        | Bgp.Set l -> loop (len + 1) tl
+    in
+    loop 0 segment_list
+  ;;
+
+  let find_origin path_attrs =
+    let rec loop = function
+      | [] -> 
+        Rib_log.err (fun m -> m "Missing ORIGIN");
+        failwith "Missing ORIGIN"
+      | hd::tl -> match hd with
+        | (_, Bgp.Origin v) -> v
+        | _ -> loop tl
+    in
+    loop path_attrs
+  ;;
+    
+  let find_as_path path_attrs =
+    let rec loop = function
+      | [] -> 
+        Rib_log.err (fun m -> m "Missing AS PATH");
+        failwith "Missing AS PATH"
+      | hd::tl -> match hd with
+        | (_, Bgp.As_path v) -> v
+        | (_, Bgp.As4_path v) -> v 
+        | _ -> loop tl
+    in
+    loop path_attrs
+  ;;
+
+  (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
+  let tie_break (path_attrs_1, peer_id_1) (path_attrs_2, peer_id_2) = 
+    let as_path_1 = find_as_path path_attrs_1 in
+    let as_path_2 = find_as_path path_attrs_2 in
+    if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then true
+    else if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then false
+    else begin
+      let origin_1 = find_origin path_attrs_1 in
+      let origin_2 = find_origin path_attrs_2 in
+      if origin_1 = Bgp.EGP && origin_2 = Bgp.IGP then true
+      else if origin_1 = Bgp.IGP && origin_2 = Bgp.EGP then false
+      else begin
+        if Ipaddr.V4.compare peer_id_1 peer_id_2 = -1 then true else false
+      end
+    end
+  ;;
+
+  let create local_as = {
+    local_as;
     subs = Id_map.empty;
     db = Prefix_map.empty;
   }
 
-  let update_db db ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, remote_id) =
-    (* This function is pure *)
-
+  (* This function is pure *)
+  let update_db local_as db ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, peer_id) =
+    (* Withdrawn from Loc-RIB *)
     let (db_aft_wd, out_wd) =
-      let f (db, wd) pfx = 
+      let f (db, out_wd) pfx = 
         let opt = Prefix_map.find_opt pfx db in
         match opt with
-        | None -> db, wd
-        | Some (_, stored) -> if (stored = remote_id) then (Prefix_map.remove pfx db, List.cons pfx wd) else db, wd
+        | None -> db, out_wd
+        | Some (_, stored) -> if (stored = peer_id) then (Prefix_map.remove pfx db, List.cons pfx out_wd) else db, out_wd
       in
       List.fold_left f (db, []) in_wd
     in
 
-    let db_aft_insert, out_nlri = 
-      let f (db, out_nlri) pfx = 
-        let opt = Prefix_map.find_opt pfx db in
-        match opt with
-        | None -> (Prefix_map.add pfx (path_attrs, remote_id) db, List.cons pfx out_nlri)
-        | Some (pa, stored) ->
-          if stored = remote_id then (Prefix_map.add pfx (path_attrs, remote_id) db, List.cons pfx out_nlri)
-          else if is_better path_attrs pa then (Prefix_map.add pfx (path_attrs, remote_id) db, List.cons pfx out_nlri)
-          else db, out_nlri
+    (* If the advertised path is looping, don't install any new routes *)
+    if is_aspath_loop local_as (find_as_path path_attrs) then
+      let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
+      (db_aft_wd, out_update)
+    else
+      let db_aft_insert, out_nlri = 
+        let f (db, out_nlri) pfx = 
+          let opt = Prefix_map.find_opt pfx db in
+          match opt with
+          | None -> (Prefix_map.add pfx (path_attrs, peer_id) db, List.cons pfx out_nlri)
+          | Some (stored_pattrs, src_id) ->
+            (* If from the same peer, replace without compare *)
+            if src_id = peer_id then 
+              (Prefix_map.add pfx (path_attrs, peer_id) db, List.cons pfx out_nlri)
+            else if tie_break (path_attrs, peer_id) (stored_pattrs, src_id) then 
+              (Prefix_map.add pfx (path_attrs, peer_id) db, out_nlri)
+            else db, out_nlri
+        in
+        List.fold_left f (db_aft_wd, []) in_nlri
       in
-      List.fold_left f (db_aft_wd, []) in_nlri
-    in
 
-    let output = {
-      withdrawn = out_wd;
-      path_attrs;
-      nlri = out_nlri
-    }
-    in 
+      let out_update = {
+        withdrawn = out_wd;
+        path_attrs;
+        nlri = out_nlri
+      }
+      in 
 
-    (db_aft_insert, output)
+      (db_aft_insert, out_update)
   ;;
 
   let handle_update t (update, remote_id) =
-    let new_db, output = update_db t.db (update, remote_id) in
+    let new_db, output = update_db t.local_as t.db (update, remote_id) in
     t.db <- new_db;
     if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
     else invoke_callback t (update, remote_id)
