@@ -1,12 +1,10 @@
+open Bgp
+
 (* The underlying data store is a binary tree *)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
 
-type update = {
-  withdrawn: Prefix.t list;
-  path_attrs: Bgp.path_attrs;
-  nlri: Prefix.t list;
-}
+type update = Bgp.update
 
 module Adj_rib = struct
 
@@ -35,7 +33,7 @@ end = struct *)
     db = Prefix_map.empty;
   }
 
-  let update_db db { withdrawn; path_attrs; nlri } = 
+  let update_db { withdrawn; path_attrs; nlri } db  = 
     let wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
     let after_wd =
       let f rib pfx = Prefix_map.remove pfx rib in
@@ -57,7 +55,7 @@ end = struct *)
   ;;
 
   let handle_update t update = 
-    let new_db, output = update_db t.db update in
+    let new_db, output = update_db update t.db in
     t.db <- new_db;
     if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
     else t.callback output
@@ -110,7 +108,7 @@ end = struct *)
   module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 
   type t = {
-    local_as: int32;
+    local_asn: int32;
     mutable subs: Adj_rib.t Id_map.t;
     mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
   }
@@ -180,8 +178,8 @@ end = struct *)
   
   let is_aspath_loop local_as segment_list =
     let f = function
-      | Bgp.Seq l -> List.mem local_as l
-      | Bgp.Set l -> List.mem local_as l
+      | Bgp.Asn_seq l -> List.mem local_as l
+      | Bgp.Asn_set l -> List.mem local_as l
     in
     List.exists f segment_list
   ;;
@@ -190,8 +188,8 @@ end = struct *)
     let rec loop len = function
       | [] -> len
       | segment::tl -> match segment with
-        | Bgp.Seq l -> loop (len + List.length l) tl
-        | Bgp.Set l -> loop (len + 1) tl
+        | Bgp.Asn_seq l -> loop (len + List.length l) tl
+        | Bgp.Asn_set l -> loop (len + 1) tl
     in
     loop 0 segment_list
   ;;
@@ -208,7 +206,7 @@ end = struct *)
     loop path_attrs
   ;;
     
-  let find_as_path path_attrs =
+  let find_aspath path_attrs =
     let rec loop = function
       | [] -> 
         Rib_log.err (fun m -> m "Missing AS PATH");
@@ -223,8 +221,8 @@ end = struct *)
 
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
   let tie_break (path_attrs_1, peer_id_1) (path_attrs_2, peer_id_2) = 
-    let as_path_1 = find_as_path path_attrs_1 in
-    let as_path_2 = find_as_path path_attrs_2 in
+    let as_path_1 = find_aspath path_attrs_1 in
+    let as_path_2 = find_aspath path_attrs_2 in
     if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then true
     else if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then false
     else begin
@@ -238,14 +236,14 @@ end = struct *)
     end
   ;;
 
-  let create local_as = {
-    local_as;
+  let create local_asn = {
+    local_asn;
     subs = Id_map.empty;
     db = Prefix_map.empty;
   }
 
   (* This function is pure *)
-  let update_db local_as db ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, peer_id) =
+  let update_db local_as ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, peer_id) db =
     (* Withdrawn from Loc-RIB *)
     let (db_aft_wd, out_wd) =
       let f (db, out_wd) pfx = 
@@ -258,7 +256,7 @@ end = struct *)
     in
 
     (* If the advertised path is looping, don't install any new routes *)
-    if is_aspath_loop local_as (find_as_path path_attrs) then
+    if is_aspath_loop local_as (find_aspath path_attrs) then
       let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
       (db_aft_wd, out_update)
     else
@@ -289,7 +287,7 @@ end = struct *)
   ;;
 
   let handle_update t (update, remote_id) =
-    let new_db, output = update_db t.local_as t.db (update, remote_id) in
+    let new_db, output = update_db t.local_asn (update, remote_id) t.db in
     t.db <- new_db;
     if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
     else invoke_callback t (update, remote_id)

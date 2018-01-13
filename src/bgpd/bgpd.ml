@@ -1,4 +1,5 @@
 open Lwt.Infix
+open Bgp
 
 (* Logging *)
 let bgpd_src = Logs.Src.create "BGP" ~doc:"BGP logging"
@@ -46,9 +47,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   
   type t = {
     remote_id: Ipaddr.V4.t;
-    remote_asn: int;
+    remote_asn: int32;
     local_id: Ipaddr.V4.t;
-    local_asn: int;
+    local_asn: int32;
     socket: S.t;
     mutable fsm: Fsm.t;
     mutable flow: Bgp_flow.t option;
@@ -263,9 +264,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let open Fsm in
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 t.local_id;
-      my_as = Asn t.local_asn;
+      local_asn = t.local_asn;
       hold_time = t.fsm.hold_time;
+      local_id = t.local_id;
       options = [];
     } in
     send_msg t (Bgp.Open o) 
@@ -366,23 +367,22 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       Lwt.return_unit
     end
     | Process_update_msg u -> begin
-      let converted = Util.Bgp_to_Rib.convert_update u in
       match t.input_rib with
       | None -> Bgp_log.err (fun m -> m "Input RIB not initiated"); Lwt.fail_with "Input RIB not initiated."
-      | Some rib -> Rib.Adj_rib.handle_update rib converted
+      | Some rib -> Rib.Adj_rib.handle_update rib u
     end
     | Initiate_rib ->
       let input_rib = 
-        let callback u = Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.remote_id)) in
+        let callback u = 
+          Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.remote_id)) 
+        in
         Rib.Adj_rib.create t.remote_id callback
       in
       t.input_rib <- Some input_rib;
 
       let output_rib =
-        let open Rib in
-        let callback ({ withdrawn; path_attrs; nlri} as u) = 
-          let converted = Util.Rib_to_Bgp.convert_update u in
-          send_msg t (Bgp.Update converted)
+        let callback u = 
+          send_msg t (Bgp.Update u)
         in
         Rib.Adj_rib.create t.remote_id callback
       in
@@ -516,13 +516,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
         
   let start s =
-    let loc_rib = Rib.Loc_rib.create in
+    let loc_rib = Rib.Loc_rib.create 1_l in
     let fsm = Fsm.create 240 90 30 in
     let t1 = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.3"; 
-      remote_asn = 4;
+      remote_asn = 4_l;
       local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
-      local_asn = 1;
+      local_asn = 1_l;
       socket = s; 
       fsm; 
       flow = None;
@@ -547,9 +547,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     } in
     let t2 = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.4"; 
-      remote_asn = 5;
+      remote_asn = 5_l;
       local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
-      local_asn = 1;
+      local_asn = 1_l;
       socket = s; 
       fsm; 
       flow = None;

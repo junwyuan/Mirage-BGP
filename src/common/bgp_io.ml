@@ -10,10 +10,11 @@ module Util = struct
   let rec take pfxs len acc =
       match pfxs with
       | [] -> ([], acc)
-      | ((_, mask) as hd)::tl ->
-        let bs = ((mask + 7) / 8) + 1 in
-        if bs > len then (pfxs, acc) 
-        else take tl (len - bs) (hd :: acc)
+      | pfx::tl ->
+        let mask = Ipaddr.V4.Prefix.bits pfx in
+        let bs = pfxlen_to_bytes mask in
+        if bs > len then (pfxs, acc)
+        else take tl (len - bs) (pfx::acc)
   ;;
 
   let split_update ({ withdrawn; path_attrs; nlri } as u) =
@@ -33,7 +34,7 @@ module Util = struct
 
       let split_wd = 
         if len_wd <= 4096 - len_fixed then [withdrawn]
-        else split u.withdrawn (4096 - len_fixed) [] 
+        else split withdrawn (4096 - len_fixed) [] 
       in
       let o1 = List.map (fun pfxs -> Update { withdrawn = pfxs; path_attrs = []; nlri = []}) split_wd in
 
@@ -106,7 +107,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
 
   let rec read t : (Bgp.t, read_error) Result.result Lwt.t = 
     let parse t b =
-      let msg_len = Bgp.get_h_len b in
+      let msg_len = Bgp.get_msg_len b in
       let msg_buf, rest = Cstruct.split b msg_len in
       if Cstruct.len rest > 0 then t.buf <- Some rest else t.buf <- None;
       let parsed = Bgp.parse_buffer_to_t msg_buf in
@@ -129,13 +130,13 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?"
       end
       | Ok (`Data b) -> begin
-        if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then begin
+        if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then begin
           t.buf <- Some b;
           read t
         end else parse t b
       end)
     | Some b ->
-      if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_h_len b) then
+      if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then
         S.TCPV4.read t.flow
         >>= fun result ->
         match result with
