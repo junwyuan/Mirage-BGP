@@ -2,6 +2,9 @@ FROM ocaml/opam:ubuntu
 
 RUN opam init
 RUN opam install mirage -y
+RUN opam install cstruct -y
+RUN opam install ppx_cstruct -y
+RUN opam install lwt -y
 
 RUN sudo apt-get update; sudo apt-get upgrade -y
 RUN sudo apt-get install -y vim
