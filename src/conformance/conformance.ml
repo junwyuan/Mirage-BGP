@@ -6,12 +6,9 @@ let conf_log = Logs.Src.create "Conf" ~doc:"Conformance tests log"
 module Conf_log = (val Logs.src_log conf_log : Logs.LOG)
 
 module Ip_gen = struct
-  let default_seed = 
-    Int32.shift_left 128_l 24
+  let default_seed = Int32.shift_left 128_l 24
   
-  let next seed = 
-    let s = Int32.add seed 256_l in
-    (Afi.IPv4 s, s)
+  let next seed = Int32.add seed 256_l
 end
 
 module Main (S: Mirage_stack_lwt.V4) = struct 
@@ -38,8 +35,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let default_open_msg relay = 
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 relay.id;
-      my_as = Asn (Int32.to_int relay.as_no);
+      local_id = relay.id;
+      local_asn = relay.as_no;
       options = [];
       hold_time = default_hold_time;
     } in
@@ -51,7 +48,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let open Bgp in
     let open Relay in
     let withdrawn = [] in
-    let nlri = [(Afi.IPv4 (Ipaddr.V4.to_int32 sample_id), 8)] in
+    let nlri = [ Ipaddr.V4.Prefix.make 8 sample_id] in
     let flags = {
       optional=false;
       transitive=true;
@@ -60,10 +57,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     } in
     let path_attrs = [
       (flags, Origin EGP);
-      (flags, Next_hop (Ipaddr.V4.to_int32 (relay1 ()).id));
-      (flags, As_path [Bgp.Seq [(relay1 ()).as_no; 2_l; 3_l]])
+      (flags, Next_hop (relay1 ()).id);
+      (flags, As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]])
     ] in
-    Update {withdrawn; nlri; path_attrs}
+    Update { withdrawn; nlri; path_attrs}
   ;;
 
   let fail test_name fail_reason = 
@@ -170,8 +167,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           | Keepalive -> read_loop ()
           | Update { withdrawn; path_attrs; nlri } -> begin
             match nlri with 
-            | [(Afi.IPv4 ip, _)] ->
-              if ip = Ipaddr.V4.to_int32 sample_id then 
+            | [ pfx ] ->
+              if Ipaddr.V4.Prefix.network pfx = sample_id then 
                 Bgp_flow.close flow1
                 >>= fun () ->
                 Bgp_flow.close flow2
@@ -205,8 +202,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           | Keepalive -> read_loop ()
           | Update { withdrawn; path_attrs; nlri } -> begin
             match nlri with 
-            | [(Afi.IPv4 ip, _)] ->
-              if ip = Ipaddr.V4.to_int32 sample_id then 
+            | [pfx] ->
+              if Ipaddr.V4.Prefix.network pfx = sample_id then 
                 Bgp_flow.close flow1
                 >>= fun () ->
                 Bgp_flow.close flow2
@@ -221,7 +218,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     read_loop ()
   ;;
 
-  module Int32_set = Set.Make(Int32)
+  module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
 
   let test_propagate_group_update_to_new_peer s () =
     let test_name = "group propagate update to new peer" in
@@ -239,12 +236,12 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let open Bgp in
           let flags = { optional=false; transitive=true; extlen=false; partial=false } in
           let origin = Origin EGP in
-          let next_hop = Next_hop (Ipaddr.V4.to_int32 (relay1 ()).id) in
-          let as_path = As_path [Seq [(relay1 ()).as_no; 2_l; 3_l]] in
+          let next_hop = Next_hop (relay1 ()).id in
+          let as_path = As_path [Asn_seq [(relay1 ()).as_no; 2_l; 3_l]] in
           List.map (fun pa -> (flags, pa)) [origin; next_hop; as_path]
         in
-        let ip, n_seed = Ip_gen.next seed in
-        let nlri = [(ip, 24)] in
+        let n_seed = Ip_gen.next seed in
+        let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_int32 n_seed) ] in
         let u = { withdrawn; path_attrs; nlri } in
         Bgp_flow.write flow (Bgp.Update u)
         >>= function
@@ -258,7 +255,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* connect to speaker2 *)
     create_connection s (relay2 ()) test_name
     >>= fun (flow2, _) ->
-    let rec read_loop set =
+    let rec read_loop (set: Prefix_set.t) =
       Bgp_flow.read flow2
       >>= function
       | Error _ -> fail test_name "tcp read fail"
@@ -267,34 +264,16 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         | Keepalive -> read_loop set
         | Update { withdrawn; path_attrs; nlri } -> begin
           (* update recorded ids *)
-          let f acc (ip, _) =
-            match ip with
-            | Afi.IPv4 ip -> Int32_set.add ip acc
-            | Afi.IPv6 _ -> acc
-          in
-          let new_set = List.fold_left f set nlri in
-          
+          let new_set = List.fold_left (fun acc pfx -> Prefix_set.add pfx acc) set nlri in
           (* check for completeness *)
-          let rec check i =
-            if (i >= group_size) then
-              Bgp_flow.close flow1
-              >>= fun () ->
-              Bgp_flow.close flow2
-              >>= fun () ->
-              pass test_name
-            else
-              let i32 = Int32.of_int i in
-              let tmp = Int32.add Ip_gen.default_seed (Int32.mul i32 256_l) in
-              match Int32_set.mem tmp new_set with
-              | true ->  
-                check (i + 1)
-              | false -> read_loop new_set
-          in
-          check 1
+          if Prefix_set.cardinal new_set = 500 then 
+            pass test_name
+          else
+            read_loop new_set
         end
         | _ -> fail test_name "wrong msg type" 
     in
-    read_loop Int32_set.empty
+    read_loop Prefix_set.empty
   ;;
 
   let test_route_withdraw s () =
@@ -316,8 +295,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           | Keepalive -> read_loop ()
           | Update { withdrawn; path_attrs; nlri } -> begin
             match nlri with 
-            | [(Afi.IPv4 ip, _)] ->
-              if ip = Ipaddr.V4.to_int32 sample_id then 
+            | [ pfx ] ->
+              if Ipaddr.V4.Prefix.network pfx = sample_id then 
                 Bgp_flow.close flow1
                 >>= fun () ->
                 Bgp_flow.read flow2
@@ -327,8 +306,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                   | Open _ | Keepalive | Notification _ -> fail test_name "wrong msg type"
                   | Update { withdrawn } ->
                     match withdrawn with
-                    | [(Afi.IPv4 ip, _)] ->
-                      if ip = Ipaddr.V4.to_int32 sample_id then
+                    | [ pfx ] ->
+                      if Ipaddr.V4.Prefix.network pfx = sample_id then
                         Bgp_flow.close flow2
                         >>= fun () ->
                         pass test_name
@@ -347,7 +326,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let interval = 
       match (Key_gen.speaker ()) with
       | "quagga" -> 10
-      | _ -> 1
+      | _ -> 10
     in
     match tests with
     | test::other -> 
