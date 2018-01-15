@@ -241,11 +241,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     OS.Time.sleep_ns (Duration.of_sec min_ad_intvl)
     >>= fun () ->
     (* start feeding speaker1 *)
-    let start_time = Unix.gettimeofday () in
     Replay.plain_feed flow1 0 total 500 seed
     >>= fun () ->
     OS.Time.sleep_ns (Duration.of_sec 5)
     >>= fun () ->
+    let start_time = Unix.gettimeofday () in
     close flow1
     >>= fun () ->
     let sending_time = Unix.gettimeofday () -. start_time in
@@ -261,7 +261,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start s =
-    let test_sizes = [2000000] in
+    let test_sizes = [1000; 10000; 50000; 100000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
