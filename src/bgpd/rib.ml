@@ -7,20 +7,6 @@ module Prefix_map = Map.Make(Prefix)
 type update = Bgp.update
 
 module Adj_rib = struct
-
-(* : sig
-  type t = {
-    remote_id: Ipaddr.V4.t;
-    callback: update -> unit Lwt.t;
-    mutable db: Bgp.path_attrs Prefix_map.t;
-  }
-
-  val create : Ipaddr.V4.t -> (update -> unit Lwt.t) -> t
-  val handle_update : t -> update -> unit Lwt.t
-  val to_string : t -> string
-  val size : t -> int
-end = struct *)
-
   type t = {
     remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
@@ -57,8 +43,10 @@ end = struct *)
   let handle_update t update = 
     let new_db, output = update_db update t.db in
     t.db <- new_db;
-    if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
-    else t.callback output
+    if output.nlri = [] && output.withdrawn = [] then 
+      Lwt.return_unit
+    else 
+      t.callback output
   ;;
 
   let to_string t =
@@ -73,36 +61,12 @@ end = struct *)
     Printf.sprintf "Adj_RIB \n Remote: %s \n Prefixes: %s" (Ipaddr.V4.to_string t.remote_id) pfxs_str
   ;;
 
-  let size t = 
-    let f _ _ acc = acc + 1 in
-    Prefix_map.fold f t.db 0
-  ;;
-end
-
-module Util = struct
-
+  let size t = Prefix_map.cardinal t.db
 end
 
 module Id_map = Map.Make(Ipaddr.V4)
 
 module Loc_rib = struct
-(* : sig
-  type t = {
-    local_as: int32;
-    mutable subs: Adj_rib.t Id_map.t;
-    mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
-  }
-
-  type signal = 
-    | Update of (update * Ipaddr.V4.t)
-    | Subscribe of Adj_rib.t
-    | Unsubscribe of Adj_rib.t
-
-  val create : int32 -> t
-  val handle_signal : t -> signal -> unit Lwt.t
-  val to_string : t -> string
-  val size : t -> int
-end = struct *)
   (* Logging *)
   let rib_log = Logs.Src.create ~doc:"Loc-ocamlRIB logging" "Loc-RIB"
   module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
@@ -223,8 +187,8 @@ end = struct *)
   let tie_break (path_attrs_1, peer_id_1) (path_attrs_2, peer_id_2) = 
     let as_path_1 = find_aspath path_attrs_1 in
     let as_path_2 = find_aspath path_attrs_2 in
-    if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then true
-    else if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then false
+    if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then true
+    else if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then false
     else begin
       let origin_1 = find_origin path_attrs_1 in
       let origin_2 = find_origin path_attrs_2 in
@@ -256,7 +220,7 @@ end = struct *)
     in
 
     (* If the advertised path is looping, don't install any new routes *)
-    if is_aspath_loop local_as (find_aspath path_attrs) then
+    if in_nlri = [] || is_aspath_loop local_as (find_aspath path_attrs) then
       let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
       (db_aft_wd, out_update)
     else
@@ -318,9 +282,6 @@ end = struct *)
     Printf.sprintf "Loc-RIB \n Connections: %s \n Routes:  %s" subs_str pfxs_str
   ;;
 
-  let size t = 
-    let f _ _ acc = acc + 1 in
-    Prefix_map.fold f t.db 0
-  ;;
+  let size t = Prefix_map.cardinal t.db
 end
 
