@@ -14,6 +14,7 @@ type t = {
   keepalive_time: int;
 }
 
+
 type event = 
   | Manual_start
   | Manual_stop
@@ -32,7 +33,7 @@ type event =
   | Bgp_open_msg_err of Bgp.open_message_error
   | Open_collision_dump
   | Notif_msg_ver_err
-  | Notif_msg of Bgp.msg_fmt_error
+  | Notif_msg of Bgp.error
   | Keepalive_msg
   | Update_msg of Bgp.update
   | Update_msg_err of Bgp.update_message_error

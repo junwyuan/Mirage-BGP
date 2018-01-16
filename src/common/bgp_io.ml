@@ -55,7 +55,7 @@ module type S = sig
   type conn_error
   type read_error = private [>
   | `Closed
-  | `BGP_MSG_ERR of Bgp.error
+  | `PARSE_ERROR of Bgp.parse_error
   | Mirage_protocols.Tcp.error
   ]
   type write_error
@@ -79,7 +79,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   type flow = S.TCPV4.flow
   type read_error = private [>
   | `Closed
-  | `BGP_MSG_ERR of Bgp.error
+  | `PARSE_ERROR of Bgp.parse_error
   | Mirage_protocols.Tcp.error
   ]
   type write_error = S.TCPV4.write_error
@@ -113,7 +113,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
       let parsed = Bgp.parse_buffer_to_t msg_buf in
       match parsed with 
       | Result.Ok msg -> Lwt.return (Ok msg)
-      | Result.Error err -> Lwt.return (Error (`BGP_MSG_ERR err))
+      | Result.Error err -> Lwt.return (Error (`PARSE_ERROR err))
     in
 
     match t.buf with

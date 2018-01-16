@@ -88,20 +88,40 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           let _ = callback event in
           flow_reader t callback
         | Error err ->
+          t.flow_reader <- None;
           (match err with
-          | `Closed -> Bgp_log.debug (fun m -> m "Connection closed when read." ~tags:(stamp t.remote_id))
-          | `Refused -> Bgp_log.debug (fun m -> m "Read refused." ~tags:(stamp t.remote_id));
-          | `Timeout -> Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
-          | `BGP_MSG_ERR err -> begin
+          | `Closed -> 
+            Bgp_log.debug (fun m -> m "Connection closed when read." ~tags:(stamp t.remote_id));
+            callback Fsm.Tcp_connection_fail
+          | `Refused -> 
+            Bgp_log.debug (fun m -> m "Read refused." ~tags:(stamp t.remote_id));
+            callback Fsm.Tcp_connection_fail
+          | `Timeout -> 
+            Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
+            callback Fsm.Tcp_connection_fail
+          | `PARSE_ERROR err -> begin
             match err with
             | Bgp.Parsing_error -> 
-              Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id))
-            | Bgp.Msg_fmt_error _ | Bgp.Notif_fmt_error _ -> 
-              Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id))
+              Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id));
+              (* I don't know what the correct event for this should be. *)
+              callback Fsm.Tcp_connection_fail
+            | Bgp.Msg_fmt_error err -> begin
+              Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id));
+              match err with
+              | Bgp.Parse_msg_h_err sub_err -> callback (Fsm.Bgp_header_err sub_err)
+              | Bgp.Parse_open_msg_err sub_err -> callback (Fsm.Bgp_open_msg_err sub_err)
+              | Bgp.Parse_update_msg_err sub_err -> callback (Fsm.Update_msg_err sub_err)
+            end
+            | Bgp.Notif_fmt_error _ -> 
+              Bgp_log.err (fun m -> m "Got an notification message error" ~tags:(stamp t.remote_id));
+              (* I don't know what the correct event for this should be. *)
+              (* I should log this event locally *)
+              callback Fsm.Tcp_connection_fail
           end
-          | _ -> ());
-          t.flow_reader <- None;
-          callback Fsm.Tcp_connection_fail
+          | _ -> 
+            Bgp_log.warn (fun m -> m "Unknown read error in flow reader" ~tags:(stamp t.remote_id));
+            Lwt.return_unit
+          )
       in
       t.flow_reader <- Some (Device.create task wrapped_callback);
       Lwt.return_unit

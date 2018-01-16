@@ -97,6 +97,8 @@ module Loc_rib = struct
     Lwt.join (Id_map.fold f t.subs [])
   ;;
 
+  
+
   let subscribe t rib = 
     let open Adj_rib in
     match (is_subscribed t rib) with
