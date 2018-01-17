@@ -78,11 +78,37 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       let wrapped_callback read_result =
         match read_result with
         | Ok msg -> 
-          let event = match msg with
-          | Bgp.Open o -> t.stat.rec_open <- t.stat.rec_open + 1; Fsm.BGP_open o
-          | Bgp.Update u -> t.stat.rec_update <- t.stat.rec_update + 1; Fsm.Update_msg u
-          | Bgp.Notification e -> t.stat.rec_notif <- t.stat.rec_notif + 1; Fsm.Notif_msg e
-          | Bgp.Keepalive -> t.stat.rec_keepalive <- t.stat.rec_keepalive + 1; Fsm.Keepalive_msg
+          let event = 
+            match msg with
+            | Bgp.Open o -> 
+              t.stat.rec_open <- t.stat.rec_open + 1; 
+              (* Open message err checking *)
+              if o.version <> 4 then Fsm.Bgp_open_msg_err (Unsupported_version_number 4)
+              (* This is not exactly what the specification indicates *)
+              else if o.local_asn <> t.remote_asn then Fsm.Bgp_open_msg_err Bad_peer_as
+              else Fsm.BGP_open o
+            | Bgp.Update u -> begin
+              t.stat.rec_update <- t.stat.rec_update + 1;
+
+              match find_aspath u.path_attrs with
+              | None -> Fsm.Update_msg_err (Missing_wellknown_attribute 2)
+              | Some [] -> Fsm.Update_msg_err Malformed_as_path
+              | Some (hd::tl) ->
+                match hd with
+                | Asn_seq l -> 
+                  if List.hd l <> t.remote_asn then Fsm.Update_msg_err Malformed_as_path
+                  else Fsm.Update_msg u
+                | Asn_set l ->
+                  if List.mem t.remote_asn l then Fsm.Update_msg_err Malformed_as_path
+                  else Fsm.Update_msg u
+                  
+            end
+            | Bgp.Notification e -> 
+              t.stat.rec_notif <- t.stat.rec_notif + 1; 
+              Fsm.Notif_msg e
+            | Bgp.Keepalive -> 
+              t.stat.rec_keepalive <- t.stat.rec_keepalive + 1; 
+              Fsm.Keepalive_msg
           in
           Bgp_log.debug (fun m -> m "receive message %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id));
           let _ = callback event in
