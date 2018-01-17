@@ -43,7 +43,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Bgp.Open o
   ;;
   
-
   let default_update () = 
     let open Bgp in
     let open Relay in
@@ -112,7 +111,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                 match msg with
                 | Keepalive ->
                   Lwt.return (flow, o)
-                | _ -> fail test_name "wrong msg type"
+                | _ -> fail test_name (Printf.sprintf "wrong msg type: %s" (Bgp.to_string msg))
+  ;;
+
+  let close_session flow = 
+    Bgp_flow.write flow (Notification Cease)
+    >>= function
+    | Error _ -> fail "unknown" "fail to write"
+    | Ok () -> Bgp_flow.close flow
   ;;
 
   let test_create_session s () = 
@@ -219,7 +225,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
-
   let test_propagate_group_update_to_new_peer s () =
     let test_name = "group propagate update to new peer" in
     let group_size = 500 in
@@ -267,6 +272,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let new_set = List.fold_left (fun acc pfx -> Prefix_set.add pfx acc) set nlri in
           (* check for completeness *)
           if Prefix_set.cardinal new_set = 500 then 
+            close_session flow1
+            >>= fun () ->
+            close_session flow2
+            >>= fun () ->
             pass test_name
           else
             read_loop new_set
@@ -308,7 +317,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                     match withdrawn with
                     | [ pfx ] ->
                       if Ipaddr.V4.Prefix.network pfx = sample_id then
-                        Bgp_flow.close flow2
+                        close_session flow2
+                        >>= fun () ->
+                        close_session flow1
                         >>= fun () ->
                         pass test_name
                       else fail test_name "incorrect withdrawn prefix"
@@ -325,8 +336,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let rec run tests = 
     let interval = 
       match (Key_gen.speaker ()) with
-      | "quagga" -> 10
-      | _ -> 10
+      | "quagga" -> 30
+      | _ -> 30
     in
     match tests with
     | test::other -> 
@@ -341,10 +352,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let start s =
     Conf_log.info (fun m -> m "test starts");
     let tests = [
-      test_create_session s; 
+      (* test_create_session s; 
       test_maintain_session s;
       test_propagate_update_to_old_peer s;
-      test_propagate_update_to_new_peer s;
+      test_propagate_update_to_new_peer s; *)
       test_propagate_group_update_to_new_peer s;
       test_route_withdraw s;
     ] in
