@@ -7,45 +7,57 @@ open Lwt.Infix
 open Bgp
 
 module Util = struct
-  let rec take pfxs len acc =
+  let take pfxs len =
+    let rec loop pfxs len acc =
       match pfxs with
-      | [] -> ([], acc)
+      | [] -> (acc, [])
       | pfx::tl ->
         let mask = Ipaddr.V4.Prefix.bits pfx in
-        let bs = pfxlen_to_bytes mask in
-        if bs > len then (pfxs, acc)
-        else take tl (len - bs) (pfx::acc)
+        let bs = pfxlen_to_bytes mask + 1 in
+        if bs > len then 
+          (acc, pfxs)
+        else 
+          loop tl (len - bs) (pfx::acc)
+    in
+    loop pfxs len []
   ;;
 
-  let split_update ({ withdrawn; path_attrs; nlri } as u) =
-    let rec split pfxs len acc =
-      let rest, taken = take pfxs len [] in
+  let rec split pfxs len =
+    let rec loop pfxs len acc = 
+      let taken, rest = take pfxs len in
       match rest with
       | [] -> taken::acc
-      | _ -> split rest len (taken::acc)
+      | _ -> loop rest len (taken::acc)
     in
+    loop pfxs len []
+  ;;
 
-    if len_update_buffer u <= 4096 then [Update u]
-    else begin
-      let len_fixed = 23 in
-      let len_wd = len_pfxs_buffer withdrawn in
-      let len_pa = len_path_attrs_buffer path_attrs in
-      let len_nlri = len_pfxs_buffer nlri in
+  let split_update update =
+    let rec loop ({ withdrawn; path_attrs; nlri } as u) = 
+      if len_update_buffer u <= 4096 then [u]
+      else
+        let len_fixed = 23 in
+        let len_wd = len_pfxs_buffer withdrawn in
 
-      let split_wd = 
-        if len_wd <= 4096 - len_fixed then [withdrawn]
-        else split withdrawn (4096 - len_fixed) [] 
-      in
-      let o1 = List.map (fun pfxs -> Update { withdrawn = pfxs; path_attrs = []; nlri = []}) split_wd in
-
-      let split_nlri = 
-        if len_nlri <= 4096 - len_fixed - len_pa then [nlri]
-        else split nlri (4096 - len_fixed - len_pa) []
-      in
-      let o2 = List.map (fun pfxs -> Update { withdrawn = []; path_attrs; nlri = pfxs}) split_nlri in 
-
-      o1 @ o2
-    end 
+        if len_wd > 4096 - len_fixed then
+          let taken, withdrawn = take withdrawn (4096 - len_fixed) in
+          let update = { withdrawn = taken; path_attrs = []; nlri = [] } in
+          update :: loop { withdrawn; path_attrs; nlri }
+        else
+          let len_pa = len_path_attrs_buffer path_attrs in
+          if len_wd + len_pa + len_fixed >= 4096 then
+            let update = { withdrawn; path_attrs = []; nlri = [] } in
+            update :: loop { withdrawn; path_attrs; nlri }
+          else if len_wd > 0 then
+            let taken, nlri = take nlri (4096 - len_wd - len_pa - len_fixed) in
+            let update = { withdrawn; path_attrs; nlri = taken } in
+            update :: loop { withdrawn = []; path_attrs; nlri }
+          else
+            let taken, nlri = take nlri (4096 - len_pa - len_fixed) in
+            let update = { withdrawn = []; path_attrs; nlri = taken } in
+            update :: loop { withdrawn; path_attrs; nlri }
+    in
+    loop update
   ;;
 end
 
@@ -163,7 +175,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
       let rec sending_loop = function
         | [] -> Lwt.return (Ok ())
         | msg::tl -> 
-          S.TCPV4.write t.flow (Bgp.gen_msg msg)
+          S.TCPV4.write t.flow (Bgp.gen_msg (Bgp.Update msg))
           >>= fun result ->
           match result with
           | Error _ -> Lwt.return result
