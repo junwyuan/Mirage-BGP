@@ -1,0 +1,31 @@
+{
+  "local_asn": 10,
+  "local_id": "172.19.0.3",
+  "local_port": 179,
+  "peers": [
+    {
+      "remote_asn": 4,
+      "remote_id": "172.19.10.3",
+      "hold_time": 180,
+      "remote_port": 179
+    },
+    {
+      "remote_asn": 5,
+      "remote_id": "172.19.10.4",
+      "hold_time": 180,
+      "remote_port": 179
+    },
+    {
+      "remote_asn": 1,
+      "remote_id": "172.19.0.2",
+      "hold_time": 180,
+      "remote_port": 179
+    },
+    {
+      "remote_asn": 2,
+      "remote_id": "172.19.0.5",
+      "hold_time": 180,
+      "remote_port": 179
+    }
+  ]
+}

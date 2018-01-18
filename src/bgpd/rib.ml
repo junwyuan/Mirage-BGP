@@ -73,6 +73,7 @@ module Loc_rib = struct
 
   type t = {
     local_asn: int32;
+    local_id: Ipaddr.V4.t;
     mutable subs: Adj_rib.t Id_map.t;
     mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
   }
@@ -81,6 +82,16 @@ module Loc_rib = struct
     | Update of (update * Ipaddr.V4.t)
     | Subscribe of Adj_rib.t
     | Unsubscribe of Adj_rib.t
+  
+  let create config = 
+    let open Config_parser in
+    {
+      local_id =  config.local_id;
+      local_asn = config.local_asn;
+      subs = Id_map.empty;
+      db = Prefix_map.empty;
+    }
+  ;;
 
   let take pfxs len =
     let rec loop pfxs len acc =
@@ -135,16 +146,9 @@ module Loc_rib = struct
     loop update []
   ;;
 
-  let is_subscribed t rib = 
-    let open Adj_rib in
-    Id_map.mem rib.remote_id t.subs
-  ;;
-
   let invoke_callback t (update, remote_id) =
     let open Adj_rib in
-    Rib_log.debug (fun m -> m "checkpoint 5");
     let split_update = split_update update in
-    Rib_log.debug (fun m -> m "checkpoint 6");
     let f k v acc = 
       match k = remote_id with
       | true -> acc
@@ -161,7 +165,10 @@ module Loc_rib = struct
     Lwt.join (Id_map.fold f t.subs [])
   ;;
 
-  
+  let is_subscribed t rib = 
+    let open Adj_rib in
+    Id_map.mem rib.remote_id t.subs
+  ;;
 
   let subscribe t rib = 
     let open Adj_rib in
@@ -201,15 +208,11 @@ module Loc_rib = struct
       Lwt.return_unit
     | false -> 
 
-      Rib_log.debug (fun m -> m "checkpoint 1");
-
       (* Update subscribed ribs *)
       t.subs <- Id_map.remove rib.remote_id t.subs;
       (* Update db *)
       let withdrawn = get_assoc_pfxes t.db rib.remote_id in
       let new_db = remove_assoc_pfxes t.db withdrawn in
-
-      Rib_log.debug (fun m -> m "checkpoint 2");
 
       t.db <- new_db;
       (* Send withdraw to other peers *)
@@ -217,10 +220,10 @@ module Loc_rib = struct
       invoke_callback t (update, rib.remote_id)
   ;;
   
-  let is_aspath_loop local_as segment_list =
+  let is_aspath_loop local_asn segment_list =
     let f = function
-      | Bgp.Asn_seq l -> List.mem local_as l
-      | Bgp.Asn_set l -> List.mem local_as l
+      | Bgp.Asn_seq l -> List.mem local_asn l
+      | Bgp.Asn_set l -> List.mem local_asn l
     in
     List.exists f segment_list
   ;;
@@ -253,11 +256,30 @@ module Loc_rib = struct
         Rib_log.err (fun m -> m "Missing AS PATH");
         failwith "Missing AS PATH"
       | hd::tl -> match hd with
-        | (_, Bgp.As_path v) -> v
-        | (_, Bgp.As4_path v) -> v 
+        | (_, Bgp.As_path v) -> v 
         | _ -> loop tl
     in
     loop path_attrs
+  ;;
+
+  let append_aspath asn segments = 
+    match segments with
+    | [] -> [ Asn_seq [asn] ]
+    | hd::tl -> match hd with
+      | Asn_set _ -> (Asn_seq [asn])::segments
+      | Asn_seq l -> (Asn_seq (asn::l))::tl
+  ;;
+
+  let update_aspath asn flags path_attrs = 
+    let aspath = find_aspath path_attrs in
+    let appended = append_aspath asn aspath in
+    let tmp = path_attrs_remove AS_PATH path_attrs in
+    (flags, As_path appended)::tmp
+  ;;
+
+  let update_nexthop ip flags path_attrs =
+    let tmp = path_attrs_remove NEXT_HOP path_attrs in
+    (flags, Next_hop ip)::tmp
   ;;
 
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
@@ -277,16 +299,10 @@ module Loc_rib = struct
     end
   ;;
 
-  
-
-  let create local_asn = {
-    local_asn;
-    subs = Id_map.empty;
-    db = Prefix_map.empty;
-  }
 
   (* This function is pure *)
-  let update_db local_as ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, peer_id) db =
+  let update_db local_id local_asn ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, peer_id) db =
+
     (* Withdrawn from Loc-RIB *)
     let (db_aft_wd, out_wd) =
       let f (db, out_wd) pfx = 
@@ -299,21 +315,32 @@ module Loc_rib = struct
     in
 
     (* If the advertised path is looping, don't install any new routes *)
-    if in_nlri = [] || is_aspath_loop local_as (find_aspath path_attrs) then
+    if in_nlri = [] || is_aspath_loop local_asn (find_aspath path_attrs) then begin
       let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
       (db_aft_wd, out_update)
-    else
+    end else
+      let updated_path_attrs = 
+        let flags = {
+          transitive = false;
+          optional = false;
+          extlen = false;
+          partial = false;
+        } in
+        path_attrs |> update_nexthop local_id flags |> update_aspath local_asn flags
+      in 
+
       let db_aft_insert, out_nlri = 
         let f (db, out_nlri) pfx = 
           let opt = Prefix_map.find_opt pfx db in
           match opt with
-          | None -> (Prefix_map.add pfx (path_attrs, peer_id) db, List.cons pfx out_nlri)
+          | None -> 
+            (Prefix_map.add pfx (updated_path_attrs, peer_id) db, List.cons pfx out_nlri)
           | Some (stored_pattrs, src_id) ->
             (* If from the same peer, replace without compare *)
             if src_id = peer_id then 
-              (Prefix_map.add pfx (path_attrs, peer_id) db, List.cons pfx out_nlri)
-            else if tie_break (path_attrs, peer_id) (stored_pattrs, src_id) then 
-              (Prefix_map.add pfx (path_attrs, peer_id) db, out_nlri)
+              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, List.cons pfx out_nlri)
+            else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then 
+              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, out_nlri)
             else db, out_nlri
         in
         List.fold_left f (db_aft_wd, []) in_nlri
@@ -321,7 +348,7 @@ module Loc_rib = struct
 
       let out_update = {
         withdrawn = out_wd;
-        path_attrs;
+        path_attrs = updated_path_attrs;
         nlri = out_nlri
       }
       in 
@@ -330,7 +357,7 @@ module Loc_rib = struct
   ;;
 
   let handle_update t (update, remote_id) =
-    let new_db, output = update_db t.local_asn (update, remote_id) t.db in
+    let new_db, output = update_db t.local_id t.local_asn (update, remote_id) t.db in
     t.db <- new_db;
     if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
     else invoke_callback t (update, remote_id)

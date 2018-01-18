@@ -50,6 +50,33 @@ let test_find_aspath () =
   assert (Loc_rib.find_aspath path_attrs = [Bgp.Asn_seq [1_l]]);
 ;;
 
+let test_append_aspath () = 
+  let segments = [
+    Asn_seq [2_l; 3_l];
+    Asn_set [1_l];
+  ] in
+  let n_segments = Loc_rib.append_aspath 5_l segments in
+  assert (List.length n_segments = 2);
+
+  (match n_segments with
+  | (Asn_seq l)::tl -> assert (List.length l = 3)
+  | _ -> assert false);
+
+
+  let segments = [
+    Asn_set [1_l];
+    Asn_seq [2_l; 3_l];
+  ] in
+  let n_segments = Loc_rib.append_aspath 5_l segments in
+  assert (List.length n_segments = 3);
+
+  (match n_segments with
+  | (Asn_seq l)::tl -> assert (List.length l = 1)
+  | _ -> assert false);
+;;
+
+
+
 let test_tie_break () =
   let flags = {
     transitive = false;
@@ -176,6 +203,7 @@ let test_adj_rib_update_db () =
 
 let test_loc_rib_update_db () = 
   let local_asn = 1_l in
+  let local_id = Ipaddr.V4.of_string_exn "172.19.0.3" in
 
   let flags = {
     transitive = false;
@@ -197,7 +225,7 @@ let test_loc_rib_update_db () =
   
   let db = Prefix_map.empty in
 
-  let db, out_update = Loc_rib.update_db local_asn (update, id1) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
   assert (Prefix_map.cardinal db = 1);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -211,7 +239,7 @@ let test_loc_rib_update_db () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, out_update = Loc_rib.update_db local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -227,7 +255,7 @@ let test_loc_rib_update_db () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, out_update = Loc_rib.update_db local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
@@ -244,7 +272,7 @@ let test_loc_rib_update_db () =
   ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
-  let db, out_update = Loc_rib.update_db local_asn (update, id1) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -260,7 +288,7 @@ let test_loc_rib_update_db () =
   ] in
   let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
 
-  let db, out_update = Loc_rib.update_db local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
@@ -274,7 +302,7 @@ let test_loc_rib_update_db () =
     path_attrs = [];
     nlri = [];
   } in
-  let db, out_update = Loc_rib.update_db local_asn (update, id1) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
   assert (Prefix_map.cardinal db = 1);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 1);
@@ -282,6 +310,7 @@ let test_loc_rib_update_db () =
 
 let test_loc_rib_get_assoc_pfxs () = 
   let local_asn = 1_l in
+  let local_id = Ipaddr.V4.of_string_exn "172.19.0.3" in
 
   let flags = {
     transitive = false;
@@ -304,7 +333,7 @@ let test_loc_rib_get_assoc_pfxs () =
   let update = { withdrawn = []; path_attrs; nlri } in
   
   let db = Prefix_map.empty in
-  let db, _ = Loc_rib.update_db local_asn (update, id1) db in
+  let db, _ = Loc_rib.update_db local_id local_asn (update, id1) db in
 
   (* speaker2 inserts one pfx *)
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
@@ -316,7 +345,7 @@ let test_loc_rib_get_assoc_pfxs () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.21.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, _ = Loc_rib.update_db local_asn (update, id2) db in
+  let db, _ = Loc_rib.update_db local_id local_asn (update, id2) db in
 
 
   (* remove speaker1 *)
@@ -413,6 +442,7 @@ let () =
       test_case "test util.take" `Slow test_util_take;
       test_case "test util.split" `Slow test_util_split;
       test_case "test Util.split_update" `Slow test_split_update;
+      test_case "test Util.append_aspath" `Slow test_append_aspath;
     ];
   ]
 ;;

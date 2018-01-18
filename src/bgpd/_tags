@@ -5,4 +5,4 @@ true: package(result), package(cstruct), package(cstruct.ppx), package(lwt), pac
 "common": include
 "common/lib": include
 "test": include
-true: debug, package(lwt.ppx)
+true: debug, package(lwt.ppx), package(yojson)

@@ -47,8 +47,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   
   type t = {
     remote_id: Ipaddr.V4.t;
+    remote_port: int;
     remote_asn: int32;
     local_id: Ipaddr.V4.t;
+    local_port: int;
     local_asn: int32;
     socket: S.t;
     mutable fsm: Fsm.t;
@@ -178,7 +180,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     end
     else begin
       let task = fun () ->
-        Bgp_flow.create_connection t.socket (t.remote_id, Key_gen.remote_port ())
+        Bgp_flow.create_connection t.socket (t.remote_id, t.remote_port)
       in
       let wrapped_callback result =
         t.conn_starter <- None;
@@ -233,7 +235,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     end
   ;;      
 
-  let listen_tcp_connection s id_map callback =
+  let listen_tcp_connection s local_port id_map callback =
     let on_connect flow =
       let remote_id, _ = Bgp_flow.dst flow in
       Bgp_log.info (fun m -> m "receive incoming connection from remote %s" (Ipaddr.V4.to_string remote_id));
@@ -278,7 +280,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           Bgp_flow.close flow
       end
     in
-    Bgp_flow.listen s (Key_gen.local_port ()) on_connect
+    Bgp_flow.listen s local_port on_connect
   ;;
                     
   let send_msg t msg = 
@@ -340,6 +342,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       t.flow <- None; 
       Bgp_flow.close flow;
   ;;
+
 
   let rec perform_action t action =
     let open Fsm in
@@ -439,7 +442,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       t.input_rib <- None;
       match t.output_rib with
       | None -> Lwt.return_unit
-      | Some rib -> t.output_rib <- None; Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Unsubscribe rib)
+      | Some rib -> 
+        t.output_rib <- None; 
+        Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Unsubscribe rib)
   
   and handle_event t event =
     let new_fsm, actions = Fsm.handle t.fsm event in
@@ -451,7 +456,13 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     let rec perform_actions = function
       | [] -> Lwt.return_unit
       | hd::tl ->
-        Lwt.catch (fun () -> perform_action t hd) (fun exn -> Lwt.return_unit) 
+        let handle exn =
+          let raw_trace = Printexc.get_backtrace () in
+          Bgp_log.err (fun m -> m "Some exception has occured: %s \n %s" (Printexc.to_string exn)raw_trace);
+          (* Lwt.fail exn  *)
+          Lwt.return_unit
+        in
+        Lwt.catch (fun () -> perform_action t hd) handle
         >>= fun () ->
         perform_actions tl
     in
@@ -486,7 +497,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       in
       let _ = Id_map.map f id_map in
       command_loop id_map
-    | "show neighbor" ->
+    | "show peers" ->
       let f t =
         let fsm = Printf.sprintf "FSM: %s" (Fsm.to_string t.fsm) in
         let running_dev =
@@ -562,70 +573,66 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
   ;;
         
   let start s =
-    let loc_rib = Rib.Loc_rib.create 1_l in
-    let fsm = Fsm.create 240 90 30 in
-    let t1 = {
-      remote_id = Ipaddr.V4.of_string_exn "172.19.10.3"; 
-      remote_asn = 4_l;
-      local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
-      local_asn = 1_l;
-      socket = s; 
-      fsm; 
-      flow = None;
-      conn_retry_timer = None; 
-      hold_timer = None; 
-      keepalive_timer = None;
-      conn_starter = None;
-      flow_reader = None;
-      input_rib = None;
-      output_rib = None;
-      loc_rib;
-      stat = {
-        sent_open = 0;
-        sent_update = 0;
-        sent_keepalive = 0;
-        sent_notif = 0;
-        rec_open = 0;
-        rec_update = 0;
-        rec_keepalive = 0;
-        rec_notif = 0;
-      } 
-    } in
-    let t2 = {
-      remote_id = Ipaddr.V4.of_string_exn "172.19.10.4"; 
-      remote_asn = 5_l;
-      local_id = Ipaddr.V4.of_string_exn "172.19.0.3"; 
-      local_asn = 1_l;
-      socket = s; 
-      fsm; 
-      flow = None;
-      conn_retry_timer = None; 
-      hold_timer = None; 
-      keepalive_timer = None;
-      conn_starter = None;
-      flow_reader = None;
-      input_rib = None;
-      output_rib = None;
-      loc_rib;
-      stat = {  
-        sent_open = 0;
-        sent_update = 0;
-        sent_keepalive = 0;
-        sent_notif = 0;
-        rec_open = 0;
-        rec_update = 0;
-        rec_keepalive = 0;
-        rec_notif = 0;
-      }
-    } in
+    (* Enable backtrace *)
+    Printexc.record_backtrace true;
 
-    let id_map = Id_map.empty 
-      |> Id_map.add t1.remote_id t1
-      |> Id_map.add t2.remote_id t2
+    (* Parse config from file *)
+    let config = Config_parser.parse_from_file (Key_gen.config ()) in
+
+    (* Init loc-rib *)
+    let loc_rib = Rib.Loc_rib.create config in
+
+    let local_port = 
+      let open Config_parser in
+      config.local_port
     in
+    
+    (* Init shared data *)
+    let init_t peer =
+      let open Config_parser in
+      let stat = {
+        sent_open = 0;
+        sent_update = 0;
+        sent_keepalive = 0;
+        sent_notif = 0;
+        rec_open = 0;
+        rec_update = 0;
+        rec_keepalive = 0;
+        rec_notif = 0;
+      } in
+      {
+        remote_id = peer.remote_id;
+        remote_port = peer.remote_port;
+        remote_asn = peer.remote_asn;
+
+        local_id = config.local_id;
+        local_port = config.local_port;
+        local_asn = config.local_asn;
+
+        socket = s; 
+        fsm = Fsm.create 240 (peer.hold_time) (peer.hold_time / 3);
+        stat;
+
+        flow = None;
+        conn_retry_timer = None; 
+        hold_timer = None; 
+        keepalive_timer = None;
+        conn_starter = None;
+        flow_reader = None;
+        input_rib = None;
+        output_rib = None;
+        loc_rib;
+      }
+    in
+    
+    let t_list = 
+      let open Config_parser in
+      List.map init_t config.peers 
+    in
+    let id_map = List.fold_left (fun acc t -> Id_map.add t.remote_id t acc) (Id_map.empty) t_list in
 
     (* Start listening to BGP port. *)
-    listen_tcp_connection s id_map handle_event;
+    listen_tcp_connection s local_port id_map handle_event;
     
     (* Automatic start *)
     let f t =
