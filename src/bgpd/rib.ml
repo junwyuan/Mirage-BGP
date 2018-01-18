@@ -82,6 +82,59 @@ module Loc_rib = struct
     | Subscribe of Adj_rib.t
     | Unsubscribe of Adj_rib.t
 
+  let take pfxs len =
+    let rec loop pfxs len acc =
+      match pfxs with
+      | [] -> (acc, [])
+      | pfx::tl ->
+        let mask = Ipaddr.V4.Prefix.bits pfx in
+        let bs = pfxlen_to_bytes mask + 1 in
+        if bs > len then 
+          (acc, pfxs)
+        else 
+          loop tl (len - bs) (pfx::acc)
+    in
+    loop pfxs len []
+  ;;
+
+  let rec split pfxs len =
+    let rec loop pfxs len acc = 
+      let taken, rest = take pfxs len in
+      match rest with
+      | [] -> taken::acc
+      | _ -> loop rest len (taken::acc)
+    in
+    loop pfxs len []
+  ;;
+
+  let split_update update =
+    let rec loop ({ withdrawn; path_attrs; nlri } as u) acc = 
+      if len_update_buffer u <= 4096 then u::acc
+      else
+        let len_fixed = 23 in
+        let len_wd = len_pfxs_buffer withdrawn in
+
+        if len_wd > 4096 - len_fixed then
+          let taken, withdrawn = take withdrawn (4096 - len_fixed) in
+          let update = { withdrawn = taken; path_attrs = []; nlri = [] } in
+          loop { withdrawn; path_attrs; nlri } (update::acc)
+        else
+          let len_pa = len_path_attrs_buffer path_attrs in
+          if len_wd + len_pa + len_fixed >= 4096 then
+            let update = { withdrawn; path_attrs = []; nlri = [] } in
+            loop { withdrawn; path_attrs; nlri } (update::acc)
+          else if len_wd > 0 then
+            let taken, nlri = take nlri (4096 - len_wd - len_pa - len_fixed) in
+            let update = { withdrawn; path_attrs; nlri = taken } in
+            loop { withdrawn = []; path_attrs; nlri } (update::acc)
+          else
+            let taken, nlri = take nlri (4096 - len_pa - len_fixed) in
+            let update = { withdrawn = []; path_attrs; nlri = taken } in
+            loop { withdrawn; path_attrs; nlri } (update::acc)
+    in
+    loop update []
+  ;;
+
   let is_subscribed t rib = 
     let open Adj_rib in
     Id_map.mem rib.remote_id t.subs
@@ -89,10 +142,21 @@ module Loc_rib = struct
 
   let invoke_callback t (update, remote_id) =
     let open Adj_rib in
+    Rib_log.debug (fun m -> m "checkpoint 5");
+    let split_update = split_update update in
+    Rib_log.debug (fun m -> m "checkpoint 6");
     let f k v acc = 
       match k = remote_id with
       | true -> acc
-      | false -> List.cons (Adj_rib.handle_update v update) acc
+      | false ->
+        let rec send_loop updates = 
+          match updates with
+          | [] -> Lwt.return_unit
+          | u::tl ->
+            let%lwt () = Adj_rib.handle_update v u in
+            send_loop tl
+        in
+        (send_loop split_update)::acc
     in
     Lwt.join (Id_map.fold f t.subs [])
   ;;
@@ -116,12 +180,16 @@ module Loc_rib = struct
       Lwt.join (Prefix_map.fold f t.db [])
   ;;
 
-  let remove_assoc_pfxes db remote_id = 
-    let f pfx (_, stored_id) (db, wd) =
-      if remote_id = stored_id then (Prefix_map.remove pfx db, List.cons pfx wd)
-      else (db, wd)
+  let get_assoc_pfxes db remote_id = 
+    let f acc (pfx, (_, stored_id)) =
+      if remote_id = stored_id then pfx::acc else acc
     in
-    Prefix_map.fold f db (db, [])
+    List.fold_left f [] (Prefix_map.bindings db)
+  ;;
+
+  let remove_assoc_pfxes db pfxs = 
+    let f acc pfx = Prefix_map.remove pfx acc in
+    List.fold_left f db pfxs
   ;;
 
   let unsubscribe t rib =
@@ -132,10 +200,17 @@ module Loc_rib = struct
                                 (Ipaddr.V4.to_string rib.remote_id));
       Lwt.return_unit
     | false -> 
+
+      Rib_log.debug (fun m -> m "checkpoint 1");
+
       (* Update subscribed ribs *)
       t.subs <- Id_map.remove rib.remote_id t.subs;
       (* Update db *)
-      let new_db, withdrawn = remove_assoc_pfxes t.db rib.remote_id in
+      let withdrawn = get_assoc_pfxes t.db rib.remote_id in
+      let new_db = remove_assoc_pfxes t.db withdrawn in
+
+      Rib_log.debug (fun m -> m "checkpoint 2");
+
       t.db <- new_db;
       (* Send withdraw to other peers *)
       let update = { withdrawn; path_attrs = []; nlri = [] } in
@@ -201,6 +276,8 @@ module Loc_rib = struct
       end
     end
   ;;
+
+  
 
   let create local_asn = {
     local_asn;

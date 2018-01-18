@@ -7,7 +7,7 @@ open Lwt.Infix
 open Bgp
 
 module Util = struct
-  let take pfxs len =
+  (* let take pfxs len =
     let rec loop pfxs len acc =
       match pfxs with
       | [] -> (acc, [])
@@ -33,8 +33,8 @@ module Util = struct
   ;;
 
   let split_update update =
-    let rec loop ({ withdrawn; path_attrs; nlri } as u) = 
-      if len_update_buffer u <= 4096 then [u]
+    let rec loop ({ withdrawn; path_attrs; nlri } as u) acc = 
+      if len_update_buffer u <= 4096 then u::acc
       else
         let len_fixed = 23 in
         let len_wd = len_pfxs_buffer withdrawn in
@@ -42,23 +42,23 @@ module Util = struct
         if len_wd > 4096 - len_fixed then
           let taken, withdrawn = take withdrawn (4096 - len_fixed) in
           let update = { withdrawn = taken; path_attrs = []; nlri = [] } in
-          update :: loop { withdrawn; path_attrs; nlri }
+          loop { withdrawn; path_attrs; nlri } (update::acc)
         else
           let len_pa = len_path_attrs_buffer path_attrs in
           if len_wd + len_pa + len_fixed >= 4096 then
             let update = { withdrawn; path_attrs = []; nlri = [] } in
-            update :: loop { withdrawn; path_attrs; nlri }
+            loop { withdrawn; path_attrs; nlri } (update::acc)
           else if len_wd > 0 then
             let taken, nlri = take nlri (4096 - len_wd - len_pa - len_fixed) in
             let update = { withdrawn; path_attrs; nlri = taken } in
-            update :: loop { withdrawn = []; path_attrs; nlri }
+            loop { withdrawn = []; path_attrs; nlri } (update::acc)
           else
             let taken, nlri = take nlri (4096 - len_pa - len_fixed) in
             let update = { withdrawn = []; path_attrs; nlri = taken } in
-            update :: loop { withdrawn; path_attrs; nlri }
+            loop { withdrawn; path_attrs; nlri } (update::acc)
     in
-    loop update
-  ;;
+    loop update []
+  ;; *)
 end
 
 module type S = sig
@@ -168,10 +168,12 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   ;;
 
   let write t msg = 
-    match msg with
+    (* match msg with
     | Open _ | Keepalive | Notification _ -> S.TCPV4.write t.flow (Bgp.gen_msg msg)
     | Update u ->
+      Io_log.debug (fun m -> m "checkpoint 3");
       let split_updates = Util.split_update u in
+      Io_log.debug (fun m -> m "checkpoint 4");
       let rec sending_loop = function
         | [] -> Lwt.return (Ok ())
         | msg::tl -> 
@@ -181,8 +183,10 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           | Error _ -> Lwt.return result
           | Ok () -> sending_loop tl
       in
-      sending_loop split_updates
+      sending_loop split_updates *)
+    S.TCPV4.write t.flow (Bgp.gen_msg msg)
   ;;
+  
 
   let close t = S.TCPV4.close t.flow
 

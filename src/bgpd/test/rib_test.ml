@@ -280,7 +280,7 @@ let test_loc_rib_update_db () =
   assert (List.length out_update.withdrawn = 1);
 ;;
 
-let test_loc_rib_remove_assoc_pfxs () = 
+let test_loc_rib_get_assoc_pfxs () = 
   let local_asn = 1_l in
 
   let flags = {
@@ -320,13 +320,80 @@ let test_loc_rib_remove_assoc_pfxs () =
 
 
   (* remove speaker1 *)
-  let db, wd = Loc_rib.remove_assoc_pfxes db id1 in
+  let wd = Loc_rib.get_assoc_pfxes db id1 in
+  let db = Loc_rib.remove_assoc_pfxes db wd in
   assert (Prefix_map.cardinal db = 1);
   assert (List.length wd = 2);
   assert (List.mem (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")) wd);
   assert (List.mem (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")) wd);
 ;;
   
+
+let pfxs_gen seed n =
+  let pfxs = ref [] in
+  let r = ref seed in
+  for i = 1 to n do
+    r := Int32.add !r 256_l; 
+    let pfx = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_int32 !r) in
+    pfxs := pfx::!pfxs;
+  done;
+  (!pfxs, !r)
+;;
+
+let test_util_take () =
+  let pfxs = [
+    Ipaddr.V4.Prefix.make 8 (Ipaddr.V4.of_string_exn "10.0.0.0");
+    Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "66.173.0.0");
+    Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "172.168.13.0");
+  ] in
+  let taken, rest = Loc_rib.take pfxs 5 in
+  assert (List.length rest = 1);
+  assert (List.length taken = 2);
+  let taken2, rest2 = Loc_rib.take pfxs 6 in
+  assert (List.length rest2 = 1);
+  assert (List.length taken2 = 2);
+  let taken3, rest3 = Loc_rib.take pfxs 9 in
+  assert (List.length rest3 = 0);
+  assert (List.length taken3 = 3);
+;;
+
+let test_util_split () =
+  let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
+  let split = Loc_rib.split pfxs (4096 - 23) in
+  assert (List.length split = 1);
+
+  let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
+  let split = Loc_rib.split pfxs (4096 - 23) in
+  assert (List.length split = 2);
+;;
+
+let test_split_update () =
+  let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
+  let update = { withdrawn; path_attrs = []; nlri = [] } in
+  let split = Loc_rib.split_update update in
+  assert (List.length split = 1);
+
+  let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
+  let update = { withdrawn; path_attrs = []; nlri = [] } in
+  let split = Loc_rib.split_update update in
+  assert (List.length split = 2);
+
+  let flags = {
+    transitive = false;
+    optional = false;
+    partial = false;
+    extlen = false;
+  } in
+  let path_attrs = [
+    (flags, Bgp.Origin Bgp.EGP); 
+    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (flags, Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1")); 
+  ] in
+  let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
+  let nlri, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
+  let update = { withdrawn; path_attrs; nlri } in
+  assert (List.length (Loc_rib.split_update update) = 4);
+;;
 
 let () =
   run "RIB test" [
@@ -340,7 +407,12 @@ let () =
       test_case "test find_aspath" `Slow test_find_aspath;
       test_case "test tie_break" `Slow test_tie_break;
       test_case "test update_db" `Slow test_loc_rib_update_db;
-      test_case "test remove_assoc_pfxs" `Slow test_loc_rib_remove_assoc_pfxs;
+      test_case "test remove_assoc_pfxs" `Slow test_loc_rib_get_assoc_pfxs;
+    ];
+    "util", [
+      test_case "test util.take" `Slow test_util_take;
+      test_case "test util.split" `Slow test_util_split;
+      test_case "test Util.split_update" `Slow test_split_update;
     ];
   ]
 ;;

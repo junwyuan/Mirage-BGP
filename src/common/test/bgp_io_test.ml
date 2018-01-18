@@ -1,4 +1,4 @@
-open Alcotest
+(* open Alcotest
 open Bgp_io
 open Bgp
 open Printf
@@ -83,4 +83,4 @@ let () =
   ]
 ;;
 
-  
+   *)

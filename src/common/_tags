@@ -1,4 +1,4 @@
-true: package(result), package(cstruct), package(cstruct.ppx), package(lwt), package(ipaddr), package(logs)
+true: package(result), package(cstruct), package(cstruct.ppx), package(lwt), package(ipaddr), package(logs), debug
 <bgp_io.*>: package(mirage), package(mirage-types), package(mirage-stack-lwt)
 <test/*.*>: package(alcotest)
 <rib.*>: package(logs)
