@@ -2,6 +2,7 @@ open Lwt.Infix
 open Relay
 open Bgp
 
+
 let mon_log = Logs.Src.create "Monitor" ~doc:"Monitor log"
 module Mon_log = (val Logs.src_log mon_log : Logs.LOG)
 
@@ -12,6 +13,7 @@ module Ip_gen = struct
   let (<<<) x y = Int32.shift_left x y
   let (&&&) x y = Int32.logand x y
   let (|||) x y = Int32.logor x y
+
 
   let default_seed = 
     Int32.shift_left 128_l 24
@@ -24,7 +26,7 @@ module Ip_gen = struct
     let s = 
       if (seed >>> 8) &&& 0xff_l = 255_l then seed +++ 512_l else seed +++ 256_l
     in
-    (Afi.IPv4 s, s)
+    (s, s)
   ;;
 
   let next_n seed n =
@@ -61,8 +63,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let default_open_msg relay = 
     let o = {
       version = 4;
-      bgp_id = Ipaddr.V4.to_int32 relay.id;
-      my_as = Asn (Int32.to_int relay.as_no);
+      local_id = relay.id;
+      local_asn = relay.as_no;
       options = [];
       hold_time = default_hold_time;
     } in
@@ -115,7 +117,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       Bgp_flow.close flow
   ;;
 
-  module Replay = struct
+  module Sender = struct
     let replay_log = Logs.Src.create "Replay" ~doc:"Logging for Replay"
     module Replay_log = (val Logs.src_log replay_log : Logs.LOG)
 
@@ -127,12 +129,12 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let open Bgp in
           let flags = { optional=false; transitive=true; extlen=false; partial=false } in
           let origin = Origin EGP in
-          let next_hop = Next_hop (Ipaddr.V4.to_int32 (relay1 ()).id) in
-          let as_path = As_path [Seq [4_l; 2_l; 3_l]] in
+          let next_hop = Next_hop (relay1 ()).id in
+          let as_path = As_path [Asn_seq [4_l; 2_l; 3_l]] in
           List.map (fun pa -> (flags, pa)) [origin; next_hop; as_path]
         in
         let ips, n_seed = Ip_gen.next_n seed cluster_size in
-        let nlri = List.map (fun ip -> (ip, 24)) ips in
+        let nlri = List.map (fun ip -> Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_int32 ip)) ips in
         let msg =  Bgp.Update { withdrawn; path_attrs; nlri } in
         Replay_log.debug (fun m -> m "%s" (Bgp.to_string msg));
         Bgp_flow.write flow msg
@@ -142,6 +144,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           Lwt.fail_with "tcp write fail"
         | Ok () -> plain_feed flow (count + cluster_size) total cluster_size n_seed
     ;;
+
 
     let rec read_loop flow =
       Bgp_flow.read flow
@@ -154,7 +157,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         | `Refused -> Replay_log.debug (fun m -> m "Read refused")
         | `Timeout -> Replay_log.debug (fun m -> m "Read timeout")
         | `Closed -> Replay_log.debug (fun m -> m "Connection closed when read.")
-        | `BGP_MSG_ERR err ->
+        | `PARSE_ERROR err ->
           (match err with
           | Bgp.Parsing_error -> Replay_log.debug (fun m -> m "Parsing error")
           | _ -> Replay_log.debug (fun m -> m "Msg format error"))
@@ -169,7 +172,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     let count = ref 0
 
-    let is_completed msg total = 
+    (* let is_completed msg total = 
       let is_marker ip = 
         match ip with
         | Afi.IPv6 _ -> false
@@ -179,26 +182,60 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       | Update { withdrawn; nlri; path_attrs } ->
         List.exists (fun (ip, _) -> is_marker ip) nlri
       | _ -> false
-    ;;
+    ;; *)
 
     let rec read_loop flow pfxs_count total =
       Bgp_flow.read flow
       >>= function 
       | Ok msg -> 
-        count := !count + 1;
-        Rec_log.debug (fun m -> m "Receive pkg %d: %s" (!count) (Bgp.to_string msg));
+        
         (match msg with
         | Update { withdrawn; nlri; path_attrs } ->
-          let new_count = pfxs_count + List.length withdrawn in
-          if new_count = total then Lwt.return_unit 
-          else read_loop flow new_count total
+          count := !count + 1;
+          Rec_log.debug (fun m -> m "Receive pkg %d: %s" (!count) (Bgp.to_string msg));
+
+          let new_count = pfxs_count + List.length nlri in
+          if new_count = total then 
+            Lwt.return_unit 
+          else 
+            read_loop flow new_count total
         | _ -> read_loop flow pfxs_count total)
       | Error err ->
         (match err with 
         | `Refused -> Rec_log.debug (fun m -> m "Read refused")
         | `Timeout -> Rec_log.debug (fun m -> m "Read timeout")
         | `Closed -> Rec_log.debug (fun m -> m "Connection closed when read.")
-        | `BGP_MSG_ERR err ->
+        | `PARSE_ERROR err ->
+          (match err with
+          | Bgp.Parsing_error -> Rec_log.debug (fun m -> m "Parsing error")
+          | _ -> Rec_log.debug (fun m -> m "Msg format error"))
+        | _ -> ()); 
+        Lwt.return_unit
+    ;;
+
+    let rec read_loop2 flow pfxs_count total =
+      Bgp_flow.read flow
+      >>= function 
+      | Ok msg -> 
+        (match msg with
+        | Update { withdrawn; nlri; path_attrs } ->
+          count := !count + 1;
+          Rec_log.debug (fun m -> m "Receive pkg %d: %s" (!count) (Bgp.to_string msg));
+
+          let new_count = pfxs_count + List.length withdrawn in
+          Rec_log.info (fun m -> m "withdrawn count %d" new_count);
+          
+          if new_count = total then 
+            Lwt.return_unit 
+          else 
+            read_loop2 flow new_count total
+        | _ -> read_loop2 flow pfxs_count total)
+      | Error err ->
+        (match err with 
+        | `Refused -> Rec_log.debug (fun m -> m "Read refused")
+        | `Timeout -> Rec_log.debug (fun m -> m "Read timeout")
+        | `Closed -> Rec_log.debug (fun m -> m "Connection closed when read.")
+        | `PARSE_ERROR err ->
           (match err with
           | Bgp.Parsing_error -> Rec_log.debug (fun m -> m "Parsing error")
           | _ -> Rec_log.debug (fun m -> m "Msg format error"))
@@ -228,12 +265,12 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* connect to speaker1 *)
     create_connection s (relay1 ())
     >>= fun (flow1, _) ->
-    let replay_rloop = Replay.read_loop flow1 in
+    let replay_rloop = Sender.read_loop flow1 in
     (* connect to speaker2 *)
     create_connection s (relay2 ())
     >>= fun (flow2, _) ->
     (* Keepalive loop *)
-    let wk_loop = Receiver.write_keepalive_loop flow2 in
+    let _ = Receiver.write_keepalive_loop flow2 in
     (* Listen speaker2 *)
     let marker_id = Ip_gen.peek_next_n seed total in
     let rec_rloop = Receiver.read_loop flow2 0 total in
@@ -241,27 +278,33 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     OS.Time.sleep_ns (Duration.of_sec min_ad_intvl)
     >>= fun () ->
     (* start feeding speaker1 *)
-    Replay.plain_feed flow1 0 total 500 seed
+    let start_time = Unix.gettimeofday () in
+    Sender.plain_feed flow1 0 total 500 seed
     >>= fun () ->
+
+    rec_rloop
+    >>= fun () ->
+    let insert_time = Unix.gettimeofday () -. start_time in
+    
+    let rec_rloop2 = Receiver.read_loop2 flow2 0 total in
     OS.Time.sleep_ns (Duration.of_sec 5)
     >>= fun () ->
-    let start_time = Unix.gettimeofday () in
+    (* Close flows *)
     close flow1
     >>= fun () ->
-    let sending_time = Unix.gettimeofday () -. start_time in
-    Lwt.pick [wk_loop; rec_rloop]
+    rec_rloop2
     >>= fun () ->
-    let processing_time = Unix.gettimeofday () -. start_time in
-    Mon_log.info (fun m -> m "Test size: %d, sending time: %fs, Processing time: %fs"
-                  total sending_time processing_time);
-    (* Close flows *)
+    let withdrawn_time = Unix.gettimeofday () -. start_time -. insert_time in
+    
+    Mon_log.info (fun m -> m "Test size: %d, insert time: %fs, withdrawn time: %fs, total %fs"
+                  total insert_time withdrawn_time (insert_time +. withdrawn_time));
     close flow2
     >>= fun () ->
     Lwt.return marker_id
   ;;
 
   let start s =
-    let test_sizes = [1000; 10000; 50000; 100000] in
+    let test_sizes = [300000; 500000; 800000; 1000000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
@@ -271,7 +314,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         let interval = 
           match (Key_gen.speaker ()) with
           | "quagga" -> 30
-          | _ -> 5
+          | _ -> 30
         in
         OS.Time.sleep_ns (Duration.of_sec interval)
         >>= fun () ->

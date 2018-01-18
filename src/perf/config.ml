@@ -56,12 +56,12 @@ let main =
     Key.abstract speaker;
     (* Key.abstract total; *)
   ] in
-  foreign ~keys "Monitor.Main" (stackv4 @-> job)
+  foreign ~keys "Perf.Main" (stackv4 @-> job)
 ;;
 
 let stack = generic_stackv4 default_network
 
 let () =
-  register "throughput" [
+  register "perf" [
     main $ stack
   ]
