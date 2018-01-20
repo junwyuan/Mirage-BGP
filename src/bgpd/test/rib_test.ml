@@ -20,32 +20,21 @@ let test_is_aspath_loop () =
   assert (Loc_rib.is_aspath_loop 6_l as_path = false);
 ;;
 
+
 let test_find_origin () =
   let open Bgp in
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l]]);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l]]);
   ] in
   assert (Loc_rib.find_origin path_attrs = Bgp.EGP)
 ;;
 
 let test_find_aspath () =
   let open Bgp in
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l]]);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l]]);
   ] in
   assert (Loc_rib.find_aspath path_attrs = [Bgp.Asn_seq [1_l]]);
 ;;
@@ -78,25 +67,19 @@ let test_append_aspath () =
 
 
 let test_tie_break () =
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
 
   (* Depends on as_path length *)
   let id1 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.1" in
   let pa1 = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop id1);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop id1);
   ] in
   let pa2 = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l; 3_l]]);
-    (flags, Bgp.Next_hop id2);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l; 3_l]]);
+    (Bgp.Next_hop id2);
   ] in
   assert (Loc_rib.tie_break (pa1, id1) (pa2, id2));
 
@@ -104,14 +87,14 @@ let test_tie_break () =
   let id3 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let id4 = Ipaddr.V4.of_string_exn "172.19.10.1" in
   let pa3 = [
-    (flags, Bgp.Origin Bgp.IGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop id3);
+    (Bgp.Origin Bgp.IGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop id3);
   ] in
   let pa4 = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop id4);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop id4);
   ] in
   assert (Loc_rib.tie_break (pa3, id3) (pa4, id4) = false);
 
@@ -119,31 +102,25 @@ let test_tie_break () =
   let id5 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let id6 = Ipaddr.V4.of_string_exn "172.19.10.1" in
   let pa5 = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop id5);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop id5);
   ] in
   let pa6 = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop id6);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop id6);
   ] in
   assert (Loc_rib.tie_break (pa5, id5) (pa6, id6) = false);
 ;;
 
 let test_adj_rib_update_db () = 
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
   
   (* Test insertion *)
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"));
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"));
   ] in
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); ] in
   let update1 : Rib.update = { withdrawn = []; path_attrs; nlri } in
@@ -156,9 +133,9 @@ let test_adj_rib_update_db () =
   assert (List.length out_update1.withdrawn = 0);
 
   let path_attrs2 = [
-    (flags, Bgp.Origin Bgp.IGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"));
+    (Bgp.Origin Bgp.IGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"));
   ] in
   let nlri2 = [
     (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0"));
@@ -172,9 +149,9 @@ let test_adj_rib_update_db () =
 
   (* Test replace *)
   let path_attrs3 = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l; 3_l]]);
-    (flags, Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"));
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l; 3_l]]);
+    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"));
   ] in
   let nlri3 = [ 
     (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
@@ -205,20 +182,14 @@ let test_loc_rib_update_db () =
   let local_asn = 1_l in
   let local_id = Ipaddr.V4.of_string_exn "172.19.0.3" in
 
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
   
   (* Test insertion *)
   let id1 = Ipaddr.V4.of_string_exn "172.19.10.1" in
 
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (flags, Bgp.Next_hop id1);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop id1);
   ] in
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); ] in
   let update = { withdrawn = []; path_attrs; nlri } in
@@ -232,9 +203,9 @@ let test_loc_rib_update_db () =
 
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.IGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (flags, Bgp.Next_hop id2);
+    (Bgp.Origin Bgp.IGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop id2);
   ] in
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
@@ -248,9 +219,9 @@ let test_loc_rib_update_db () =
 
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.IGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (flags, Bgp.Next_hop id2);
+    (Bgp.Origin Bgp.IGP);
+    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
+    (Bgp.Next_hop id2);
   ] in
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
@@ -263,9 +234,9 @@ let test_loc_rib_update_db () =
 
   (* Test replace *)
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l]]);
-    (flags, Bgp.Next_hop id1);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l]]);
+    (Bgp.Next_hop id1);
   ] in
   let nlri = [ 
     (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
@@ -279,9 +250,9 @@ let test_loc_rib_update_db () =
 
   (* This advertised route would not be chosen as its as_path is longer than the current one *)
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l; 4_l]]);
-    (flags, Bgp.Next_hop id2);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l; 4_l]]);
+    (Bgp.Next_hop id2);
   ] in
   let nlri = [ 
     (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
@@ -312,19 +283,13 @@ let test_loc_rib_get_assoc_pfxs () =
   let local_asn = 1_l in
   let local_id = Ipaddr.V4.of_string_exn "172.19.0.3" in
 
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
   
   (* speaker1 inserts two pfxs *)
   let id1 = Ipaddr.V4.of_string_exn "172.19.10.1" in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (flags, Bgp.Next_hop id1);
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop id1);
   ] in
   let nlri = [ 
     (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0"));
@@ -338,9 +303,9 @@ let test_loc_rib_get_assoc_pfxs () =
   (* speaker2 inserts one pfx *)
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.IGP);
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (flags, Bgp.Next_hop id2);
+    (Bgp.Origin Bgp.IGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop id2);
   ] in
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.21.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
@@ -407,16 +372,10 @@ let test_split_update () =
   let split = Loc_rib.split_update update in
   assert (List.length split = 2);
 
-  let flags = {
-    transitive = false;
-    optional = false;
-    partial = false;
-    extlen = false;
-  } in
   let path_attrs = [
-    (flags, Bgp.Origin Bgp.EGP); 
-    (flags, Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (flags, Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1")); 
+    (Bgp.Origin Bgp.EGP); 
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1")); 
   ] in
   let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
   let nlri, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in

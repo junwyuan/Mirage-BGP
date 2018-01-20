@@ -238,29 +238,6 @@ module Loc_rib = struct
     loop 0 segment_list
   ;;
 
-  let find_origin path_attrs =
-    let rec loop = function
-      | [] -> 
-        Rib_log.err (fun m -> m "Missing ORIGIN");
-        failwith "Missing ORIGIN"
-      | hd::tl -> match hd with
-        | (_, Bgp.Origin v) -> v
-        | _ -> loop tl
-    in
-    loop path_attrs
-  ;;
-    
-  let find_aspath path_attrs =
-    let rec loop = function
-      | [] -> 
-        Rib_log.err (fun m -> m "Missing AS PATH");
-        failwith "Missing AS PATH"
-      | hd::tl -> match hd with
-        | (_, Bgp.As_path v) -> v 
-        | _ -> loop tl
-    in
-    loop path_attrs
-  ;;
 
   let append_aspath asn segments = 
     match segments with
@@ -270,16 +247,36 @@ module Loc_rib = struct
       | Asn_seq l -> (Asn_seq (asn::l))::tl
   ;;
 
-  let update_aspath asn flags path_attrs = 
-    let aspath = find_aspath path_attrs in
-    let appended = append_aspath asn aspath in
-    let tmp = path_attrs_remove AS_PATH path_attrs in
-    (flags, As_path appended)::tmp
+  let update_aspath asn path_attrs = 
+    match find_aspath path_attrs with
+    | None ->
+      Rib_log.warn (fun m -> m "MISSING AS PATH");
+      As_path [Asn_seq [asn]]::path_attrs
+    | Some aspath ->
+      let appended = append_aspath asn aspath in
+      let tmp = path_attrs_remove AS_PATH path_attrs in
+      As_path appended::tmp
   ;;
 
-  let update_nexthop ip flags path_attrs =
+  let update_nexthop ip path_attrs =
     let tmp = path_attrs_remove NEXT_HOP path_attrs in
-    (flags, Next_hop ip)::tmp
+    (Next_hop ip)::tmp
+  ;;
+
+  let find_origin path_attrs = 
+    match Bgp.find_origin path_attrs with
+    | None ->
+      Rib_log.err (fun m -> m "MISSING ORIGIN");
+      failwith "MISSING ORIGIN"
+    | Some v -> v
+  ;;
+
+  let find_aspath path_attrs = 
+    match Bgp.find_aspath path_attrs with
+    | None -> 
+      Rib_log.err (fun m -> m "MISSING AS PATH");
+      failwith "MISSING ASPATH"
+    | Some v -> v
   ;;
 
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
@@ -320,13 +317,7 @@ module Loc_rib = struct
       (db_aft_wd, out_update)
     end else
       let updated_path_attrs = 
-        let flags = {
-          transitive = false;
-          optional = false;
-          extlen = false;
-          partial = false;
-        } in
-        path_attrs |> update_nexthop local_id flags |> update_aspath local_asn flags
+        path_attrs |> update_nexthop local_id |> update_aspath local_asn
       in 
 
       let db_aft_insert, out_nlri = 
@@ -334,11 +325,11 @@ module Loc_rib = struct
           let opt = Prefix_map.find_opt pfx db in
           match opt with
           | None -> 
-            (Prefix_map.add pfx (updated_path_attrs, peer_id) db, List.cons pfx out_nlri)
+            (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
           | Some (stored_pattrs, src_id) ->
             (* If from the same peer, replace without compare *)
             if src_id = peer_id then 
-              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, List.cons pfx out_nlri)
+              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
             else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then 
               (Prefix_map.add pfx (updated_path_attrs, peer_id) db, out_nlri)
             else db, out_nlri
