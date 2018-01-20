@@ -259,7 +259,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start s =
-    let test_sizes = [2000000] in
+    let test_sizes = [100000; 300000; 500000; 800000; 1000000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
@@ -269,7 +269,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         let interval = 
           match (Key_gen.speaker ()) with
           | "quagga" -> 30
-          | _ -> 5
+          | _ -> 30
         in
         OS.Time.sleep_ns (Duration.of_sec interval)
         >>= fun () ->

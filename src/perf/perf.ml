@@ -44,6 +44,18 @@ end
 module Main (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
 
+  let pfxs_gen seed n =
+    let pfxs = ref [] in
+    let r = ref seed in
+    for i = 1 to n do
+      r := Int32.add !r 256_l; 
+      let pfx = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_int32 !r) in
+      pfxs := pfx::!pfxs;
+    done;
+    (!pfxs, !r)
+  ;;
+
+
   let relay_id () = Ipaddr.V4.of_string_exn "127.0.0.1"
 
   let relay1 () = 
@@ -223,7 +235,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           Rec_log.debug (fun m -> m "Receive pkg %d: %s" (!count) (Bgp.to_string msg));
 
           let new_count = pfxs_count + List.length withdrawn in
-          Rec_log.info (fun m -> m "withdrawn count %d" new_count);
+          Rec_log.debug (fun m -> m "withdrawn count %d" new_count);
           
           if new_count = total then 
             Lwt.return_unit 
@@ -294,7 +306,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
     rec_rloop2
     >>= fun () ->
-    let withdrawn_time = Unix.gettimeofday () -. start_time -. insert_time in
+    let withdrawn_time = Unix.gettimeofday () -. start_time -. insert_time -. 5. in
     
     Mon_log.info (fun m -> m "Test size: %d, insert time: %fs, withdrawn time: %fs, total %fs"
                   total insert_time withdrawn_time (insert_time +. withdrawn_time));
@@ -304,7 +316,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let start s =
-    let test_sizes = [300000; 500000; 800000; 1000000] in
+    let test_sizes = [100000; 300000; 500000; 800000; 1000000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
