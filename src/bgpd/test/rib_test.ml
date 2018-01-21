@@ -21,6 +21,7 @@ let test_is_aspath_loop () =
 ;;
 
 
+
 let test_find_origin () =
   let open Bgp in
   let path_attrs = [
@@ -127,7 +128,7 @@ let test_adj_rib_update_db () =
   
   let db0 = Prefix_map.empty in
 
-  let db1, out_update1 = Adj_rib.update_db update1 db0 in
+  let db1, out_update1 = Adj_rib_in.update_db update1 db0 in
   assert (Prefix_map.cardinal db1 = 1);
   assert (List.length out_update1.nlri = 1);
   assert (List.length out_update1.withdrawn = 0);
@@ -142,7 +143,7 @@ let test_adj_rib_update_db () =
   ] in
 
   let update2 : Rib.update = { withdrawn = []; path_attrs = path_attrs2; nlri = nlri2 } in
-  let db2, out_update2 = Adj_rib.update_db update2 db1 in
+  let db2, out_update2 = Adj_rib_in.update_db update2 db1 in
   assert (Prefix_map.cardinal db2 = 2);
   assert (List.length out_update2.nlri = 1);
   assert (List.length out_update2.withdrawn = 0);
@@ -158,7 +159,7 @@ let test_adj_rib_update_db () =
   ] in
   let update3 = { withdrawn = []; path_attrs = path_attrs3; nlri = nlri3 } in
 
-  let db3, out_update3 = Adj_rib.update_db update3 db2 in
+  let db3, out_update3 = Adj_rib_in.update_db update3 db2 in
   assert (Prefix_map.cardinal db3 = 2);
   assert (List.length out_update3.nlri = 1);
   assert (List.length out_update3.withdrawn = 0);
@@ -172,7 +173,7 @@ let test_adj_rib_update_db () =
     path_attrs = [];
     nlri = [];
   } in
-  let db4, out_update4 = Adj_rib.update_db update4 db3 in
+  let db4, out_update4 = Adj_rib_in.update_db update4 db3 in
   assert (Prefix_map.cardinal db4 = 0);
   assert (List.length out_update4.nlri = 0);
   assert (List.length out_update4.withdrawn = 2);
@@ -340,36 +341,36 @@ let test_util_take () =
     Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "66.173.0.0");
     Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "172.168.13.0");
   ] in
-  let taken, rest = Loc_rib.take pfxs 5 in
+  let taken, rest = Util.take pfxs 5 in
   assert (List.length rest = 1);
   assert (List.length taken = 2);
-  let taken2, rest2 = Loc_rib.take pfxs 6 in
+  let taken2, rest2 = Util.take pfxs 6 in
   assert (List.length rest2 = 1);
   assert (List.length taken2 = 2);
-  let taken3, rest3 = Loc_rib.take pfxs 9 in
+  let taken3, rest3 = Util.take pfxs 9 in
   assert (List.length rest3 = 0);
   assert (List.length taken3 = 3);
 ;;
 
 let test_util_split () =
   let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
-  let split = Loc_rib.split pfxs (4096 - 23) in
+  let split = Util.split pfxs (4096 - 23) in
   assert (List.length split = 1);
 
   let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
-  let split = Loc_rib.split pfxs (4096 - 23) in
+  let split = Util.split pfxs (4096 - 23) in
   assert (List.length split = 2);
 ;;
 
 let test_split_update () =
   let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
   let update = { withdrawn; path_attrs = []; nlri = [] } in
-  let split = Loc_rib.split_update update in
+  let split = Util.split_update update in
   assert (List.length split = 1);
 
   let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
   let update = { withdrawn; path_attrs = []; nlri = [] } in
-  let split = Loc_rib.split_update update in
+  let split = Util.split_update update in
   assert (List.length split = 2);
 
   let path_attrs = [
@@ -380,7 +381,7 @@ let test_split_update () =
   let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
   let nlri, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
   let update = { withdrawn; path_attrs; nlri } in
-  assert (List.length (Loc_rib.split_update update) = 4);
+  assert (List.length (Util.split_update update) = 4);
 ;;
 
 let () =

@@ -193,7 +193,10 @@ module Adj_rib_out = struct
     }
   ;;
 
-  let close { aggr; pf } = Lwt.cancel aggr
+  let close { aggr; pf } = 
+    Lwt.cancel aggr;
+    pf None
+  ;;
 
   let update_db { withdrawn; path_attrs; nlri } db  = 
     let wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
