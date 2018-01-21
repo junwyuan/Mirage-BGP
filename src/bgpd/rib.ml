@@ -1,12 +1,16 @@
 open Bgp
 
+(* Logging *)
+let rib_log = Logs.Src.create ~doc:"RIB logging" "RIB"
+module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
+
 (* The underlying data store is a binary tree *)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
 
 type update = Bgp.update
 
-module Adj_rib = struct
+module Adj_rib_in = struct
   type t = {
     remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
@@ -64,35 +68,7 @@ module Adj_rib = struct
   let size t = Prefix_map.cardinal t.db
 end
 
-module Id_map = Map.Make(Ipaddr.V4)
-
-module Loc_rib = struct
-  (* Logging *)
-  let rib_log = Logs.Src.create ~doc:"Loc-ocamlRIB logging" "Loc-RIB"
-  module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
-
-  type t = {
-    local_asn: int32;
-    local_id: Ipaddr.V4.t;
-    mutable subs: Adj_rib.t Id_map.t;
-    mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
-  }
-
-  type signal = 
-    | Update of (update * Ipaddr.V4.t)
-    | Subscribe of Adj_rib.t
-    | Unsubscribe of Adj_rib.t
-  
-  let create config = 
-    let open Config_parser in
-    {
-      local_id =  config.local_id;
-      local_asn = config.local_asn;
-      subs = Id_map.empty;
-      db = Prefix_map.empty;
-    }
-  ;;
-
+module Util = struct
   let take pfxs len =
     let rec loop pfxs len acc =
       match pfxs with
@@ -145,33 +121,173 @@ module Loc_rib = struct
     in
     loop update []
   ;;
+end
+
+module Adj_rib_out = struct
+  type t = {
+    remote_id: Ipaddr.V4.t;
+    callback: update -> unit Lwt.t;
+    st: update Lwt_stream.t;
+    pf: update option -> unit;
+    aggr: unit Lwt.t;
+    mutable db: Bgp.path_attrs Prefix_map.t;
+  }
+
+  let rec start_aggr st cb =
+    let aggregate updates =
+      let str_and_pa = List.map (fun ({path_attrs} as update) -> Bgp.path_attrs_to_string path_attrs, update) updates in 
+      
+      let merge updates = 
+        if updates = [] then 
+          { withdrawn = []; path_attrs = []; nlri = [] } 
+        else
+          let f { withdrawn = aggr_wd; path_attrs = aggr_pa; nlri = aggr_nlri} { withdrawn; path_attrs; nlri } =
+            { withdrawn = withdrawn @ aggr_wd; path_attrs = aggr_pa; nlri = nlri @ aggr_nlri}
+          in
+          List.fold_left f (List.hd updates) (List.tl updates)
+      in
+
+      let rec loop updates acc =
+        match updates with
+        | [] -> acc
+        | (hd_str, hd_update)::tl -> 
+          let same, diff = List.partition (fun (str, _) -> str = hd_str) tl in
+          loop diff (merge (hd_update::(List.map (fun (_, u) -> u) same)) :: acc)
+      in
+      
+      loop str_and_pa []
+    in
+
+    match%lwt Lwt_stream.peek st with
+    | None -> 
+      Rib_log.warn (fun m -> m "STREAM EMPTY");
+      Lwt.return_unit
+    | Some _ ->
+      let updates = Lwt_stream.get_available st in
+      
+      let aggregated = aggregate updates in
+      let splitted = List.concat (List.map (fun pa -> Util.split_update pa) aggregated) in
+      
+      (* Send *)
+      let rec send_loop updates = 
+        match updates with
+        | [] -> Lwt.return_unit
+        | u::tl ->
+          let%lwt () = cb u in
+          send_loop tl
+      in
+      let%lwt () = send_loop splitted in
+      (* let%lwt () = send_loop updates in *)
+      
+      start_aggr st cb
+  ;;
+
+  let create remote_id callback : t = 
+    let st, pf = Lwt_stream.create () in
+    {
+      remote_id;
+      callback;
+      st; pf;
+      aggr = start_aggr st callback;
+      db = Prefix_map.empty;
+    }
+  ;;
+
+  let close { aggr; pf } = Lwt.cancel aggr
+
+  let update_db { withdrawn; path_attrs; nlri } db  = 
+    let wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
+    let after_wd =
+      let f rib pfx = Prefix_map.remove pfx rib in
+      List.fold_left f db wd
+    in
+    
+    let after_insert = 
+      let f rib pfx = Prefix_map.add pfx path_attrs rib in
+      List.fold_left f after_wd nlri
+    in
+
+    let output = {
+      withdrawn = wd;
+      path_attrs;
+      nlri
+    } in
+
+    (after_insert, output)
+  ;;
+
+  let handle_update t update = 
+    let new_db, output = update_db update t.db in
+    t.db <- new_db;
+    if output.nlri = [] && output.withdrawn = [] then 
+      Lwt.return_unit
+    else begin
+      t.pf (Some output);
+      Lwt.return_unit
+    end
+  ;;
+
+  let to_string t =
+    let pfxs_str = 
+      let f pfx pa acc = 
+        let pfx_str = Printf.sprintf "%s | %s" (Ipaddr.V4.Prefix.to_string pfx) (Bgp.path_attrs_to_string pa) in
+        List.cons pfx_str acc
+      in 
+      String.concat "\n" (Prefix_map.fold f t.db [])
+    in
+
+    Printf.sprintf "Adj_RIB \n Remote: %s \n Prefixes: %s" (Ipaddr.V4.to_string t.remote_id) pfxs_str
+  ;;
+
+  let size t = Prefix_map.cardinal t.db
+end
+
+
+module Loc_rib = struct
+  module Id_map = Map.Make(Ipaddr.V4)
+
+  type t = {
+    local_asn: int32;
+    local_id: Ipaddr.V4.t;
+    mutable subs: Adj_rib_out.t Id_map.t;
+    mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
+  }
+
+
+  type signal = 
+    | Update of (update * Ipaddr.V4.t)
+    | Subscribe of Adj_rib_out.t
+    | Unsubscribe of Adj_rib_out.t
+
+
+  let create config = 
+    let open Config_parser in
+    {
+      local_id =  config.local_id;
+      local_asn = config.local_asn;
+      subs = Id_map.empty;
+      db = Prefix_map.empty;
+    }
+  ;;
+
 
   let invoke_callback t (update, remote_id) =
-    let open Adj_rib in
-    let split_update = split_update update in
+    let open Adj_rib_out in
     let f k v acc = 
       match k = remote_id with
       | true -> acc
-      | false ->
-        let rec send_loop updates = 
-          match updates with
-          | [] -> Lwt.return_unit
-          | u::tl ->
-            let%lwt () = Adj_rib.handle_update v u in
-            send_loop tl
-        in
-        (send_loop split_update)::acc
+      | false -> (Adj_rib_out.handle_update v update)::acc
     in
     Lwt.join (Id_map.fold f t.subs [])
   ;;
 
   let is_subscribed t rib = 
-    let open Adj_rib in
+    let open Adj_rib_out in
     Id_map.mem rib.remote_id t.subs
   ;;
 
   let subscribe t rib = 
-    let open Adj_rib in
+    let open Adj_rib_out in
     match (is_subscribed t rib) with
     | true ->
       Rib_log.warn (fun m -> m "Duplicated rib subscription for remote %s" 
@@ -182,7 +298,7 @@ module Loc_rib = struct
       
       let f p (pa, _) acc = 
         let update = { withdrawn = []; path_attrs = pa; nlri = [p] } in
-        List.cons (Adj_rib.handle_update rib update) acc
+        List.cons (Adj_rib_out.handle_update rib update) acc
       in
       Lwt.join (Prefix_map.fold f t.db [])
   ;;
@@ -200,7 +316,7 @@ module Loc_rib = struct
   ;;
 
   let unsubscribe t rib =
-    let open Adj_rib in
+    let open Adj_rib_out in
     match not (is_subscribed t rib) with
     | true ->
       Rib_log.warn (fun m -> m "No rib subscription for remote %s" 
@@ -371,7 +487,7 @@ module Loc_rib = struct
     in
 
     let subs_str = 
-      let open Adj_rib in
+      let open Adj_rib_in in
       let tmp = List.map (fun (x, _) -> Ipaddr.V4.to_string x) (Id_map.bindings t.subs) in
       String.concat " " tmp
     in

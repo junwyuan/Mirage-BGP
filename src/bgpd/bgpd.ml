@@ -60,8 +60,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     mutable keepalive_timer: Device.t option;
     mutable conn_starter: Device.t option;
     mutable flow_reader: Device.t option;
-    mutable input_rib: Rib.Adj_rib.t option;
-    mutable output_rib: Rib.Adj_rib.t option;
+    mutable input_rib: Rib.Adj_rib_in.t option;
+    mutable output_rib: Rib.Adj_rib_out.t option;
     mutable loc_rib: Rib.Loc_rib.t;
     stat: stat;
   }
@@ -418,14 +418,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | Process_update_msg u -> begin
       match t.input_rib with
       | None -> Bgp_log.err (fun m -> m "Input RIB not initiated"); Lwt.fail_with "Input RIB not initiated."
-      | Some rib -> Rib.Adj_rib.handle_update rib u
+      | Some rib -> Rib.Adj_rib_in.handle_update rib u
     end
     | Initiate_rib ->
       let input_rib = 
         let callback u = 
           Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.remote_id)) 
         in
-        Rib.Adj_rib.create t.remote_id callback
+        Rib.Adj_rib_in.create t.remote_id callback
       in
       t.input_rib <- Some input_rib;
 
@@ -433,7 +433,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         let callback u = 
           send_msg t (Bgp.Update u)
         in
-        Rib.Adj_rib.create t.remote_id callback
+        Rib.Adj_rib_out.create t.remote_id callback
       in
       t.output_rib <- Some output_rib;
 
@@ -444,6 +444,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       | None -> Lwt.return_unit
       | Some rib -> 
         t.output_rib <- None; 
+        Rib.Adj_rib_out.close rib;
         Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Unsubscribe rib)
   
   and handle_event t event =
@@ -513,7 +514,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           let input = 
           match t.input_rib with
             | None -> "No IN RIB."
-            | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib.size rib)
+            | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib_in.size rib)
           in
 
           let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
@@ -521,7 +522,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           let output = 
             match t.output_rib with
             | None -> "No OUT RIB"
-            | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib.size rib)
+            | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib_out.size rib)
           in
         
           (String.concat "; " [input; loc; output])
