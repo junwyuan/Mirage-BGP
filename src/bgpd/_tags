@@ -1,7 +1,13 @@
-true: package(result), package(cstruct), package(cstruct.ppx), package(lwt), package(ipaddr), package(logs)
+true: package(ipaddr), package(logs)
+true: package(result)
+true: package(cstruct), package(cstruct.ppx)
+true: package(lwt), package(lwt.ppx)
+true: debug, profile
+
 <test/*.*>: package(alcotest)
-<rib.*>: package(logs)
 "common": include
 "common/lib": include
 "test": include
-true: debug, package(lwt.ppx), package(yojson), package(lwt.unix)
+
+true: package(yojson)
+true: package(lwt.unix)

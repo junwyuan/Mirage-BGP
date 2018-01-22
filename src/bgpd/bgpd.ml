@@ -568,6 +568,8 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
       Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
       
       command_loop id_map
+    | "exit" ->
+      Lwt.return_unit
     | s -> 
       Bgp_log.info (fun m -> m "Unrecognised command %s" s);
       command_loop id_map

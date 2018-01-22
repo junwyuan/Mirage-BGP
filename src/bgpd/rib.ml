@@ -133,7 +133,7 @@ module Adj_rib_out = struct
     mutable db: Bgp.path_attrs Prefix_map.t;
   }
 
-  let rec start_aggr st cb =
+  let rec start_aggr st cb = 
     let aggregate updates =
       let str_and_pa = List.map (fun ({path_attrs} as update) -> Bgp.path_attrs_to_string path_attrs, update) updates in 
       

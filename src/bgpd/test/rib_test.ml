@@ -20,8 +20,6 @@ let test_is_aspath_loop () =
   assert (Loc_rib.is_aspath_loop 6_l as_path = false);
 ;;
 
-
-
 let test_find_origin () =
   let open Bgp in
   let path_attrs = [
