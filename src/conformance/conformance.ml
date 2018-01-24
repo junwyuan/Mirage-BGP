@@ -48,16 +48,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let open Relay in
     let withdrawn = [] in
     let nlri = [ Ipaddr.V4.Prefix.make 8 sample_id] in
-    let flags = {
-      optional=false;
-      transitive=true;
-      partial=false;
-      extlen=false;
-    } in
     let path_attrs = [
-      (flags, Origin EGP);
-      (flags, Next_hop (relay1 ()).id);
-      (flags, As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]])
+      Origin EGP;
+      Next_hop (relay1 ()).id;
+      As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]]
     ] in
     Update { withdrawn; nlri; path_attrs}
   ;;
@@ -81,32 +75,32 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.pick [timer; task ()]
   ;;
 
-  let create_connection s relay test_name =
+  let create_session s relay test_name =
     let open Relay in
     Bgp_flow.create_connection s (relay_id (), relay.port)
     >>= function
-    | Error _ -> fail test_name "tcp connect fail"
+    | Error _ -> fail test_name "Create_session: tcp connect fail"
     | Ok flow ->
       Bgp_flow.write flow (default_open_msg relay)
       >>= function
-      | Error _ -> fail test_name "tcp write fail"
+      | Error _ -> fail test_name "Create_session: write open fail"
       | Ok () ->
         Bgp_flow.read flow
         >>= function
-        | Error _ -> fail test_name "tcp read fail"
+        | Error _ -> fail test_name "Create_session: read open fail"
         | Ok msg ->
           let open Bgp in
           match msg with
           | Keepalive | Notification _ | Update _ -> 
-            fail test_name "wrong msg type"
+            fail test_name "Create_session: wrong msg type (not OPEN)"
           | Open o ->
             Bgp_flow.write flow Bgp.Keepalive
             >>= function
-            | Error _ -> fail test_name "tcp write fail"
+            | Error _ -> fail test_name "Create_session: tcp write keepalive fail"
             | Ok () ->
               Bgp_flow.read flow
               >>= function
-              | Error _ -> fail test_name "tcp read fail"
+              | Error _ -> fail test_name "Create_session: tcp read keepalive fail"
               | Ok msg ->
                 match msg with
                 | Keepalive ->
@@ -124,9 +118,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_create_session s () = 
     let test_name = "create session" in
     let open Relay in
-    create_connection s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name
     >>= fun (flow, _) ->
-    Bgp_flow.close flow
+    close_session flow
     >>= fun () ->
     pass test_name
   ;;
@@ -134,7 +128,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_maintain_session s () =
     let test_name = "maintain session" in
     let open Relay in
-    create_connection s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name
     >>= fun (flow, o) ->
     let open Bgp in 
     let negotiated_ht = min o.hold_time default_hold_time in
@@ -156,13 +150,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_propagate_update_to_new_peer s () =
     let test_name = "propagate update to new peer" in
-    create_connection s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name
     >>= fun (flow1, _) ->
     Bgp_flow.write flow1 (default_update ())
     >>= function
     | Error _ -> fail test_name "tcp write error"
     | Ok () ->
-      create_connection s (relay2 ()) test_name
+      create_session s (relay2 ()) test_name
       >>= fun (flow2, _) ->
       let rec read_loop () =
         Bgp_flow.read flow2
@@ -191,9 +185,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_propagate_update_to_old_peer s () =
     let test_name = "propagate update to old peer" in
-    create_connection s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name
     >>= fun (flow1, _) ->
-    create_connection s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
     Bgp_flow.write flow1 (default_update ())
     >>= function
@@ -229,7 +223,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let test_name = "group propagate update to new peer" in
     let group_size = 500 in
     (* connect to first speaker *)
-    create_connection s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name
     >>= fun (flow1, _) ->
 
     let rec plain_feed test_name flow count seed =
@@ -243,7 +237,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let origin = Origin EGP in
           let next_hop = Next_hop (relay1 ()).id in
           let as_path = As_path [Asn_seq [(relay1 ()).as_no; 2_l; 3_l]] in
-          List.map (fun pa -> (flags, pa)) [origin; next_hop; as_path]
+          [origin; next_hop; as_path]
         in
         let n_seed = Ip_gen.next seed in
         let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_int32 n_seed) ] in
@@ -258,7 +252,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     plain_feed test_name flow1 0 Ip_gen.default_seed 
     >>= fun () ->
     (* connect to speaker2 *)
-    create_connection s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
     let rec read_loop (set: Prefix_set.t) =
       Bgp_flow.read flow2
@@ -287,9 +281,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_route_withdraw s () =
     let test_name = "route withdrawn" in
-    create_connection s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name
     >>= fun (flow1, _) ->
-    create_connection s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
     Bgp_flow.write flow1 (default_update ())
     >>= function
@@ -349,14 +343,15 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | [] -> Lwt.return_unit
   ;;
 
+
   let start s =
     Conf_log.info (fun m -> m "test starts");
     let tests = [
-      (* test_create_session s; 
-      test_maintain_session s;
-      test_propagate_update_to_old_peer s;
-      test_propagate_update_to_new_peer s; *)
-      test_propagate_group_update_to_new_peer s;
+      (* test_create_session s;  *)
+      (* test_maintain_session s; *)
+      (* test_propagate_update_to_old_peer s;
+      test_propagate_update_to_new_peer s;
+      test_propagate_group_update_to_new_peer s; *)
       test_route_withdraw s;
     ] in
     run tests

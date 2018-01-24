@@ -1,3 +1,6 @@
-true: package(result), package(cstruct), package(cstruct.ppx), debug, package(lwt)
+true: package(result)
+true: package(cstruct), package(cstruct.ppx)
+true: package(lwt), package(lwt.ppx)
+true: debug, profile, spacetime
 "common": include
 "common/lib": include

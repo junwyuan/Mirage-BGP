@@ -481,7 +481,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | _ -> Lwt.return_unit
   ;;
 
-  let rec command_loop id_map =
+  let rec command_loop s id_map =
     Lwt_io.read_line Lwt_io.stdin
     >>= function
     | "start" -> 
@@ -490,14 +490,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         handle_event t (Fsm.Manual_start)
       in
       let _ = Id_map.map f id_map in
-      command_loop id_map
+      command_loop s id_map
     | "stop" -> 
       let f t =
         Bgp_log.info (fun m -> m "BGP stops." ~tags:(stamp t.remote_id));
         handle_event t (Fsm.Manual_stop)
       in
       let _ = Id_map.map f id_map in
-      command_loop id_map
+      command_loop s id_map
     | "show peers" ->
       let f t =
         let fsm = Printf.sprintf "FSM: %s" (Fsm.to_string t.fsm) in
@@ -535,7 +535,7 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
         Bgp_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string t.remote_id) (String.concat "\n" [fsm; running_dev; rib; msgs]));
       in
       let _ = Id_map.map f id_map in
-      command_loop id_map
+      command_loop s id_map
     (* | "show rib detail" ->
       let input = 
         match t.input_rib with
@@ -567,13 +567,14 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
                               gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
       Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
       
-      command_loop id_map
+      command_loop s id_map
     | "exit" ->
-      Lwt.return_unit
-    | s -> 
-      Bgp_log.info (fun m -> m "Unrecognised command %s" s);
-      command_loop id_map
+      S.disconnect s
+    | str -> 
+      Bgp_log.info (fun m -> m "Unrecognised command %s" str);
+      command_loop s id_map
   ;;
+
         
   let start s =
     (* Enable backtrace *)
@@ -644,6 +645,6 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     in
     let _ = Id_map.map f id_map in
 
-    command_loop id_map
+    command_loop s id_map
   ;;
 end

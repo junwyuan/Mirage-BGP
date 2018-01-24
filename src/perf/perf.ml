@@ -7,13 +7,7 @@ let mon_log = Logs.Src.create "Monitor" ~doc:"Monitor log"
 module Mon_log = (val Logs.src_log mon_log : Logs.LOG)
 
 module Ip_gen = struct
-  let (+++) x y = Int32.add x y
-
-  let (>>>) x y = Int32.shift_right x y
-  let (<<<) x y = Int32.shift_left x y
-  let (&&&) x y = Int32.logand x y
-  let (|||) x y = Int32.logor x y
-
+  open Operators
 
   let default_seed = 
     Int32.shift_left 128_l 24
@@ -139,11 +133,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         let withdrawn = [] in
         let path_attrs = 
           let open Bgp in
-          let flags = { optional=false; transitive=true; extlen=false; partial=false } in
           let origin = Origin EGP in
           let next_hop = Next_hop (relay1 ()).id in
           let as_path = As_path [Asn_seq [4_l; 2_l; 3_l]] in
-          List.map (fun pa -> (flags, pa)) [origin; next_hop; as_path]
+          [origin; next_hop; as_path]
         in
         let ips, n_seed = Ip_gen.next_n seed cluster_size in
         let nlri = List.map (fun ip -> Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_int32 ip)) ips in
@@ -315,8 +308,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return marker_id
   ;;
 
+
   let start s =
-    let test_sizes = [100000; 300000; 500000; 800000; 1000000] in
+    let test_sizes = [100000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
