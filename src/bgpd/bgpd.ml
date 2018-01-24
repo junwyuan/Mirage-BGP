@@ -237,48 +237,81 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
 
   let listen_tcp_connection s local_port id_map callback =
     let on_connect flow =
-      let remote_id, _ = Bgp_flow.dst flow in
-      Bgp_log.info (fun m -> m "receive incoming connection from remote %s" (Ipaddr.V4.to_string remote_id));
-      match Id_map.mem remote_id id_map with
-      | false -> 
-        Bgp_log.info (fun m -> m "Refuse connection because remote id %s is unknown." (Ipaddr.V4.to_string remote_id));
-        Bgp_flow.close flow
-      | true -> begin
-        let connection = Id_map.find remote_id id_map in
-        let open Fsm in
-        match connection.fsm.state with
-        | IDLE -> 
-          Bgp_log.info (fun m -> m "Refuse connection %s because fsm is at IDLE." (Ipaddr.V4.to_string remote_id));
+      match%lwt Bgp_flow.read flow with
+      | Error err ->
+        let ip, _ = Bgp_flow.dst flow in
+        (match err with
+        | `PARSE_ERROR err ->  
+          Bgp_log.debug (fun m -> m "receive an unknown connection from ip %s with err %s" 
+                            (Ipaddr.V4.to_string ip) (Bgp.parse_error_to_string err))
+        | _ ->
+          Bgp_log.debug (fun m -> m "receive an unknown connection from ip %s, but failed" 
+                            (Ipaddr.V4.to_string ip))
+        );
+        Lwt.return_unit
+      | Ok Open opent -> begin
+        Bgp_log.debug (fun m -> m "Receive incoming connection with open message %s" (Bgp.to_string (Open opent)));
+
+        let remote_id = opent.local_id in
+        Bgp_log.info (fun m -> m "Receive incoming connection from remote %s" (Ipaddr.V4.to_string remote_id));
+
+        match Id_map.mem remote_id id_map with
+        | false -> 
+          Bgp_log.info (fun m -> m "Refuse connection because remote id %s is unknown." (Ipaddr.V4.to_string remote_id));
           Bgp_flow.close flow
-        | CONNECT | ACTIVE ->
-          connection.flow <- Some flow;
-          callback connection Tcp_connection_confirmed
-          >>= fun () ->
-          flow_reader connection (callback connection)
-        | OPEN_SENT | OPEN_CONFIRMED -> 
-          if (Ipaddr.V4.compare connection.local_id connection.remote_id > 0) then begin
-            Bgp_log.info (fun m -> m "Collision detected and dump new connection.");
+        | true -> begin
+          let connection = Id_map.find remote_id id_map in
+          let open Fsm in
+          match connection.fsm.state with
+          | IDLE -> 
+            Bgp_log.info (fun m -> m "Refuse connection %s because fsm is at IDLE." (Ipaddr.V4.to_string remote_id));
+            (* Confusion with RFC4271: do I need to increment the connect retry counter?? *)
+            let _ = Bgp_flow.write flow (Notification Cease) in
             Bgp_flow.close flow
-          end
-          else begin
-            Bgp_log.info (fun m -> m "Collision detected and dump existing connection.");
-            callback connection Open_collision_dump
-            >>= fun () ->
-            let new_fsm = {
-              state = CONNECT;
-              conn_retry_counter = connection.fsm.conn_retry_counter;
-              conn_retry_time = connection.fsm.conn_retry_time;
-              hold_time = connection.fsm.hold_time;
-              keepalive_time = connection.fsm.keepalive_time;
-            } in
+          | CONNECT | ACTIVE ->
             connection.flow <- Some flow;
-            connection.fsm <- new_fsm;
             callback connection Tcp_connection_confirmed
-          end
-        | ESTABLISHED -> 
-          Bgp_log.info (fun m -> m "Connection collision detected and dump new connection.");
-          Bgp_flow.close flow
+            >>= fun () ->
+            callback connection (BGP_open opent)
+            >>= fun () ->
+            flow_reader connection (callback connection)
+          | OPEN_SENT | OPEN_CONFIRMED -> 
+            if (Ipaddr.V4.compare connection.local_id connection.remote_id > 0) then begin
+              Bgp_log.info (fun m -> m "Collision detected and dump new connection.");
+              let _ = Bgp_flow.write flow (Notification Cease) in
+              Bgp_flow.close flow
+            end
+            else begin
+              Bgp_log.info (fun m -> m "Collision detected and dump existing connection.");
+              callback connection Open_collision_dump
+              >>= fun () ->
+              let new_fsm = {
+                state = CONNECT;
+                conn_retry_counter = connection.fsm.conn_retry_counter;
+                conn_retry_time = connection.fsm.conn_retry_time;
+                hold_time = connection.fsm.hold_time;
+                keepalive_time = connection.fsm.keepalive_time;
+              } in
+              connection.flow <- Some flow;
+              connection.fsm <- new_fsm;
+              
+              callback connection Tcp_connection_confirmed
+              >>= fun () ->
+              callback connection (BGP_open opent) 
+              >>= fun () ->
+              flow_reader connection (callback connection)
+            end
+          | ESTABLISHED -> 
+            Bgp_log.info (fun m -> m "Connection collision detected and dump new connection.");
+            let _ = Bgp_flow.write flow (Notification Cease) in
+            Bgp_flow.close flow
+        end
       end
+      | Ok msg ->
+        let ip, _ = Bgp_flow.dst flow in
+        Bgp_log.debug (fun m -> m "Receive message %s from unknown connection with ip %s" (Bgp.to_string msg) 
+                                (Ipaddr.V4.to_string ip));
+        Lwt.return_unit
     in
     Bgp_flow.listen s local_port on_connect
   ;;
