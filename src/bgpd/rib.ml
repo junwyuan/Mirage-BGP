@@ -449,9 +449,12 @@ module Loc_rib = struct
             (* If from the same peer, replace without compare *)
             if src_id = peer_id then 
               (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-            else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then 
-              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, out_nlri)
-            else db, out_nlri
+            else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then begin
+              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
+            end
+            else begin
+              db, out_nlri
+            end
         in
         List.fold_left f (db_aft_wd, []) in_nlri
       in

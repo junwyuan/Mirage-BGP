@@ -114,6 +114,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           in
           Bgp_log.debug (fun m -> m "receive message %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id));
           let _ = callback event in
+
+          (* Try yield control *)
+          let%lwt () = Lwt.return_unit in
+
           flow_reader t callback
         | Error err ->
           t.flow_reader <- None;

@@ -231,7 +231,7 @@ let test_loc_rib_update_db () =
   assert (List.length out_update.withdrawn = 0);
 
 
-  (* Test replace *)
+  (* Test same src replace *)
   let path_attrs = [
     (Bgp.Origin Bgp.EGP);
     (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l]]);
@@ -247,18 +247,34 @@ let test_loc_rib_update_db () =
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
 
+  (* This advertised route would be taken because its as_path is shorter *)
+  let path_attrs = [
+    (Bgp.Origin Bgp.EGP);
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop id2);
+  ] in
+  let nlri = [ 
+    (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
+  ] in
+  let update = { withdrawn = []; path_attrs; nlri } in
+
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  assert (Prefix_map.cardinal db = 2);
+  assert (List.length out_update.nlri = 1);
+  assert (List.length out_update.withdrawn = 0);
+
   (* This advertised route would not be chosen as its as_path is longer than the current one *)
   let path_attrs = [
     (Bgp.Origin Bgp.EGP);
     (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l; 4_l]]);
-    (Bgp.Next_hop id2);
+    (Bgp.Next_hop id1);
   ] in
   let nlri = [ 
     (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
   ] in
   let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
@@ -272,10 +288,10 @@ let test_loc_rib_update_db () =
     path_attrs = [];
     nlri = [];
   } in
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
-  assert (Prefix_map.cardinal db = 1);
+  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  assert (Prefix_map.cardinal db = 0);
   assert (List.length out_update.nlri = 0);
-  assert (List.length out_update.withdrawn = 1);
+  assert (List.length out_update.withdrawn = 2);
 ;;
 
 let test_loc_rib_get_assoc_pfxs () = 
