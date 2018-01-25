@@ -28,3 +28,15 @@ let dev_relay2 = {
   port = 50003;
   as_no = 5_l;
 }
+
+let host_relay1 = {
+  id = Ipaddr.V4.of_string_exn "172.19.10.3";
+  port = 179;
+  as_no = 4_l;
+}
+
+let host_relay2 = {
+  id = Ipaddr.V4.of_string_exn "172.19.10.4";
+  port = 179;
+  as_no = 5_l;
+}

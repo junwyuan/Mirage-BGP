@@ -436,8 +436,10 @@ module Loc_rib = struct
       (db_aft_wd, out_update)
     end else
       let updated_path_attrs = 
-        path_attrs |> update_nexthop local_id |> update_aspath local_asn
-      in 
+        path_attrs 
+        |> update_nexthop local_id 
+        |> update_aspath local_asn
+      in
 
       let db_aft_insert, out_nlri = 
         let f (db, out_nlri) pfx = 
@@ -473,7 +475,7 @@ module Loc_rib = struct
     let new_db, output = update_db t.local_id t.local_asn (update, remote_id) t.db in
     t.db <- new_db;
     if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
-    else invoke_callback t (update, remote_id)
+    else invoke_callback t (output, remote_id)
   ;;
 
   let handle_signal t = function

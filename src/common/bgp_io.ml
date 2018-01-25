@@ -69,6 +69,7 @@ module type S = sig
   | `Closed
   | `PARSE_ERROR of Bgp.parse_error
   | Mirage_protocols.Tcp.error
+  | `Closed_by_local
   ]
   type write_error
   
@@ -93,6 +94,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   | `Closed
   | `PARSE_ERROR of Bgp.parse_error
   | Mirage_protocols.Tcp.error
+  | `Closed_by_local
   ]
   type write_error = S.TCPV4.write_error
 
@@ -138,8 +140,8 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         | `Refused -> Lwt.return (Error `Refused)
         | `Timeout -> Lwt.return (Error `Timeout)
         | _ -> 
-          Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
-          Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?"
+          Lwt.return (Error `Closed_by_local)
+
       end
       | Ok (`Data b) -> begin
         if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then begin
@@ -161,8 +163,9 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           | `Refused -> Lwt.return (Error `Refused)
           | `Timeout -> Lwt.return (Error `Timeout)
           | err ->
-            Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
-            Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?"
+            (* Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
+            Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?" *)
+            Lwt.return (Error `Closed_by_local)
         end
       else parse t b
   ;;

@@ -263,6 +263,9 @@ let test_loc_rib_update_db () =
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
 
+  (* Test path attrs modification *)
+  assert (find_aspath out_update.path_attrs <> Some [Asn_seq [5_l; 2_l]]);
+
   (* This advertised route would not be chosen as its as_path is longer than the current one *)
   let path_attrs = [
     (Bgp.Origin Bgp.EGP);
@@ -398,6 +401,30 @@ let test_split_update () =
   assert (List.length (Util.split_update update) = 4);
 ;;
 
+let test_util_update_nexthop () =
+  let path_attrs = [
+    (Bgp.Origin Bgp.EGP); 
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1")); 
+  ] in
+  assert ((find_next_hop path_attrs) = Some (Ipaddr.V4.of_string_exn "172.19.10.1"));
+
+  let updated = Loc_rib.update_nexthop (Ipaddr.V4.of_string_exn "172.19.10.3") path_attrs in
+  assert ((find_next_hop updated) = Some (Ipaddr.V4.of_string_exn "172.19.10.3"));
+;;
+
+let test_util_update_aspath () =
+  let path_attrs = [
+    (Bgp.Origin Bgp.EGP); 
+    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
+    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1")); 
+  ] in
+  assert ((find_aspath path_attrs) = Some ([Asn_seq [5_l; 2_l]]));
+
+  let updated = Loc_rib.update_aspath 1_l path_attrs in
+  assert (find_aspath updated = Some ([Asn_seq [1_l; 5_l; 2_l]]));
+;;
+
 let () =
   run "RIB test" [
     "Adj-RIB", [
@@ -417,6 +444,8 @@ let () =
       test_case "test util.split" `Slow test_util_split;
       test_case "test Util.split_update" `Slow test_split_update;
       test_case "test Util.append_aspath" `Slow test_append_aspath;
+      test_case "test Util.update_nexthop" `Slow test_util_update_nexthop;
+      test_case "test Util.update_aspath" `Slow test_util_update_aspath;
     ];
   ]
 ;;
