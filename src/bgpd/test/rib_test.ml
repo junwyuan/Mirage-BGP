@@ -63,8 +63,6 @@ let test_append_aspath () =
   | _ -> assert false);
 ;;
 
-
-
 let test_tie_break () =
 
   (* Depends on as_path length *)
