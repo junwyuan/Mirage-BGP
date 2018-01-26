@@ -65,6 +65,7 @@ module type S = sig
   type s
   type t
   type conn_error
+  type flow
   type read_error = private [>
   | `Closed
   | `PARSE_ERROR of Bgp.parse_error
@@ -79,6 +80,7 @@ module type S = sig
   val write : t -> Bgp.t -> (unit, write_error) Result.result Lwt.t
   val close : t -> unit Lwt.t
   val dst : t -> Ipaddr.V4.t * int
+  val tcp_flow : t -> flow
 end
 
 let io_log = Logs.Src.create "IO" ~doc:"IO LOG"
@@ -86,7 +88,8 @@ module Io_log = (val Logs.src_log io_log : Logs.LOG)
 
 module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t 
                                       and type conn_error = S.TCPV4.error 
-                                      and type write_error = S.TCPV4.write_error = struct
+                                      and type write_error = S.TCPV4.write_error 
+                                      and type flow = S.TCPV4.flow = struct
   type s = S.t
   type conn_error = S.TCPV4.error
   type flow = S.TCPV4.flow
@@ -194,4 +197,6 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   let close t = S.TCPV4.close t.flow
 
   let dst t = S.TCPV4.dst t.flow
+
+  let tcp_flow t = t.flow
 end

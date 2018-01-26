@@ -470,6 +470,67 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       in
       rloop1 ()
   ;;
+
+
+
+
+  let test_header_error_handle s () = 
+    let test_name = "test header error handle" in
+    let%lwt (flow, _) = create_session s (relay1 ()) test_name in
+    let tcp_flow = Bgp_flow.tcp_flow flow in
+    
+    let buf = Cstruct.create 19 in
+    Cstruct.BE.set_uint16 buf 16 19;
+    Cstruct.set_uint8 buf 18 4;
+
+    match%lwt S.TCPV4.write tcp_flow buf with
+    | Error _ -> assert false
+    | Ok () ->
+      let rec rloop () =
+        match%lwt Bgp_flow.read flow with
+        | Error _ -> assert false
+        | Ok Keepalive -> rloop ()
+        | Ok msg -> 
+          assert (msg = Notification (Message_header_error Connection_not_synchroniszed)); 
+
+          pass test_name
+      in
+      rloop ()
+  ;;
+
+  let test_update_attr_length_error_handle s () = 
+    let test_name = "test header error handle" in
+    let%lwt (flow, _) = create_session s (relay1 ()) test_name in
+    let tcp_flow = Bgp_flow.tcp_flow flow in
+    
+    let path_attrs = [
+      Origin EGP;
+      As_path [Asn_seq [1_l]];
+      Next_hop (Ipaddr.V4.of_string_exn "192.168.1.253");
+    ] in
+    let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "192.168.45.0")] in
+    
+    let buf = gen_msg (Update { withdrawn = []; path_attrs; nlri }) in
+
+    Cstruct.set_uint8 buf 25 2;
+
+    match%lwt S.TCPV4.write tcp_flow buf with
+    | Error _ -> assert false
+    | Ok () ->
+      let rec rloop () =
+        match%lwt Bgp_flow.read flow with
+        | Error _ -> assert false
+        | Ok Keepalive -> rloop ()
+        | Ok msg -> 
+          match msg with
+          | Notification (Update_message_error (Attribute_length_error _)) ->
+            pass test_name
+          | _ -> assert false
+      in
+      rloop ()
+  ;;
+
+  
     
   let rec run tests = 
     let interval = 
@@ -499,6 +560,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_route_withdraw s;
       test_route_replace s;
       test_route_unchanged s; *)
+      test_header_error_handle s;
+      test_update_attr_length_error_handle s;
     ] in
     run tests
     >>= fun () ->
