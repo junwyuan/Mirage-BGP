@@ -164,15 +164,14 @@ let test_adj_rib_update_db () =
   let update4 = {
     withdrawn = [
       (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0"));
-      (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0"));
     ];
     path_attrs = [];
     nlri = [];
   } in
   let db4, out_update4 = Adj_rib_in.update_db update4 db3 in
-  assert (Prefix_map.cardinal db4 = 0);
+  assert (Prefix_map.cardinal db4 = 1);
   assert (List.length out_update4.nlri = 0);
-  assert (List.length out_update4.withdrawn = 2);
+  assert (List.length out_update4.withdrawn = 1);
 ;;
 
 let test_loc_rib_update_db () = 
@@ -283,16 +282,15 @@ let test_loc_rib_update_db () =
   (* Test withdrawn *)
   let update = {
     withdrawn = [
-      (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0"));
       (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0"));
     ];
     path_attrs = [];
     nlri = [];
   } in
   let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
-  assert (Prefix_map.cardinal db = 0);
+  assert (Prefix_map.cardinal db = 1);
   assert (List.length out_update.nlri = 0);
-  assert (List.length out_update.withdrawn = 2);
+  assert (List.length out_update.withdrawn = 1);
 ;;
 
 let test_loc_rib_get_assoc_pfxs () = 

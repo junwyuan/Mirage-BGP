@@ -92,18 +92,22 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
             | Bgp.Update u -> begin
               t.stat.rec_update <- t.stat.rec_update + 1;
 
-              match find_aspath u.path_attrs with
-              | None -> Fsm.Update_msg_err (Missing_wellknown_attribute 2)
-              | Some [] -> Fsm.Update_msg_err Malformed_as_path
-              | Some (hd::tl) ->
-                match hd with
-                | Asn_seq l -> 
-                  if List.hd l <> t.remote_asn then Fsm.Update_msg_err Malformed_as_path
-                  else Fsm.Update_msg u
-                | Asn_set l ->
-                  if List.mem t.remote_asn l then Fsm.Update_msg_err Malformed_as_path
-                  else Fsm.Update_msg u
-                  
+              match u.nlri with
+              | [] -> 
+                (* Do not perform attribute check if no route is advertised *)
+                Fsm.Update_msg u
+              | _ ->
+                match find_aspath u.path_attrs with
+                | None -> Fsm.Update_msg_err (Missing_wellknown_attribute 2)
+                | Some [] -> Fsm.Update_msg_err Malformed_as_path
+                | Some (hd::tl) ->
+                  match hd with
+                  | Asn_seq l -> 
+                    if List.hd l <> t.remote_asn then Fsm.Update_msg_err Malformed_as_path
+                    else Fsm.Update_msg u
+                  | Asn_set l ->
+                    if List.mem t.remote_asn l then Fsm.Update_msg_err Malformed_as_path
+                    else Fsm.Update_msg u
             end
             | Bgp.Notification e -> 
               t.stat.rec_notif <- t.stat.rec_notif + 1; 
@@ -454,8 +458,11 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     end
     | Process_update_msg u -> begin
       match t.input_rib with
-      | None -> Bgp_log.err (fun m -> m "Input RIB not initiated"); Lwt.fail_with "Input RIB not initiated."
-      | Some rib -> Rib.Adj_rib_in.handle_update rib u
+      | None -> 
+        Bgp_log.err (fun m -> m "Input RIB not initiated"); 
+        Lwt.fail_with "Input RIB not initiated."
+      | Some rib -> 
+        Rib.Adj_rib_in.handle_update rib u
     end
     | Initiate_rib ->
       let input_rib = 

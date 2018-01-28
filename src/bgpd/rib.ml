@@ -25,6 +25,7 @@ module Adj_rib_in = struct
 
   let update_db { withdrawn; path_attrs; nlri } db  = 
     let wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
+
     let after_wd =
       let f rib pfx = Prefix_map.remove pfx rib in
       List.fold_left f db wd
