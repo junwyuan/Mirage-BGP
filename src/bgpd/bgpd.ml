@@ -119,8 +119,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           Bgp_log.debug (fun m -> m "receive message %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id));
           let _ = callback event in
 
-          (* Try yield control *)
-          let%lwt () = Lwt.return_unit in
+          (* Load balancing *)
+          OS.Time.sleep_ns (Duration.of_ms 1)
+          >>= fun () ->
 
           flow_reader t callback
         | Error err ->
@@ -135,6 +136,9 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
           | `Timeout -> 
             Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
             callback Fsm.Tcp_connection_fail
+          | `Closed_by_local ->
+            Bgp_log.debug (fun m -> m "Flow closed by local." ~tags:(stamp t.remote_id));
+            Lwt.return_unit
           | `PARSE_ERROR err -> begin
             match err with
             | Bgp.Parsing_error -> 
