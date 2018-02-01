@@ -22,6 +22,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "quagga" -> Relay.quagga_relay1
     | "host" -> Relay.host_relay1
     | "frr" -> Relay.frr_relay1
+    | "xorp" -> Relay.xorp_relay1
     | _ -> Relay.dev_relay1
   ;;
 
@@ -30,8 +31,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "quagga" -> Relay.quagga_relay2
     | "host" -> Relay.host_relay2
     | "frr" -> Relay.frr_relay2
+    | "xorp" -> Relay.xorp_relay2
     | _ -> Relay.dev_relay2
   ;;
+
 
 
   let default_hold_time = 180
@@ -52,37 +55,50 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.fail_with msg
   ;;
 
-  let create_session s relay =
+  let create_session s relay (module Log : Logs.LOG) =
     let open Relay in
     Bgp_flow.create_connection s (relay_id (), relay.port)
     >>= function
-    | Error _ -> fail "Create_session: tcp connect fail"
+    | Error _ -> 
+      Log.err (fun m -> m "Create_session: tcp connect fail");
+      assert false
     | Ok flow ->
       Bgp_flow.write flow (default_open_msg relay)
       >>= function
-      | Error _ -> fail "Create_session: write open fail"
+      | Error _ -> 
+        Log.err (fun m -> m "Create_session: write open fail");
+        assert false
       | Ok () ->
         Bgp_flow.read flow
         >>= function
-        | Error _ -> fail "Create_session: read open fail"
+        | Error _ -> 
+          Log.err (fun m -> m "Create_session: read open fail");
+          assert false
         | Ok msg ->
           let open Bgp in
           match msg with
           | Keepalive | Notification _ | Update _ -> 
-            fail (Printf.sprintf "Create_session: wrong msg type (NOT OPEN): %s" (to_string msg))
+            Log.err (fun m -> m "Create_session: wrong msg type (NOT OPEN): %s" (to_string msg));
+            assert false
           | Open o ->
             Bgp_flow.write flow Bgp.Keepalive
             >>= function
-            | Error _ -> fail "Create_session: tcp write keepalive fail"
+            | Error _ -> 
+              Log.err (fun m -> m "Create_session: write keepalive fail");
+              assert false
             | Ok () ->
               Bgp_flow.read flow
               >>= function
-              | Error _ -> fail "Create_session: tcp read keepalive fail"
+              | Error _ -> 
+                Log.err (fun m -> m "Create_session: read keepalive fail");
+                assert false
               | Ok msg ->
                 match msg with
                 | Keepalive ->
                   Lwt.return (flow, o)
-                | _ -> fail (Printf.sprintf "wrong msg type: %s" (Bgp.to_string msg))
+                | _ -> 
+                  Log.err (fun m -> m "wrong msg type: %s" (Bgp.to_string msg));
+                  assert false
   ;;
 
   let close_session flow = 
@@ -166,6 +182,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           Log.debug (fun m -> m "Insert count %d" new_count);
           
           if new_count = total then Lwt.return_unit else loop new_count
+        | Notification _ ->
+          Log.err (fun m -> m "Rec NOTIF: %s" (to_string msg));
+          Lwt.return_unit
         | _ -> loop count)
       | Error err ->
         (match err with 
@@ -192,6 +211,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           Log.debug (fun m -> m "Withdrawl count %d" new_count);
           
           if new_count = total then Lwt.return_unit else loop new_count
+        | Notification _ ->
+          Log.err (fun m -> m "Rec NOTIF: %s" (to_string msg));
+          Lwt.return_unit
         | _ -> loop count)
       | Error err ->
         (match err with 
@@ -215,6 +237,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         Log.err (fun m -> m "Write keepalive failed. This may be expected.");
         Lwt.fail_with "Write keepalive failed. This may be expected." 
       | Ok () ->
+        Log.info (fun m -> m "write keepalive");
         loop ()
     in
     loop ()
@@ -241,7 +264,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         >>= fun () ->
         let latency = Unix.gettimeofday () -. start_time in
 
-        OS.Time.sleep_ns (Duration.of_ms 1000) 
+        OS.Time.sleep_ns (Duration.of_sec 1) 
         >>= fun () ->
 
         (* Throughput test *)
@@ -260,7 +283,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                             phase_name stage_count (stage_count * stage_size) latency insert_time);
         
         (* Cool down *)
-        OS.Time.sleep_ns (Duration.of_ms 2)
+        OS.Time.sleep_ns (Duration.of_sec 1)
         >>= fun () ->
 
         loop (stage_count + 1) n_seed (time +. insert_time)
@@ -290,7 +313,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         >>= fun () ->
         let latency = Unix.gettimeofday () -. start_time in
 
-        OS.Time.sleep_ns (Duration.of_ms 1000) 
+        OS.Time.sleep_ns (Duration.of_sec 1) 
         >>= fun () ->
 
         (* Throughput test *)
@@ -320,21 +343,22 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   
   let start_perf_test ?(cluster_size=500) ?(stage_size=50000) ~s ~total ~seed =
     (* connect to speaker1 *)
-    create_session s (relay1 ())
+    create_session s (relay1 ()) (module Sp1_log)
     >>= fun (flow1, _) ->
     (* connect to speaker2 *)
-    create_session s (relay2 ())
+    create_session s (relay2 ()) (module Sp2_log)
     >>= fun (flow2, _) ->
 
+    Mon_log.info (fun m -> m "Connection up.");
+
     (* Keepalive loop *)
-    let _ = write_keepalive_loop flow1 in
-    let _ = write_keepalive_loop flow2 in
+    let _ = write_keepalive_loop flow2 (module Sp2_log) in
 
     (* Wait through the start up mechanism *)
     let min_ad_intvl = 
       match (Key_gen.speaker ()) with
-      | "quagga" -> 3
-      | _ -> 3
+      | "quagga" -> 5
+      | _ -> 5
     in
     OS.Time.sleep_ns (Duration.of_sec min_ad_intvl)
     >>= fun () ->
@@ -389,14 +413,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~path_attrs
-                  ~seed:(Pfx_gen.default_seed) ~total:200000 
+                  ~seed:(Pfx_gen.default_seed) ~total:100000 
                   ~flow1 ~flow2 
                   (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) 
                   ~phase_name:"replace"
     >>= fun _ ->
 
     (* Withdrawn phase *)
-    phased_withdrawn  ~stage_size ~cluster_size  ~total:200000 
+    phased_withdrawn  ~stage_size ~cluster_size  ~total:100000 
                       ~seed:(Pfx_gen.default_seed) 
                       ~flow1 ~flow2
                       (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG)
@@ -411,7 +435,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         [origin; next_hop; as_path]
       in
       phased_insert ~stage_size ~cluster_size 
-                    ~seed:(Pfx_gen.default_seed) ~total:200000 ~flow1 ~flow2 ~path_attrs 
+                    ~seed:(Pfx_gen.default_seed) ~total:100000 ~flow1 ~flow2 ~path_attrs 
                     (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) 
                     ~phase_name:"insert clash"
       >>= fun _ ->
@@ -425,8 +449,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         [origin; next_hop; as_path]
       in
       phased_insert ~stage_size ~cluster_size 
-                    ~seed:(Pfx_gen.peek_next_n Pfx_gen.default_seed 200000) 
-                    ~total:200000 ~flow1:flow2 ~flow2:flow1 
+                    ~seed:(Pfx_gen.peek_next_n Pfx_gen.default_seed 100000) 
+                    ~total:100000 ~flow1:flow2 ~flow2:flow1 
                     ~path_attrs (module Sp2_log : Logs.LOG) (module Sp1_log : Logs.LOG) 
                     ~phase_name:"insert clash"
       >>= fun _ ->
@@ -438,7 +462,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     (* Link flap phase *)
     (* Speaker2 starts another listen *)
-    let rec_rloop2 = read_loop_count_withdrawn flow2 (total - 200000) (module Sp2_log) in
+    let rec_rloop2 = read_loop_count_withdrawn flow2 (total - 100000) (module Sp2_log) in
     
     (* Buffer time for installation and processing overrun *)
     let buffer_time = 5 in
@@ -454,7 +478,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     rec_rloop2
     >>= fun () ->
     Mon_log.info (fun m -> m "link flap phase stage 0, RIB size %d: %.4fs" 
-                    (total - 200000) (Unix.gettimeofday () -. start_time));
+                    (total - 100000) (Unix.gettimeofday () -. start_time));
     (* Clean up *)
     close_session flow2
     >>= fun () ->
@@ -462,9 +486,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.return seed
   ;;
 
+  
+
 
   let start s =
-    let test_sizes = [400000] in
+    let test_sizes = [200000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 

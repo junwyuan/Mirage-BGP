@@ -21,20 +21,25 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "quagga" -> Relay.quagga_relay1
     | "host" -> Relay.host_relay1
     | "frr" -> Relay.frr_relay1
+    | "xorp" -> Relay.xorp_relay1
     | _ -> Relay.dev_relay1
   ;;
+  
 
   let relay2 () = 
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay2
     | "host" -> Relay.host_relay2
     | "frr" -> Relay.frr_relay2
+    | "xorp" -> Relay.xorp_relay2
     | _ -> Relay.dev_relay2
   ;;
 
   let dut_asn () =
     match Key_gen.speaker () with
     | "quagga" -> 1_l
+    | "xorp" -> 1_l
+    | "frr" -> 1_l
     | "dev" -> 10_l
     | _ -> 10_l
   ;;
@@ -43,6 +48,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     match Key_gen.speaker () with
     | "quagga" -> Ipaddr.V4.of_string_exn "172.19.0.2"
     | "dev" -> Ipaddr.V4.of_string_exn "172.19.0.3"
+    | "frr" -> Ipaddr.V4.of_string_exn "172.19.0.6"
+    | "xorp" -> Ipaddr.V4.of_string_exn "172.19.0.7"
     | _ -> Ipaddr.V4.of_string_exn "172.19.0.3"
   ;;
 
@@ -108,7 +115,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let open Bgp in
           match msg with
           | Keepalive | Notification _ | Update _ -> 
-            fail test_name "Create_session: wrong msg type (not OPEN)"
+            Conf_log.info (fun m -> m "Wrong type of message (NOT OPEN): %s" (to_string msg));
+            assert false
           | Open o ->
             Bgp_flow.write flow Bgp.Keepalive
             >>= function
@@ -174,7 +182,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Bgp_flow.write flow (Notification Cease)
     >>= function
     | Error _ -> fail "unknown" "fail to write"
-    | Ok () -> Bgp_flow.close flow
+    | Ok () -> 
+      (* Bgp_flow.read flow
+      >>= fun _ -> *)
+      Bgp_flow.close flow
   ;;
 
   let test_create_session s () = 
@@ -250,6 +261,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun (flow1, _) ->
     create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
+
+    OS.Time.sleep_ns (Duration.of_ms 2500)
+    >>= fun () ->
+
+    let start_time = Unix.gettimeofday () in
     Bgp_flow.write flow1 (default_update ())
     >>= function
     | Error _ -> fail test_name "tcp write error"
@@ -264,6 +280,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           | Update { withdrawn; path_attrs; nlri } -> begin
             match nlri with 
             | [pfx] ->
+              
+              Conf_log.info (fun m -> m "Time taken: %.4fs" (Unix.gettimeofday () -. start_time));
+
               if Ipaddr.V4.Prefix.network pfx = sample_id then 
                 close_session flow1
                 >>= fun () ->
@@ -277,6 +296,37 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           | _ -> fail test_name "wrong msg type" 
       in
     read_loop ()
+  ;;
+
+  let test_no_propagate_update_to_src s () =
+    let test_name = "don't propagate update to src" in
+    create_session s (relay1 ()) test_name
+    >>= fun (flow1, _) ->
+    
+    Bgp_flow.write flow1 (default_update ())
+    >>= function
+    | Error _ -> assert false
+    | Ok () ->
+      let rec read_loop () =
+        Bgp_flow.read flow1
+        >>= function
+        | Error _ -> assert false
+        | Ok msg -> 
+          match msg with
+          | Keepalive -> read_loop ()
+          | _ -> 
+            
+            (* OS.Time.sleep_ns (Duration.of_sec 10)
+            >>= fun () -> *)
+            
+            Conf_log.info (fun m -> m "%s" (to_string msg));
+            assert false
+      in
+      Lwt.pick [read_loop (); OS.Time.sleep_ns (Duration.of_sec 10)]
+      >>= fun () ->
+      close_session flow1
+      >>= fun () ->
+      pass test_name
   ;;
 
   module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
@@ -342,7 +392,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     read_loop Prefix_set.empty
   ;;
 
-   let test_simul_insert s () =
+  let test_simul_insert s () =
     let test_name = "simultaneous insert" in
     let cluster_size = 500 in
     
@@ -546,7 +596,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let update = { withdrawn = []; nlri; path_attrs} in
     Bgp_flow.write flow1 (Update update)
     >>= function
-    | Error _ -> fail test_name "fail to write 1st update"
+    | Error _ -> assert false
     | Ok () ->
       let nlri = [ 
         Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.2.0");
@@ -570,6 +620,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
             match msg with
             | Keepalive -> read_loop ()
             | Update { withdrawn; path_attrs; nlri } -> begin
+              Sp2_log.info (fun m -> m "%s" (to_string msg));
+              
               let wd = [
                 Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
               ] in
@@ -582,10 +634,16 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                   Bgp_flow.read flow2
                   >>= function
                   | Error _ -> assert false
-                  | Ok msg -> match msg with
+                  | Ok msg -> 
+                    Sp2_log.info (fun m -> m "%s" (to_string msg));
+                    match msg with
                     | Open _ | Notification _ -> assert false
                     | Keepalive -> read_loop ()
                     | Update { withdrawn } ->
+                      
+
+                      
+
                       match withdrawn with
                       | [ pfx ] ->
                         if Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0") = pfx then
@@ -651,9 +709,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
               | Ok Keepalive -> rloop2 ()
               | Ok (Update { nlri; path_attrs } as msg) ->
 
+                Conf_log.info (fun m -> m "%s" (to_string msg));
+
                 assert (nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0") ]);
                 assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay2 ()).as_no; 100_l; 2_l]]);
-                assert (find_next_hop path_attrs = Some (dut_ip ()));
+                (* assert (find_next_hop path_attrs = Some (dut_ip ())); *)
 
                 (* Clean up *)
                 let%lwt () = close_session flow1 in
@@ -668,8 +728,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_route_unchanged s () =
     let test_name = "route unchange case" in
     
-    let%lwt (flow1, _) =  create_session s (relay1 ()) test_name in
-    let%lwt (flow2, _) = create_session s (relay2 ()) test_name in
+    create_session s (relay1 ()) test_name
+    >>= fun (flow1, _) ->
+    create_session s (relay2 ()) test_name
+    >>= fun (flow2, _) ->
 
     (* Write the first update *)
     let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
@@ -684,7 +746,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | Ok () -> 
       (* Check that I receive the first update *)
       let rec rloop1 () =
-        match%lwt Bgp_flow.read flow2 with
+        Bgp_flow.read flow2
+        >>= function 
         | Error _ -> fail test_name "fail to read update 1"
         | Ok Open _ | Ok Notification _ -> fail test_name "read wrong msg type when expecting an update. "
         | Ok Keepalive -> rloop1 ()
@@ -699,13 +762,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
             Next_hop (relay2 ()).id;
           ] in
           let update = {withdrawn = []; nlri; path_attrs } in
-          match%lwt Bgp_flow.write flow2 (Update update) with
+          Bgp_flow.write flow2 (Update update)
+          >>= function
           | Error _ -> fail test_name "fail to write update 2"
           | Ok () ->
             (* Check the 2nd update *)
             let rec rloop2 () =
               match%lwt Bgp_flow.read flow1 with
-              | Error _ -> fail test_name "fail to read update 2"
+              | Error _ -> Lwt.return_unit
               | Ok Open _ | Ok Notification _ -> fail test_name "read wrong msg type when expecting an update. "
               | Ok Keepalive -> rloop2 ()
               | Ok Update { nlri; path_attrs } ->
@@ -790,7 +854,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let interval = 
       match (Key_gen.speaker ()) with
       | "quagga" -> 30
-      | _ -> 10
+      | _ -> 30
     in
     match tests with
     | test::other -> 
@@ -806,14 +870,15 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let start s =
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      test_create_session s; 
+      (* test_create_session s; 
       test_maintain_session s;
       test_propagate_update_to_old_peer s;
       test_propagate_update_to_new_peer s;
       test_propagate_group_update_to_new_peer s;
       test_route_withdrawn s;
-      test_simul_insert s;
-      test_route_withdrawn_diff_src s;
+      test_simul_insert s; *)
+      (* test_no_propagate_update_to_src s; *)
+      (* test_route_withdrawn_diff_src s; *)
       test_link_flap s;
       test_route_replace s;
       test_route_unchanged s;
