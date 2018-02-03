@@ -30,7 +30,7 @@ module Device = struct
   let stop t = Lwt.cancel t
 end
 
-module  Main (S: Mirage_stack_lwt.V4) = struct
+module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
   module Id_map = Map.Make(Ipaddr.V4)
 
@@ -529,107 +529,130 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     | _ -> Lwt.return_unit
   ;;
 
-  let rec command_loop s id_map =
-    Lwt_io.read_line Lwt_io.stdin
-    >>= function
-    | "start" -> 
-      let f t =
-        Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
-        handle_event t (Fsm.Manual_start)
-      in
-      let _ = Id_map.map f id_map in
-      command_loop s id_map
-    | "stop" -> 
-      let f t =
-        Bgp_log.info (fun m -> m "BGP stops." ~tags:(stamp t.remote_id));
-        handle_event t (Fsm.Manual_stop)
-      in
-      let _ = Id_map.map f id_map in
-      command_loop s id_map
-    | "show peers" ->
-      let f t =
-        let fsm = Printf.sprintf "FSM: %s" (Fsm.to_string t.fsm) in
-        let running_dev =
-          let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
-          let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
-          let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
-          let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
-          let dev5 = if not (t.flow_reader = None) then "Flow reader" else "" in 
-          let str_list = List.filter (fun x -> not (x = "")) [dev1; dev2; dev3; dev4; dev5] in
-          Printf.sprintf "Running Dev: %s" (String.concat "; " str_list)
+  let rec command_loop console id_map =
+    C.read console >>= function
+    | Error err -> 
+      Bgp_log.warn (fun m -> m "Fail to read command: %a" C.pp_error err);
+      Lwt.return_unit
+    | Ok (`Eof) ->
+      Bgp_log.warn (fun m -> m "Console closed?");
+      Lwt.return_unit
+    | Ok (`Data b) ->
+      match String.trim @@ Cstruct.to_string b with
+      | "start" -> 
+        let f t =
+          Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
+          handle_event t (Fsm.Manual_start)
         in
-        let rib =
-          let input = 
+        let _ = Id_map.map f id_map in
+        command_loop console id_map
+      | "stop" -> 
+        let f t =
+          Bgp_log.info (fun m -> m "BGP stops." ~tags:(stamp t.remote_id));
+          handle_event t (Fsm.Manual_stop)
+        in
+        let _ = Id_map.map f id_map in
+        command_loop console id_map
+      | "show peers" ->
+        let f t =
+          let fsm = Printf.sprintf "FSM: %s" (Fsm.to_string t.fsm) in
+          let running_dev =
+            let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
+            let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
+            let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
+            let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
+            let dev5 = if not (t.flow_reader = None) then "Flow reader" else "" in 
+            let str_list = List.filter (fun x -> not (x = "")) [dev1; dev2; dev3; dev4; dev5] in
+            Printf.sprintf "Running Dev: %s" (String.concat "; " str_list)
+          in
+          let rib =
+            let input = 
+            match t.input_rib with
+              | None -> "No IN RIB."
+              | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib_in.size rib)
+            in
+
+            let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
+              
+            let output = 
+              match t.output_rib with
+              | None -> "No OUT RIB"
+              | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib_out.size rib)
+            in
+          
+            (String.concat "; " [input; loc; output])
+          in
+          let msgs = 
+            Printf.sprintf "Sent: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE; \n Rec: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE"
+                          t.stat.sent_open t.stat.sent_update t.stat.sent_notif t.stat.sent_keepalive
+                          t.stat.rec_open t.stat.rec_update t.stat.rec_notif t.stat.rec_keepalive
+          in
+          Bgp_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string t.remote_id) (String.concat "\n" [fsm; running_dev; rib; msgs]));
+        in
+        let _ = Id_map.map f id_map in
+        command_loop console id_map
+      (* | "show rib detail" ->
+        let input = 
           match t.input_rib with
-            | None -> "No IN RIB."
-            | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib_in.size rib)
-          in
+          | None -> "No IN RIB."
+          | Some rib -> Printf.sprintf "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)
+        in
 
-          let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
-            
-          let output = 
-            match t.output_rib with
-            | None -> "No OUT RIB"
-            | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib_out.size rib)
-          in
+        let loc = Printf.sprintf "%s" (Rib.Loc_rib.to_string t.loc_rib) in
+
+        let output = 
+          match t.output_rib with
+          | None -> "No OUT RIB."
+          | Some rib -> Printf.sprintf "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)
+        in
+
+        Bgp_log.info (fun m -> m "%s" (String.concat "\n" [input; loc; output]) ~tags:(stamp t.remote_id));
         
-          (String.concat "; " [input; loc; output])
-        in
-        let msgs = 
-          Printf.sprintf "Sent: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE; \n Rec: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE"
-                        t.stat.sent_open t.stat.sent_update t.stat.sent_notif t.stat.sent_keepalive
-                        t.stat.rec_open t.stat.rec_update t.stat.rec_notif t.stat.rec_keepalive
-        in
-        Bgp_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string t.remote_id) (String.concat "\n" [fsm; running_dev; rib; msgs]));
-      in
-      let _ = Id_map.map f id_map in
-      command_loop s id_map
-    (* | "show rib detail" ->
-      let input = 
-        match t.input_rib with
-        | None -> "No IN RIB."
-        | Some rib -> Printf.sprintf "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)
-      in
+        command_loop t *)
+      | "show gc" ->
+        let word_to_KB ws = ws * 8 / 1024 in
 
-      let loc = Printf.sprintf "%s" (Rib.Loc_rib.to_string t.loc_rib) in
+        let gc_stat = Gc.stat () in
+        let open Gc in
+        let allocation = Printf.sprintf "Minor: %.0f, Promoted: %.0f, Major %.0f" 
+                                gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
+        let size = Printf.sprintf "Heap size: %d KB, Stack size: %d KB" 
+                                (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in
+        let collection = Printf.sprintf "Minor collection: %d, Major collection: %d, Compaction: %d" 
+                                gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
+        Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
+        
+        command_loop console id_map
+      | "exit" ->
+        Lwt.return_unit
+      | str -> 
+        Bgp_log.info (fun m -> m "Unrecognised command %s" str);
+        command_loop console id_map
+  ;;
 
-      let output = 
-        match t.output_rib with
-        | None -> "No OUT RIB."
-        | Some rib -> Printf.sprintf "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)
-      in
-
-      Bgp_log.info (fun m -> m "%s" (String.concat "\n" [input; loc; output]) ~tags:(stamp t.remote_id));
-      
-      command_loop t *)
-    | "show gc" ->
-      let word_to_KB ws = ws * 8 / 1024 in
-
-      let gc_stat = Gc.stat () in
-      let open Gc in
-      let allocation = Printf.sprintf "Minor: %.0f, Promoted: %.0f, Major %.0f" 
-                              gc_stat.minor_words gc_stat.promoted_words gc_stat.major_words in
-      let size = Printf.sprintf "Heap size: %d KB, Stack size: %d KB" 
-                              (word_to_KB gc_stat.heap_words) (word_to_KB gc_stat.stack_size) in
-      let collection = Printf.sprintf "Minor collection: %d, Major collection: %d, Compaction: %d" 
-                              gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
-      Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
-      
-      command_loop s id_map
-    | "exit" ->
-      S.disconnect s
-    | str -> 
-      Bgp_log.info (fun m -> m "Unrecognised command %s" str);
-      command_loop s id_map
+  let parse_config kv =
+    let key = Key_gen.config () in
+    KV.size kv key >>= function
+    | Error e -> 
+      Bgp_log.err (fun f -> f "Could not read config file: %a" KV.pp_error e);
+      Lwt.return Config_parser.default_config
+    | Ok size -> 
+      KV.read kv key 0L size >>= function
+      | Error e ->
+        Bgp_log.err (fun f -> f "Could not read config file: %a" KV.pp_error e);
+        Lwt.return Config_parser.default_config
+      | Ok data ->
+        let str = String.concat "" @@ List.map (fun b -> Cstruct.to_string b) data in     
+        Lwt.return @@ Config_parser.parse_from_string str
   ;;
 
         
-  let start s =
+  let start console kv s =
     (* Enable backtrace *)
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
-    let config = Config_parser.parse_from_file (Key_gen.config ()) in
+    parse_config kv >>= fun config ->
 
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config in
@@ -693,6 +716,10 @@ module  Main (S: Mirage_stack_lwt.V4) = struct
     in
     let _ = Id_map.map f id_map in
 
-    command_loop s id_map
+    command_loop console id_map
+    >>= fun () ->
+
+    (* Clean up *)
+    S.disconnect s
   ;;
 end

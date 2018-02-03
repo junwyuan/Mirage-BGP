@@ -107,6 +107,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
     mutable buf: Cstruct.t option;
   }
 
+
   let create_connection s (addr, port) =
     S.TCPV4.create_connection (S.tcpv4 s) (addr, port)
     >>= function
@@ -121,6 +122,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
     in
     S.listen_tcpv4 s port wrapped
   ;;
+  
 
   let rec read t : (Bgp.t, read_error) Result.result Lwt.t = 
     let parse t b =
@@ -143,8 +145,8 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         | `Refused -> Lwt.return (Error `Refused)
         | `Timeout -> Lwt.return (Error `Timeout)
         | _ -> 
+          Io_log.warn (fun m -> m "Some unknown exception: %a" S.TCPV4.pp_error err);
           Lwt.return (Error `Closed_by_local)
-
       end
       | Ok (`Data b) -> begin
         if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then begin
@@ -168,6 +170,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           | err ->
             (* Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
             Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?" *)
+            Io_log.warn (fun m -> m "Some unknown exception: %a" S.TCPV4.pp_error err);
             Lwt.return (Error `Closed_by_local)
         end
       else parse t b

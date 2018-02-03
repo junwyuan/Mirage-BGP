@@ -14,6 +14,13 @@ type config = {
   peers: peer list;
 }
 
+let default_config = {
+  local_asn = 10_l;
+  local_id = Ipaddr.V4.of_string_exn "172.19.0.3";
+  local_port = 179;
+  peers = []
+}
+
 let peer_to_string { remote_asn; remote_id; remote_port; hold_time } =
   Printf.sprintf "{ remote_asn: %d, remote_id: %s, remote_port: %d, hold_time %d }" (Int32.to_int remote_asn) 
                  (Ipaddr.V4.to_string remote_id) remote_port hold_time
@@ -25,8 +32,8 @@ let config_to_string { local_asn; local_id; local_port; peers } =
                  (Ipaddr.V4.to_string local_id) local_port str_peers
 ;;
 
-let parse_from_file file_name = 
-  let json_config = Basic.from_file file_name in
+let parse_from_string data = 
+  let json_config = Basic.from_string data in
   
   let local_asn = 
     Basic.Util.member "local_asn" json_config 
@@ -77,6 +84,7 @@ let parse_from_file file_name =
 
   { local_asn; local_id; local_port; peers }
 ;;
+
 
 (* let () = 
   let config = parse_from_file "bgpd.json" in
