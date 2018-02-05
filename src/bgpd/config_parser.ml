@@ -18,7 +18,20 @@ let default_config = {
   local_asn = 10_l;
   local_id = Ipaddr.V4.of_string_exn "172.19.0.3";
   local_port = 179;
-  peers = []
+  peers = [
+    {
+      remote_asn = 4_l;
+      remote_id = Ipaddr.V4.of_string_exn "172.19.10.3";
+      remote_port = 179;
+      hold_time = 90;
+    };
+    {
+      remote_asn = 5_l;
+      remote_id = Ipaddr.V4.of_string_exn "172.19.10.4";
+      remote_port = 179;
+      hold_time = 90;
+    };
+  ]
 }
 
 let peer_to_string { remote_asn; remote_id; remote_port; hold_time } =
