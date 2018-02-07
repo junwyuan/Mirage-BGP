@@ -1,4 +1,8 @@
 open Bgp
+open Lwt.Infix
+
+(* Design choices: To avoid dependency loop, I allow Loc-RIB to depend on In-RIB and out-RIB. *)
+(* This does cost some inflxibility as the form of callback is fixed. *)
 
 (* Logging *)
 let rib_log = Logs.Src.create ~doc:"RIB logging" "RIB"
@@ -7,51 +11,107 @@ module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 (* The underlying data store is a binary tree *)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
+module Prefix_set = Set.Make(Prefix)
+module Str_map = Map.Make(String)
 
 type update = Bgp.update
+let is_empty_update u = u.withdrawn = [] && u.nlri = [] 
+
 
 module Adj_rib_in = struct
+  type input = 
+    | Push of update
+    | Pull of Prefix.t
+    | Stop
+  
+  
   type t = {
     remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
-    mutable db: Bgp.path_attrs Prefix_map.t;
+    db: Bgp.path_attrs Prefix_map.t;
+    stream: input Lwt_stream.t;
+    pf: input option -> unit;
   }
 
-  let create remote_id callback : t = {
-    remote_id;
-    callback;
-    db = Prefix_map.empty;
+  let set_db new_db t = {
+    remote_id = t.remote_id;
+    callback = t.callback;
+    db = new_db;
+    stream = t.stream;
+    pf = t.pf;
   }
-
+    
   let update_db { withdrawn; path_attrs; nlri } db  = 
-    let wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
+    let to_be_wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
 
-    let after_wd =
+    let db_after_wd =
       let f rib pfx = Prefix_map.remove pfx rib in
-      List.fold_left f db wd
+      List.fold_left f db to_be_wd
     in
     
-    let after_insert = 
+    let db_after_insert = 
       let f rib pfx = Prefix_map.add pfx path_attrs rib in
-      List.fold_left f after_wd nlri
+      List.fold_left f db_after_wd nlri
     in
 
-    let output = {
-      withdrawn = wd;
+    let out_update = {
+      withdrawn = to_be_wd;
       path_attrs;
       nlri
     } in
 
-    (after_insert, output)
+    (db_after_insert, out_update)
   ;;
 
-  let handle_update t update = 
-    let new_db, output = update_db update t.db in
-    t.db <- new_db;
-    if output.nlri = [] && output.withdrawn = [] then 
-      Lwt.return_unit
-    else 
-      t.callback output
+  let rec handle_loop t = 
+    Lwt_stream.get t.stream >>= function
+    | None -> Lwt.return_unit
+    | Some input -> begin
+      match input with
+      | Push update -> 
+        let new_db, out_update = update_db update t.db in
+        let new_t = set_db new_db t in
+        if is_empty_update out_update then handle_loop new_t
+        else 
+          (* Handle the callback before handling next input request. This guarantees update message ordering *)
+          t.callback out_update
+          >>= fun () ->
+          handle_loop new_t
+      | Pull pfx -> begin
+        match Prefix_map.find_opt pfx t.db with
+        | None -> handle_loop t
+        | Some path_attrs ->
+          let update = {
+            withdrawn = [];
+            path_attrs;
+            nlri = [ pfx ];
+          } in
+          t.callback update
+          >>= fun () ->
+          handle_loop t
+      end
+      | Stop -> Lwt.return_unit
+    end
+  ;;
+
+  let create remote_id callback : t = 
+    (* Construct the data structure *)
+    let stream, pf = Lwt_stream.create () in
+    let db = Prefix_map.empty in
+    let t = {
+      remote_id; callback; db;
+      stream; pf;
+    } in
+    
+    (* Spawn event handle loop *)
+    let _ = handle_loop t in
+
+    t
+  ;;
+
+  let input t input = 
+    t.pf (Some input);
+    Lwt.return_unit
   ;;
 
   let to_string t =
@@ -69,181 +129,173 @@ module Adj_rib_in = struct
   let size t = Prefix_map.cardinal t.db
 end
 
-module Util = struct
-  let take pfxs len =
-    let rec loop pfxs len acc =
-      match pfxs with
-      | [] -> (acc, [])
-      | pfx::tl ->
-        let mask = Ipaddr.V4.Prefix.bits pfx in
-        let bs = pfxlen_to_bytes mask + 1 in
-        if bs > len then 
-          (acc, pfxs)
-        else 
-          loop tl (len - bs) (pfx::acc)
+
+module Adj_rib_out = struct
+  type input = 
+    | Push of update
+    | Stop
+
+  type t = {
+    remote_id: Ipaddr.V4.t;
+    callback: update -> unit Lwt.t;
+    past_routes: Prefix_set.t;
+    stream: input Lwt_stream.t;
+    pf: input option -> unit;
+  }
+
+  let set_past_routes pr t = {
+    remote_id = t.remote_id;
+    callback = t.callback;
+    past_routes = pr;
+    stream = t.stream;
+    pf = t.pf;
+  }
+
+  let build_db rev_updates =
+    (* The argument are updates in reverse time order. The latest can first. *)
+
+    let f (banned, db) u =
+      (* Insert the newest paths into db *)
+      let allowed = List.filter (fun pfx -> not (Prefix_set.mem pfx banned)) u.nlri in
+      let new_db = 
+        let f db pfx = 
+          match Prefix_map.mem pfx db with
+          | true -> 
+            (* There is a newer route present *)
+            db
+          | false ->
+            (* This is the newest route *)
+            Prefix_map.add pfx u.path_attrs db
+        in
+        List.fold_left f db allowed
+      in
+
+      (* Update the banned list *)
+      (* A route is banned if it has been withdrawn. All previous advertisements should be ignored. *)
+      let new_banned = List.fold_left (fun acc pfx -> Prefix_set.add pfx acc) banned u.withdrawn in
+      (new_banned, new_db)
     in
-    loop pfxs len []
+    List.fold_left f (Prefix_set.empty, Prefix_map.empty) rev_updates
+  ;;
+
+  let group db =
+    let f (attr_map, pfx_map) (pfx, attrs) =
+      (* Generate an id for the attrs *)
+      let attr_id = path_attrs_to_string attrs in
+      
+      match Str_map.mem attr_id pfx_map with
+      | true -> 
+        let l = Str_map.find attr_id pfx_map in
+        attr_map, Str_map.add attr_id (pfx::l) pfx_map
+      | false ->
+        Str_map.add attr_id attrs attr_map, Str_map.add attr_id [pfx] pfx_map 
+    in
+    let attr_map, pfx_map = List.fold_left f (Str_map.empty, Str_map.empty) (Prefix_map.bindings db) in
+    List.map (fun (id, pfx_list) -> (Str_map.find id attr_map, pfx_list)) (Str_map.bindings pfx_map)
+  ;;
+
+  let take_n l n =
+    let rec loop l n acc =
+      if n = 0 then acc, l
+      else 
+        match l with
+        | [] -> acc, []
+        | hd::tl -> loop tl (n-1) (hd::acc)
+    in
+    let tmp, rest = loop l n [] in
+    List.rev tmp, rest
   ;;
 
   let rec split pfxs len =
     let rec loop pfxs len acc = 
-      let taken, rest = take pfxs len in
-      match rest with
-      | [] -> taken::acc
-      | _ -> loop rest len (taken::acc)
+      match pfxs with
+      | [] -> acc
+      | _ ->
+        let taken, rest = take_n pfxs len in
+        loop rest len (taken::acc)
     in
     loop pfxs len []
   ;;
-
-  let split_update update =
-    let rec loop ({ withdrawn; path_attrs; nlri } as u) acc = 
-      if len_update_buffer u <= 4096 then u::acc
-      else
-        let len_fixed = 23 in
-        let len_wd = len_pfxs_buffer withdrawn in
-
-        if len_wd > 4096 - len_fixed then
-          let taken, withdrawn = take withdrawn (4096 - len_fixed) in
-          let update = { withdrawn = taken; path_attrs = []; nlri = [] } in
-          loop { withdrawn; path_attrs; nlri } (update::acc)
-        else
-          let len_pa = len_path_attrs_buffer path_attrs in
-          if len_wd + len_pa + len_fixed >= 4096 then
-            let update = { withdrawn; path_attrs = []; nlri = [] } in
-            loop { withdrawn; path_attrs; nlri } (update::acc)
-          else if len_wd > 0 then
-            let taken, nlri = take nlri (4096 - len_wd - len_pa - len_fixed) in
-            let update = { withdrawn; path_attrs; nlri = taken } in
-            loop { withdrawn = []; path_attrs; nlri } (update::acc)
-          else
-            let taken, nlri = take nlri (4096 - len_pa - len_fixed) in
-            let update = { withdrawn = []; path_attrs; nlri = taken } in
-            loop { withdrawn; path_attrs; nlri } (update::acc)
-    in
-    loop update []
-  ;;
-end
-
-module Adj_rib_out = struct
-  type t = {
-    remote_id: Ipaddr.V4.t;
-    callback: update -> unit Lwt.t;
-    st: update Lwt_stream.t;
-    pf: update option -> unit;
-    aggr: unit Lwt.t;
-    mutable db: Bgp.path_attrs Prefix_map.t;
-  }
-
-  let rec start_aggr st cb = 
-    let aggregate updates =
-      let str_and_pa = List.map (fun ({path_attrs} as update) -> Bgp.path_attrs_to_string path_attrs, update) updates in 
-      
-      let merge updates = 
-        if updates = [] then 
-          { withdrawn = []; path_attrs = []; nlri = [] } 
-        else
-          let f { withdrawn = aggr_wd; path_attrs = aggr_pa; nlri = aggr_nlri} { withdrawn; path_attrs; nlri } =
-            { withdrawn = withdrawn @ aggr_wd; path_attrs = aggr_pa; nlri = nlri @ aggr_nlri}
+    
+  let rec handle_loop t = 
+    Lwt_stream.peek t.stream >>= function
+    | None -> Lwt.return_unit
+    | Some _ -> 
+      let inputs = Lwt_stream.get_available t.stream in
+      match List.exists (fun i -> i = Stop) inputs with
+      | true -> 
+        (* Dump any unhandled inputs when the RIB is stopped *)
+        Lwt.return_unit
+      | false ->
+        let rev_updates = 
+          let f acc i = match i with
+            | Stop -> acc
+            | Push u -> u::acc
           in
-          List.fold_left f (List.hd updates) (List.tl updates)
-      in
+          List.fold_left f [] inputs
+        in
 
-      let rec loop updates acc =
-        match updates with
-        | [] -> acc
-        | (hd_str, hd_update)::tl -> 
-          let same, diff = List.partition (fun (str, _) -> str = hd_str) tl in
-          loop diff (merge (hd_update::(List.map (fun (_, u) -> u) same)) :: acc)
-      in
-      
-      loop str_and_pa []
-    in
+        (* Construct the db of updates in reverse time order *)
+        let banned, db = build_db rev_updates in
 
-    match%lwt Lwt_stream.peek st with
-    | None -> 
-      Rib_log.warn (fun m -> m "STREAM EMPTY");
-      Lwt.return_unit
-    | Some _ ->
-      let updates = Lwt_stream.get_available st in
-      
-      let aggregated = aggregate updates in
-      let splitted = List.concat (List.map (fun pa -> Util.split_update pa) aggregated) in
-      
-      (* Send *)
-      let rec send_loop updates = 
-        match updates with
-        | [] -> Lwt.return_unit
-        | u::tl ->
-          let%lwt () = cb u in
-          send_loop tl
-      in
-      let%lwt () = send_loop splitted in
-      (* let%lwt () = send_loop updates in *)
-      
-      start_aggr st cb
+        (* Compute the withdrawn and insert set *)
+        let wd_set = Prefix_set.inter banned t.past_routes in
+        let insert_set = Prefix_set.of_list (List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings db)) in
+        
+        (* Transform the db into groups based on path_attrs *)
+        let attr_and_pfxs = group db in
+
+        (* Generate updates *)
+        let len_fixed = 23 in
+        let wd_updates =
+          let tmp = split (Prefix_set.elements wd_set) ((4096 - len_fixed) / 5) in 
+          List.map (fun pfxs -> { withdrawn = pfxs; path_attrs = []; nlri = [] }) tmp
+        in
+        let insert_updates =
+          let f acc (path_attrs, pfxs) = 
+            let len_attr = len_path_attrs_buffer path_attrs in
+            let tmp = split pfxs ((4096 - len_fixed - len_attr) / 5) in
+            let l = List.map (fun pfxs -> { withdrawn = []; path_attrs; nlri = pfxs }) tmp in
+            l @ acc
+          in
+          List.fold_left f [] attr_and_pfxs
+        in
+
+        (* To guarantee the equivalence of operation, must send withdrawn first. *)
+        let updates = wd_updates @ insert_updates in
+        let rec send_loop = function
+          | [] -> Lwt.return_unit
+          | u::tl -> t.callback u >>= fun () -> send_loop tl
+        in
+        send_loop updates >>= fun () ->
+        
+        (* Decision choice: must send all previous updates before handling next batch. *)
+        (* Update data structure *)
+        let n_routes = Prefix_set.union (Prefix_set.diff t.past_routes wd_set) insert_set in
+        let n_t = set_past_routes n_routes t in
+
+        (* Here is the pull timer, hard-coded 50ms *)
+        OS.Time.sleep_ns (Duration.of_ms 50)
+        >>= fun () ->
+
+        handle_loop n_t
   ;;
+
 
   let create remote_id callback : t = 
-    let st, pf = Lwt_stream.create () in
-    {
-      remote_id;
-      callback;
-      st; pf;
-      aggr = start_aggr st callback;
-      db = Prefix_map.empty;
-    }
-  ;;
-
-  let close { aggr; pf } = 
-    Lwt.cancel aggr;
-    pf None
-  ;;
-
-  let update_db { withdrawn; path_attrs; nlri } db  = 
-    let wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
-    let after_wd =
-      let f rib pfx = Prefix_map.remove pfx rib in
-      List.fold_left f db wd
-    in
-    
-    let after_insert = 
-      let f rib pfx = Prefix_map.add pfx path_attrs rib in
-      List.fold_left f after_wd nlri
-    in
-
-    let output = {
-      withdrawn = wd;
-      path_attrs;
-      nlri
+    (* Initiate data structure *)
+    let stream, pf = Lwt_stream.create () in
+    let past_routes = Prefix_set.empty in
+    let t = {
+      remote_id; callback; past_routes;
+      stream; pf;
     } in
 
-    (after_insert, output)
+    (* Spawn handling loop *)
+    let _ = handle_loop t in
+
+    t
   ;;
-
-  let handle_update t update = 
-    let new_db, output = update_db update t.db in
-    t.db <- new_db;
-    if output.nlri = [] && output.withdrawn = [] then 
-      Lwt.return_unit
-    else begin
-      t.pf (Some output);
-      Lwt.return_unit
-    end
-  ;;
-
-  let to_string t =
-    let pfxs_str = 
-      let f pfx pa acc = 
-        let pfx_str = Printf.sprintf "%s | %s" (Ipaddr.V4.Prefix.to_string pfx) (Bgp.path_attrs_to_string pa) in
-        List.cons pfx_str acc
-      in 
-      String.concat "\n" (Prefix_map.fold f t.db [])
-    in
-
-    Printf.sprintf "Adj_RIB \n Remote: %s \n Prefixes: %s" (Ipaddr.V4.to_string t.remote_id) pfxs_str
-  ;;
-
-  let size t = Prefix_map.cardinal t.db
 end
 
 
@@ -506,4 +558,8 @@ module Loc_rib = struct
 
   let size t = Prefix_map.cardinal t.db
 end
+
+
+
+
 

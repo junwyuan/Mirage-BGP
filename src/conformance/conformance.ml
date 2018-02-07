@@ -619,6 +619,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* Verify from speaker 2 *)
     read_update_loop flow2 (fun u -> assert (List.length u.withdrawn = 1); true) (module Sp2_log)
     >>= fun () ->
+
+    (* Verify that the new best path is advertised *)
+    read_update_loop flow1 (fun u -> assert (List.length u.nlri = 1); true) (module Sp1_log)
+    >>= fun () ->
     
     (* Send another update and expect no update *)
     let update = 
@@ -894,7 +898,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     pass test_name
   ;;
 
-
   let rec run tests = 
     let interval = 
       match (Key_gen.speaker ()) with
@@ -917,7 +920,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      test_create_session s; 
+      (* test_create_session s; 
       test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
@@ -930,7 +933,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_route_replace s;
       test_route_unchanged s;
       test_header_error_handle s;
-      test_update_attr_length_error_handle s;
+      test_update_attr_length_error_handle s; *)
       test_route_selection_after_wd s;
     ] in
     run tests

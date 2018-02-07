@@ -246,7 +246,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
   let listen_tcp_connection s local_port id_map callback =
     let on_connect flow =
-      match%lwt Bgp_flow.read flow with
+      Bgp_flow.read flow
+      >>= function
       | Error err ->
         let ip, _ = Bgp_flow.dst flow in
         (match err with
