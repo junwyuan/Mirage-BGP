@@ -1,3 +1,0 @@
-true: package(result), package(cstruct), package(cstruct.ppx)
-"common": include
-"common/lib": include

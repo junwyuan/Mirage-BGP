@@ -224,6 +224,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop 0
   ;;
 
+
   let rec write_keepalive_loop flow (module Log : Logs.LOG) =
     let rec loop () = 
       let%lwt () = OS.Time.sleep_ns (Duration.of_sec 30) in
@@ -247,36 +248,22 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         Lwt.return seed
       end 
       else begin
-        (* Latency test *)
-        (* Listen speaker2 *)
-        let rec_rloop = read_loop_count_nlri flow2 cluster_size (module Log2) in
-        (* Ping *)
-        let start_time = Unix.gettimeofday () in
-        
-        plain_feed ~total:cluster_size ~flow:flow1 ~seed ~path_attrs (module Log1)
-        >>= fun n_seed ->
-        (* Speaker2 checks on receiving all updates *)
-        rec_rloop
-        >>= fun () ->
-        let latency = Unix.gettimeofday () -. start_time in
-
-        OS.Time.sleep_ns (Duration.of_sec 1) 
-        >>= fun () ->
-
         (* Throughput test *)
         (* Listen speaker2 *)
-        let rec_rloop = read_loop_count_nlri flow2 (stage_size - cluster_size) (module Log2) in
+        let rec_rloop = read_loop_count_nlri flow2 stage_size (module Log2) in
+        
         (* start feeding speaker1 *)
         let start_time = Unix.gettimeofday () in
-        plain_feed ~total:(stage_size - cluster_size) ~flow:flow1 ~seed:n_seed ~path_attrs (module Log1)
+        plain_feed ~total:stage_size ~flow:flow1 ~seed:seed ~path_attrs (module Log1)
         >>= fun n_seed ->
+        
         (* Speaker2 checks on receiving all updates *)
         rec_rloop 
         >>= fun () ->
+        
         let insert_time = Unix.gettimeofday () -. start_time in
-
-        Log1.info (fun m -> m "%s phase stage %d, RIB size %d: latency: %.4fs, total: %.4fs" 
-                            phase_name stage_count (stage_count * stage_size) latency insert_time);
+        Log1.info (fun m -> m "%s phase stage %d, RIB size %d: %.4f s" 
+                            phase_name stage_count (stage_count * stage_size) insert_time);
         
         (* Cool down *)
         OS.Time.sleep_ns (Duration.of_sec 1)
@@ -336,6 +323,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     in
     loop 0 seed 0.
   ;;
+
   
   let start_perf_test ?(cluster_size=500) ?(stage_size=50000) ~s ~total ~seed =
     (* connect to speaker1 *)
@@ -347,9 +335,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Mon_log.info (fun m -> m "Connection up.");
 
-    (* Keepalive loop *)
-    let _ = write_keepalive_loop flow2 (module Sp2_log) in
-
     (* Wait through the start up mechanism *)
     let min_ad_intvl = 
       match (Key_gen.speaker ()) with
@@ -359,93 +344,44 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     OS.Time.sleep_ns (Duration.of_sec min_ad_intvl)
     >>= fun () ->
 
-    (* Insert phase *)
-    let path_attrs = 
-      let origin = Origin EGP in
-      let next_hop = Next_hop (relay1 ()).local_id in
-      let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1000_l; 1001_l; 1002_l; 1003_l]] in
-      [origin; next_hop; as_path]
+    (* Double Insert phase *)
+    let t1 () = 
+      let path_attrs = 
+        let origin = Origin EGP in
+        let next_hop = Next_hop (relay1 ()).local_id in
+        let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1003_l]] in
+        [origin; next_hop; as_path]
+      in
+      phased_insert ~stage_size ~cluster_size 
+                    ~seed:(Pfx_gen.default_seed) ~total:100000 ~flow1 ~flow2 ~path_attrs 
+                    (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) 
+                    ~phase_name:"insert clash"
+      >>= fun _ ->
+      Lwt.return_unit
     in
-    phased_insert ~stage_size ~cluster_size ~seed:(Pfx_gen.default_seed) ~total ~flow1 ~flow2 
-                  ~path_attrs (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) ~phase_name:"Insert"
-    >>= fun n_seed ->
-
-    (* Unchange phase *)
-    let unchange_phase () =
-      let rloop = read_loop_count_nlri flow1 1 (module Sp1_log : Logs.LOG) in
+    let t2 () = 
       let path_attrs = 
         let origin = Origin EGP in
         let next_hop = Next_hop (relay2 ()).local_id in
-        let as_path = As_path [Asn_seq [(relay2 ()).local_asn; 1000_l; 1001_l; 1002_l; 1003_l; 1004_l]] in
+        let as_path = As_path [Asn_seq [(relay2 ()).local_asn; 1003_l]] in
         [origin; next_hop; as_path]
       in
-      let start_time = Unix.gettimeofday () in
-      plain_feed  ~cluster_size ~total:stage_size ~seed:Pfx_gen.default_seed ~path_attrs
-                  ~flow:flow2 (module Sp2_log : Logs.LOG)
+      phased_insert ~stage_size ~cluster_size 
+                    ~seed:(Pfx_gen.peek_next_n Pfx_gen.default_seed 100000) 
+                    ~total:100000 ~flow1:flow2 ~flow2:flow1 
+                    ~path_attrs (module Sp2_log : Logs.LOG) (module Sp1_log : Logs.LOG) 
+                    ~phase_name:"insert clash"
       >>= fun _ ->
-      let update = {
-        withdrawn = [];
-        path_attrs;
-        nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.56.42.0") ];
-      } in
-      Bgp_flow.write flow2 (Update update)
-      >>= function
-      | Error _ -> assert false
-      | Ok () -> 
-        rloop
-        >>= fun () ->
-        Mon_log.info (fun m -> m "unchange phase stage 0, RIB size %d: %.4fs" total (Unix.gettimeofday () -. start_time));
-        Lwt.return_unit
+      Lwt.return_unit
     in
-    unchange_phase ()
+    Lwt.join [t1 (); t2 ()]
     >>= fun () ->
 
 
-    (* Replace phase *)
-    let path_attrs = 
-      let origin = Origin EGP in
-      let next_hop = Next_hop (relay1 ()).local_id in
-      let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1004_l; 1005_l; 1006_l]] in
-      [origin; next_hop; as_path]
-    in
-    phased_insert ~stage_size ~cluster_size ~path_attrs
-                  ~seed:(Pfx_gen.default_seed) ~total:100000 
-                  ~flow1 ~flow2 
-                  (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) 
-                  ~phase_name:"replace"
-    >>= fun _ ->
-
-    (* Withdrawn phase *)
-    phased_withdrawn  ~stage_size ~cluster_size  ~total:100000 
-                      ~seed:(Pfx_gen.default_seed) 
-                      ~flow1 ~flow2
-                      (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG)
-    >>= fun () ->
-
-
-    (* Link flap phase *)
-    (* Speaker2 starts another listen *)
-    let rec_rloop2 = read_loop_count_withdrawn flow2 (total - 100000) (module Sp2_log) in
-    
-    (* Buffer time for installation and processing overrun *)
-    let buffer_time = 5 in
-    OS.Time.sleep_ns (Duration.of_sec buffer_time)
-    >>= fun () ->
-
-    (* Close flows *)
-    let start_time = Unix.gettimeofday () in
     close_session flow1
     >>= fun () ->
-
-    (* Speaker 2 wait for all withdrawl *)
-    rec_rloop2
-    >>= fun () ->
-    Mon_log.info (fun m -> m "link flap phase stage 0, RIB size %d: %.4fs" 
-                    (total - 100000) (Unix.gettimeofday () -. start_time));
-    (* Clean up *)
     close_session flow2
     >>= fun () ->
-
     Lwt.return seed
   ;;
 
