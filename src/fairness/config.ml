@@ -28,12 +28,12 @@ let main =
     Key.abstract speaker;
     (* Key.abstract total; *)
   ] in
-  foreign ~keys "Double.Main" (stackv4 @-> job)
+  foreign ~keys "Fairness.Main" (stackv4 @-> job)
 ;;
 
 let stack = generic_stackv4 default_network
 
 let () =
-  register "double" [
+  register "fairness" [
     main $ stack
   ]
