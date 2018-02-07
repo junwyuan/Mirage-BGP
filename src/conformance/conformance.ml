@@ -22,6 +22,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "xen" -> Relay.xen_relay1
     | "frr" -> Relay.frr_relay1
     | "xorp" -> Relay.xorp_relay1
+    | "bird" -> Relay.bird_relay1
     | _ -> Relay.dev_relay1
   ;;
   
@@ -32,14 +33,17 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "xen" -> Relay.xen_relay2
     | "frr" -> Relay.frr_relay2
     | "xorp" -> Relay.xorp_relay2
+    | "bird" -> Relay.bird_relay2
     | _ -> Relay.dev_relay2
   ;;
 
   let dut_asn () =
     match Key_gen.speaker () with
     | "quagga" -> 1_l
+    | "xen" -> 1_l
     | "xorp" -> 1_l
     | "frr" -> 1_l
+    | "bird" -> 1_l
     | _ -> 10_l
   ;;
 
@@ -48,6 +52,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "quagga" -> Ipaddr.V4.of_string_exn "172.19.0.2"
     | "frr" -> Ipaddr.V4.of_string_exn "172.19.0.6"
     | "xorp" -> Ipaddr.V4.of_string_exn "172.19.0.7"
+    | "bird" -> Ipaddr.V4.of_string_exn "172.19.0.8"
     | _ -> Ipaddr.V4.of_string_exn "172.19.0.3"
   ;;
 
@@ -104,7 +109,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | Error _ -> 
       Log.err (fun m -> m "Error when sending: %s" (to_string msg));
       assert false
-    | Ok () -> Lwt.return_unit
+    | Ok () -> 
+      Log.debug (fun m -> m "Send message %s" (to_string msg));
+      Lwt.return_unit
   ;;
 
   let send_buf flow buf (module Log : Logs.LOG) =
@@ -121,12 +128,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       Log.err (fun m -> m "Error when read");
       assert false
     | Ok Update u -> 
+      Log.debug (fun m -> m "Rec: %s" (to_string (Update u)));
       if is_empty_update u || not (cond (Update u)) then 
         read_loop flow cond (module Log : Logs.LOG)
       else 
         (* Condition satisfied *)
         Lwt.return_unit
     | Ok msg -> 
+      Log.debug (fun m -> m "Rec: %s" (to_string msg));
       if cond msg then 
         (* Condition satisfied *)
         Lwt.return_unit
@@ -144,7 +153,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     read_loop flow wrapped (module Log : Logs.LOG)
   ;;
 
-  
 
   let create_session s relay test_name =
     let open Relay in
@@ -159,7 +167,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       >>= function
       | Error _ -> assert false
       | Ok msg ->
-        let open Bgp in
         match msg with
         | Keepalive | Notification _ | Update _ -> 
           Conf_log.err (fun m -> m "Expect OPEN but rec: %s" (to_string msg));
@@ -245,13 +252,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   
   let test_maintain_session s () =
     let test_name = "maintain session" in
-    let open Relay in
+
     create_session s (relay1 ()) test_name
     >>= fun (flow, o) ->
-    let open Bgp in 
+    
     let negotiated_ht = min o.hold_time default_hold_time in
-
-
     let cond = function
       | Keepalive -> true
       | Update _ -> false
@@ -259,9 +264,15 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         Sp1_log.err (fun m -> m "Expect Keepalive but rec: %s" (to_string msg));
         assert false
     in
+    Lwt.pick [
+      read_loop flow cond (module Sp1_log);
+      OS.Time.sleep_ns (Duration.of_sec negotiated_ht);
+    ]
+    >>= fun () ->
 
-    let read_loop () = read_loop flow cond (module Sp1_log) in
-    timeout test_name negotiated_ht read_loop    
+    close_session flow
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_propagate_update_to_new_peer s () =
@@ -548,6 +559,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       else assert false
     in
     read_update_loop flow2 cond (module Sp2_log)
+    >>= fun () ->
+
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_route_selection_after_wd s () =
@@ -595,24 +613,38 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       path_attrs = [];
       nlri = [];
     } in
-    Bgp_flow.write flow1 (Update update)
-    >>= function
-    | Error _ -> assert false
-    | Ok () ->
-      (* Send another update and expect no update *)
-      let update = 
-        let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0"); ] in
-        let path_attrs = [
-          Origin EGP;
-          Next_hop (relay1 ()).local_id;
-          As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 65002_l; 65003_l; 65004_l; 65005_l ]]
-        ] in
-        { withdrawn = []; nlri; path_attrs} 
-      in
-      Bgp_flow.write flow1 (Update update)
-      >>= function
-      | Error _ -> assert false
-      | Ok () -> assert false
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* Verify from speaker 2 *)
+    read_update_loop flow2 (fun u -> assert (List.length u.withdrawn = 1); true) (module Sp2_log)
+    >>= fun () ->
+    
+    (* Send another update and expect no update *)
+    let update = 
+      let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0"); ] in
+      let path_attrs = [
+        Origin EGP;
+        Next_hop (relay1 ()).local_id;
+        As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 65002_l; 65003_l; 65004_l; 65005_l ]]
+      ] in
+      { withdrawn = []; nlri; path_attrs} 
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* verify that no update *)
+    Lwt.pick [
+      read_update_loop flow2 (fun u -> assert false) (module Sp2_log);
+      OS.Time.sleep_ns (Duration.of_sec 5);
+    ]
+    >>= fun () ->
+
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
 
@@ -887,18 +919,19 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let tests = [
       test_create_session s; 
       test_maintain_session s;
+      test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
       test_propagate_update_to_new_peer s;
       test_propagate_group_update_to_new_peer s;
-      test_route_withdrawn s;
       test_simul_insert s;
-      test_no_propagate_update_to_src s;
+      test_route_withdrawn s;
       test_route_withdrawn_diff_src s;
       test_link_flap s;
       test_route_replace s;
       test_route_unchanged s;
       test_header_error_handle s;
       test_update_attr_length_error_handle s;
+      test_route_selection_after_wd s;
     ] in
     run tests
     >>= fun () ->

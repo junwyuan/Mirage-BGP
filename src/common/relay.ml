@@ -76,3 +76,16 @@ let xorp_relay2 = {
   local_asn = 5_l;
 }
 
+let bird_relay1 = {
+  local_id = Ipaddr.V4.of_string_exn "172.19.10.9";
+  remote_port = 50009;
+  remote_id = Ipaddr.V4.of_string_exn "127.0.0.1";
+  local_asn = 4_l;
+}
+
+let bird_relay2 = {
+  local_id = Ipaddr.V4.of_string_exn "172.19.10.10";
+  remote_port = 50010;
+  remote_id = Ipaddr.V4.of_string_exn "127.0.0.1";
+  local_asn = 5_l;
+}

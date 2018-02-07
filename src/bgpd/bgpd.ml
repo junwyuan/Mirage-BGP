@@ -136,9 +136,6 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           | `Timeout -> 
             Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
             callback Fsm.Tcp_connection_fail
-          | `Closed_by_local ->
-            Bgp_log.debug (fun m -> m "Flow closed by local." ~tags:(stamp t.remote_id));
-            Lwt.return_unit
           | `PARSE_ERROR err -> begin
             match err with
             | Bgp.Parsing_error -> 
@@ -645,9 +642,6 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         let str = String.concat "" @@ List.map (fun b -> Cstruct.to_string b) data in     
         Lwt.return @@ Config_parser.parse_from_string str
   ;; *)
-  
-
-
         
   let start console s =
     (* Enable backtrace *)
