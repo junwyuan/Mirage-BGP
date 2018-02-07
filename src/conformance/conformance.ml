@@ -2,6 +2,8 @@ open Lwt.Infix
 open Bgp
 open Relay
 
+let (>>>) a b = a >>= fun () -> b
+
 let conf_log = Logs.Src.create "Conf" ~doc:"Conformance tests log"
 module Conf_log = (val Logs.src_log conf_log : Logs.LOG)
 
@@ -14,12 +16,10 @@ module Sp2_log = (val Logs.src_log speaker2 : Logs.LOG)
 module Main (S: Mirage_stack_lwt.V4) = struct 
   module Bgp_flow = Bgp_io.Make(S)
 
-  let relay_id () = Ipaddr.V4.of_string_exn "127.0.0.1"
-
   let relay1 () = 
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay1
-    | "host" -> Relay.host_relay1
+    | "xen" -> Relay.xen_relay1
     | "frr" -> Relay.frr_relay1
     | "xorp" -> Relay.xorp_relay1
     | _ -> Relay.dev_relay1
@@ -29,7 +29,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let relay2 () = 
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay2
-    | "host" -> Relay.host_relay2
+    | "xen" -> Relay.xen_relay2
     | "frr" -> Relay.frr_relay2
     | "xorp" -> Relay.xorp_relay2
     | _ -> Relay.dev_relay2
@@ -40,14 +40,12 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "quagga" -> 1_l
     | "xorp" -> 1_l
     | "frr" -> 1_l
-    | "dev" -> 10_l
     | _ -> 10_l
   ;;
 
   let dut_ip () =
     match Key_gen.speaker () with
     | "quagga" -> Ipaddr.V4.of_string_exn "172.19.0.2"
-    | "dev" -> Ipaddr.V4.of_string_exn "172.19.0.3"
     | "frr" -> Ipaddr.V4.of_string_exn "172.19.0.6"
     | "xorp" -> Ipaddr.V4.of_string_exn "172.19.0.7"
     | _ -> Ipaddr.V4.of_string_exn "172.19.0.3"
@@ -60,8 +58,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let default_open_msg relay = 
     let o = {
       version = 4;
-      local_id = relay.id;
-      local_asn = relay.as_no;
+      local_id = relay.local_id;
+      local_asn = relay.local_asn;
       options = [];
       hold_time = default_hold_time;
     } in
@@ -73,15 +71,17 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let nlri = [ Ipaddr.V4.Prefix.make 8 sample_id] in
     let path_attrs = [
       Origin EGP;
-      Next_hop (relay1 ()).id;
-      As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]]
+      Next_hop (relay1 ()).local_id;
+      As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]]
     ] in
     Update { withdrawn; nlri; path_attrs}
   ;;
 
+  let is_empty_update { withdrawn; path_attrs; nlri } = withdrawn = [] && nlri = []
+
   let fail test_name fail_reason = 
     Conf_log.err (fun m -> m "Test %s fails: %s" test_name fail_reason);
-    Lwt.fail_with test_name
+    assert false
   ;;
 
   let pass test_name = 
@@ -98,9 +98,55 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.pick [timer; task ()]
   ;;
 
+  let send_msg flow msg (module Log : Logs.LOG) =
+    Bgp_flow.write flow msg
+    >>= function
+    | Error _ -> 
+      Log.err (fun m -> m "Error when sending: %s" (to_string msg));
+      assert false
+    | Ok () -> Lwt.return_unit
+  ;;
+
+  let send_buf flow buf (module Log : Logs.LOG) =
+    S.TCPV4.write flow buf
+    >>= function
+    | Error _ -> assert false
+    | Ok () -> Lwt.return_unit
+  ;;
+
+  let rec read_loop flow cond (module Log : Logs.LOG) =
+    Bgp_flow.read flow
+    >>= function
+    | Error _ -> 
+      Log.err (fun m -> m "Error when read");
+      assert false
+    | Ok Update u -> 
+      if is_empty_update u || not (cond (Update u)) then 
+        read_loop flow cond (module Log : Logs.LOG)
+      else 
+        (* Condition satisfied *)
+        Lwt.return_unit
+    | Ok msg -> 
+      if cond msg then 
+        (* Condition satisfied *)
+        Lwt.return_unit
+      else read_loop flow cond (module Log : Logs.LOG)
+  ;;
+
+  let read_update_loop flow cond (module Log : Logs.LOG) =
+    let wrapped = function
+      | Keepalive -> false
+      | Update u -> cond u
+      | msg -> 
+        Log.err (fun m -> m "Expecting update, but rec: %s" (to_string msg));
+        assert false
+    in
+    read_loop flow wrapped (module Log : Logs.LOG)
+  ;;
+
   let create_session s relay test_name =
     let open Relay in
-    Bgp_flow.create_connection s (relay_id (), relay.port)
+    Bgp_flow.create_connection s (relay.remote_id, relay.remote_port)
     >>= function
     | Error _ -> fail test_name "Create_session: tcp connect fail"
     | Ok flow ->
@@ -171,7 +217,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         | `Timeout -> Log.err (fun m -> m "Read timeout")
         | `Closed -> Log.err (fun m -> m "Connection closed when read.")
         | `PARSE_ERROR err -> Log.err (fun m -> m "%s" (parse_error_to_string err))
-        | `Closed_by_local -> Log.err (fun m -> m "Flow closed by local")
         | _ -> ()); 
         Lwt.return_unit
     in
@@ -182,12 +227,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Bgp_flow.write flow (Notification Cease)
     >>= function
     | Error _ -> fail "unknown" "fail to write"
-    | Ok () -> 
-      (* Bgp_flow.read flow
-      >>= fun _ -> *)
-      Bgp_flow.close flow
+    | Ok () -> Bgp_flow.close flow
   ;;
 
+  
   let test_create_session s () = 
     let test_name = "create session" in
     create_session s (relay1 ()) test_name
@@ -224,78 +267,57 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let test_name = "propagate update to new peer" in
     create_session s (relay1 ()) test_name
     >>= fun (flow1, _) ->
-    Bgp_flow.write flow1 (default_update ())
-    >>= function
-    | Error _ -> fail test_name "tcp write error"
-    | Ok () ->
-      create_session s (relay2 ()) test_name
-      >>= fun (flow2, _) ->
-      let rec read_loop () =
-        Bgp_flow.read flow2
-        >>= function
-        | Error _ -> fail test_name "tcp read fail"
-        | Ok msg -> 
-          match msg with
-          | Keepalive -> read_loop ()
-          | Update { withdrawn; path_attrs; nlri } -> begin
-            match nlri with 
-            | [ pfx ] ->
-              if Ipaddr.V4.Prefix.network pfx = sample_id then 
-                close_session flow1
-                >>= fun () ->
-                close_session flow2
-                >>= fun () ->
-                pass test_name
-              else
-                fail test_name "update message contain wrong info"
-            | _ -> fail test_name "update message contain wrong info"
-          end
-          | _ -> fail test_name "wrong msg type" 
-      in
-      read_loop ()
+    
+    send_msg flow1 (default_update ()) (module Sp1_log)
+    >>= fun () ->
+
+    create_session s (relay2 ()) test_name
+    >>= fun (flow2, _) ->
+
+    let cond u = 
+      match u.nlri with 
+      | [ pfx ] ->
+        if Ipaddr.V4.Prefix.network pfx = sample_id then true
+        else assert false
+      | _ -> assert false
+    in
+    read_update_loop flow2 cond (module Sp2_log)
+    >>= fun () ->
+
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_propagate_update_to_old_peer s () =
     let test_name = "propagate update to old peer" in
+    
     create_session s (relay1 ()) test_name
     >>= fun (flow1, _) ->
+    
     create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
 
-    OS.Time.sleep_ns (Duration.of_ms 2500)
+    send_msg flow1 (default_update ()) (module Sp1_log)
     >>= fun () ->
 
-    let start_time = Unix.gettimeofday () in
-    Bgp_flow.write flow1 (default_update ())
-    >>= function
-    | Error _ -> fail test_name "tcp write error"
-    | Ok () ->
-      let rec read_loop () =
-        Bgp_flow.read flow2
-        >>= function
-        | Error _ -> fail test_name "tcp read fail"
-        | Ok msg -> 
-          match msg with
-          | Keepalive -> read_loop ()
-          | Update { withdrawn; path_attrs; nlri } -> begin
-            match nlri with 
-            | [pfx] ->
-              
-              Conf_log.info (fun m -> m "Time taken: %.4fs" (Unix.gettimeofday () -. start_time));
+    let cond u = 
+      match u.nlri with 
+      | [ pfx ] ->
+        if Ipaddr.V4.Prefix.network pfx = sample_id then true
+        else assert false
+      | _ -> assert false
+    in
+    read_update_loop flow2 cond (module Sp2_log)
+    >>= fun () ->
 
-              if Ipaddr.V4.Prefix.network pfx = sample_id then 
-                close_session flow1
-                >>= fun () ->
-                close_session flow2
-                >>= fun () ->
-                pass test_name
-              else
-                fail test_name "update message contain wrong info"
-            | _ -> fail test_name "update message contain wrong info"
-          end
-          | _ -> fail test_name "wrong msg type" 
-      in
-    read_loop ()
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_no_propagate_update_to_src s () =
@@ -314,11 +336,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         | Ok msg -> 
           match msg with
           | Keepalive -> read_loop ()
+          | Update u -> begin
+            match u.nlri with
+            | [] -> read_loop ()
+            | _ -> 
+              Conf_log.info (fun m -> m "%s" (to_string msg));
+              assert false
+          end
           | _ -> 
-            
-            (* OS.Time.sleep_ns (Duration.of_sec 10)
-            >>= fun () -> *)
-            
             Conf_log.info (fun m -> m "%s" (to_string msg));
             assert false
       in
@@ -344,8 +369,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         let withdrawn = [] in
         let path_attrs =
           let origin = Origin EGP in
-          let next_hop = Next_hop (relay1 ()).id in
-          let as_path = As_path [Asn_seq [(relay1 ()).as_no; 2_l; 3_l]] in
+          let next_hop = Next_hop (relay1 ()).local_id in
+          let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]] in
           [origin; next_hop; as_path]
         in
         let nlri, n_seed = Pfx_gen.gen seed 1 in
@@ -407,8 +432,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
       let path_attrs =
         let origin = Origin EGP in
-        let next_hop = Next_hop (relay1 ()).id in
-        let as_path = As_path [Asn_seq [(relay1 ()).as_no; 2_l; 3_l]] in
+        let next_hop = Next_hop (relay1 ()).local_id in
+        let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]] in
         [origin; next_hop; as_path]
       in
       plain_feed  ~cluster_size ~total:1000
@@ -423,8 +448,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
       let path_attrs =
         let origin = Origin EGP in
-        let next_hop = Next_hop (relay2 ()).id in
-        let as_path = As_path [Asn_seq [(relay2 ()).as_no; 2_l; 3_l]] in
+        let next_hop = Next_hop (relay2 ()).local_id in
+        let as_path = As_path [Asn_seq [(relay2 ()).local_asn; 2_l; 3_l]] in
         [origin; next_hop; as_path]
       in
       plain_feed  ~cluster_size ~total:1000 
@@ -447,8 +472,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     pass test_name
   ;;
 
-
-
   let test_link_flap s () =
     let test_name = "link flap" in
     
@@ -463,8 +486,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     ] in
     let path_attrs = [
       Origin EGP;
-      Next_hop (relay1 ()).id;
-      As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]]
+      Next_hop (relay1 ()).local_id;
+      As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]]
     ] in
     let update = { withdrawn = []; nlri; path_attrs} in
     Bgp_flow.write flow1 (Update update)
@@ -517,64 +540,109 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun (flow2, _) ->
 
     (* Write 1st update *)
-    let nlri = [ 
-      Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
-      Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.2.0");
-    ] in
-    let path_attrs = [
-      Origin EGP;
-      Next_hop (relay1 ()).id;
-      As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]]
-    ] in
-    let update = { withdrawn = []; nlri; path_attrs} in
+    let update = 
+      let nlri = [ 
+        Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
+        Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.2.0");
+      ] in
+      let path_attrs = [
+        Origin EGP;
+        Next_hop (relay1 ()).local_id;
+        As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]]
+      ] in
+      { withdrawn = []; nlri; path_attrs} 
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+    
+    (* Verify the message *)
+    read_update_loop flow2 (fun u -> true) (module Sp2_log)
+    >>= fun () ->
+
+    (* 2nd update to withdrawn one of the prefixes *)
+    let update = 
+      let wd = [
+        Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
+      ] in
+      { withdrawn = wd; path_attrs = []; nlri = [] }
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* Verify the withdrawn *)
+    let cond u = 
+      if u.withdrawn = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0") ] then true
+      else assert false
+    in
+    read_update_loop flow2 cond (module Sp2_log)
+  ;;
+
+  let test_route_selection_after_wd s () =
+    let test_name = "route route selection after withdrawn" in
+    
+    create_session s (relay1 ()) test_name
+    >>= fun (flow1, _) ->
+    create_session s (relay2 ()) test_name 
+    >>= fun (flow2, _) ->
+
+    (* update from speaker 1 *)
+    let update = 
+      let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0"); ] in
+      let path_attrs = [
+        Origin EGP;
+        Next_hop (relay1 ()).local_id;
+        As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]]
+      ] in
+      { withdrawn = []; nlri; path_attrs } 
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* Verify from speaker 2 *)
+    read_update_loop flow2 (fun u -> true) (module Sp2_log)
+    >>= fun () ->
+
+    (* update from speaker 2 and the updated route is not taken *)
+    let update = 
+      let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0"); ] in
+      let path_attrs = [
+        Origin EGP;
+        Next_hop (relay2 ()).local_id;
+        As_path [Bgp.Asn_seq [(relay2 ()).local_asn; 65002_l; 65003_l; 65004_l]]
+      ] in
+      { withdrawn = []; nlri; path_attrs } 
+    in
+    send_msg flow2 (Update update) (module Sp2_log)
+    >>= fun () ->
+
+
+    (* Withdrawn speaker 1's path *)
+    let update = {
+      withdrawn = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0"); ];
+      path_attrs = [];
+      nlri = [];
+    } in
     Bgp_flow.write flow1 (Update update)
     >>= function
-    | Error _ -> fail test_name "fail to write 1st update"
+    | Error _ -> assert false
     | Ok () ->
-      let rec read_loop () =
-        (* Check the update *)
-        Bgp_flow.read flow2
-        >>= function
-        | Error _ -> fail test_name "read fail within read_loop"
-        | Ok msg -> 
-          match msg with
-          | Keepalive -> read_loop ()
-          | Update { withdrawn; path_attrs; nlri } -> begin
-            let wd = [
-              Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
-            ] in
-            let update = { withdrawn = wd; path_attrs = []; nlri = [] } in
-            Bgp_flow.write flow1 (Update update)
-            >>= function
-            | Error _ -> assert false
-            | Ok () ->
-              let rec read_loop () =
-                Bgp_flow.read flow2
-                >>= function
-                | Error _ -> assert false
-                | Ok msg -> match msg with
-                  | Open _ | Notification _ -> assert false
-                  | Keepalive -> read_loop ()
-                  | Update { withdrawn } ->
-                    match withdrawn with
-                    | [ pfx ] ->
-                      if Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0") = pfx then
-                        close_session flow1
-                        >>= fun () ->
-                        close_session flow2
-                        >>= fun () ->
-                        pass test_name
-                      else assert false
-                    | _ ->
-                      Conf_log.info (fun m -> m "%s" (to_string msg));
-                      assert false
-              in
-              read_loop ()
-          end
-          | _ -> fail test_name "read a message of wrong type, expecting the 1st update." 
+      (* Send another update and expect no update *)
+      let update = 
+        let nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0"); ] in
+        let path_attrs = [
+          Origin EGP;
+          Next_hop (relay1 ()).local_id;
+          As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 65002_l; 65003_l; 65004_l; 65005_l ]]
+        ] in
+        { withdrawn = []; nlri; path_attrs} 
       in
-    read_loop ()
+      Bgp_flow.write flow1 (Update update)
+      >>= function
+      | Error _ -> assert false
+      | Ok () -> assert false
   ;;
+
+
 
   let test_route_withdrawn_diff_src s () =
     let test_name = "route withdrawn diff src" in
@@ -584,145 +652,120 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
 
-    (* Write 1st update *)
-    let nlri = [ 
-      Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
-    ] in
-    let path_attrs = [
-      Origin EGP;
-      Next_hop (relay1 ()).id;
-      As_path [Bgp.Asn_seq [(relay1 ()).as_no; 2_l; 3_l]]
-    ] in
-    let update = { withdrawn = []; nlri; path_attrs} in
-    Bgp_flow.write flow1 (Update update)
-    >>= function
-    | Error _ -> assert false
-    | Ok () ->
+    (* update from speaker 1 *)
+    let update = 
+      let nlri = [ 
+        Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
+      ] in
+      let path_attrs = [
+        Origin EGP;
+        Next_hop (relay1 ()).local_id;
+        As_path [Bgp.Asn_seq [(relay1 ()).local_asn; 2_l; 3_l]]
+      ] in
+      { withdrawn = []; nlri; path_attrs} 
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* Rec from speaker 2 *)
+    read_update_loop flow2 (fun u -> true) (module Sp2_log)
+    >>= fun () ->
+    
+    (* update from speaker 2 *)
+    let update = 
       let nlri = [ 
         Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.2.0");
       ] in
       let path_attrs = [
         Origin EGP;
-        Next_hop (relay2 ()).id;
-        As_path [Bgp.Asn_seq [(relay2 ()).as_no; 2_l; 3_l]]
+        Next_hop (relay2 ()).local_id;
+        As_path [Bgp.Asn_seq [(relay2 ()).local_asn; 2_l; 3_l]]
       ] in
-      let update = { withdrawn = []; nlri; path_attrs} in
-      Bgp_flow.write flow2 (Update update)
-      >>= function
-      | Error _ -> assert false
-      | Ok () ->
-        let rec read_loop () =
-          (* Check the update *)
-          Bgp_flow.read flow2
-          >>= function
-          | Error _ -> fail test_name "read fail within read_loop"
-          | Ok msg -> 
-            match msg with
-            | Keepalive -> read_loop ()
-            | Update { withdrawn; path_attrs; nlri } -> begin
-              Sp2_log.info (fun m -> m "%s" (to_string msg));
-              
-              let wd = [
-                Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
-              ] in
-              let update = { withdrawn = wd; path_attrs = []; nlri = [] } in
-              Bgp_flow.write flow1 (Update update)
-              >>= function
-              | Error _ -> assert false
-              | Ok () ->
-                let rec read_loop () =
-                  Bgp_flow.read flow2
-                  >>= function
-                  | Error _ -> assert false
-                  | Ok msg -> 
-                    Sp2_log.info (fun m -> m "%s" (to_string msg));
-                    match msg with
-                    | Open _ | Notification _ -> assert false
-                    | Keepalive -> read_loop ()
-                    | Update { withdrawn } ->
-                      
+      { withdrawn = []; nlri; path_attrs} 
+    in
+    send_msg flow2 (Update update) (module Sp2_log)
+    >>= fun () ->
 
-                      
+    (* Rec from speaker 1 *)
+    read_update_loop flow1 (fun u -> true) (module Sp1_log)
+    >>= fun () ->
 
-                      match withdrawn with
-                      | [ pfx ] ->
-                        if Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0") = pfx then
-                          close_session flow1
-                          >>= fun () ->
-                          close_session flow2
-                          >>= fun () ->
-                          pass test_name
-                        else assert false
-                      | _ ->
-                        Conf_log.info (fun m -> m "%s" (to_string msg));
-                        assert false
-                in
-                read_loop ()
-            end
-            | _ -> fail test_name "read a message of wrong type, expecting the 1st update." 
-        in
-      read_loop ()
+    (* Withdrawn 128.0.1.0 from speaker 1 *)
+    let update = { 
+      withdrawn = [
+        Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0");
+      ]; 
+      path_attrs = []; nlri = [] 
+    } in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    let cond u =
+      assert (u.withdrawn = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "128.0.1.0")]);
+      true
+    in
+    read_update_loop flow2 cond (module Sp2_log)
+    >>= fun () ->
+
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_route_replace s () =
     let test_name = "route replace" in
     
-    let%lwt (flow1, _) =  create_session s (relay1 ()) test_name in
-    let%lwt (flow2, _) = create_session s (relay2 ()) test_name in
+    create_session s (relay1 ()) test_name
+    >>= fun (flow1, _) ->
+    create_session s (relay2 ()) test_name
+    >>= fun (flow2, _) ->
 
     (* Write the first update *)
     let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
     let path_attrs = [
       Origin EGP;
-      As_path [ Asn_seq [ (relay1 ()).as_no; 100_l; 2_l; 3_l ] ];
-      Next_hop (relay1 ()).id;
+      As_path [ Asn_seq [ (relay1 ()).local_asn; 100_l; 65002_l; 65003_l ] ];
+      Next_hop (relay1 ()).local_id;
     ] in
     let update = { withdrawn = []; nlri; path_attrs } in
-    match%lwt Bgp_flow.write flow1 (Update update) with
-    | Error _ -> fail test_name "fail to write update 1"
-    | Ok () -> 
-      (* Check that I receive the first update *)
-      let rec rloop1 () =
-        match%lwt Bgp_flow.read flow2 with
-        | Error _ -> fail test_name "fail to read update 1"
-        | Ok Open _ | Ok Notification _ -> fail test_name "read wrong msg type when expecting an update. "
-        | Ok Keepalive -> rloop1 ()
-        | Ok Update { nlri } ->
-          (* More detailed check on this part is carried out in test_propagate_update *)
-          assert (List.length nlri = 1);
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
 
-          (* Write the 2nd update *)
-          let path_attrs = [
-            Origin EGP;
-            As_path [ Asn_seq [ (relay2 ()).as_no; 100_l; 2_l ] ];
-            Next_hop (relay2 ()).id;
-          ] in
-          let update = {withdrawn = []; nlri; path_attrs } in
-          match%lwt Bgp_flow.write flow2 (Update update) with
-          | Error _ -> fail test_name "fail to write update 2"
-          | Ok () ->
-            (* Check the 2nd update *)
-            let rec rloop2 () =
-              match%lwt Bgp_flow.read flow1 with
-              | Error _ -> fail test_name "fail to read update 2"
-              | Ok Open _ | Ok Notification _ -> fail test_name "read wrong msg type when expecting an update. "
-              | Ok Keepalive -> rloop2 ()
-              | Ok (Update { nlri; path_attrs } as msg) ->
+    (* Verify 1st update *)
+    let cond u =
+      assert (List.length u.nlri = 1);
+      true
+    in
+    read_update_loop flow2 cond (module Sp2_log)
+    >>= fun () ->
 
-                Conf_log.info (fun m -> m "%s" (to_string msg));
+    (* Write the 2nd update *)
+    let path_attrs = [
+      Origin EGP;
+      As_path [ Asn_seq [ (relay2 ()).local_asn; 65001_l; 65002_l ] ];
+      Next_hop (relay2 ()).local_id;
+    ] in
+    let update = { withdrawn = []; nlri; path_attrs } in
+    send_msg flow2 (Update update) (module Sp2_log)
+    >>= fun () ->
 
-                assert (nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0") ]);
-                assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay2 ()).as_no; 100_l; 2_l]]);
-                (* assert (find_next_hop path_attrs = Some (dut_ip ())); *)
+    (* Verify the 2nd update *)
+    let cond ({ nlri; path_attrs; withdrawn } as u) =
+      Sp2_log.debug (fun m -> m "%s" (update_to_string u));
+      assert (nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0") ]);
+      assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay2 ()).local_asn; 65001_l; 65002_l]]);
+      true
+    in
+    read_update_loop flow1 cond (module Sp1_log)
+    >>= fun () ->
 
-                (* Clean up *)
-                let%lwt () = close_session flow1 in
-                let%lwt () = close_session flow2 in 
-                pass test_name
-            in
-            rloop2 ()
-      in
-      rloop1 ()
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_route_unchanged s () =
@@ -733,123 +776,120 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     create_session s (relay2 ()) test_name
     >>= fun (flow2, _) ->
 
-    (* Write the first update *)
     let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
+
+    (* Write the first update *)
+    let update = 
+      let path_attrs = [
+        Origin EGP;
+        As_path [ Asn_seq [ (relay1 ()).local_asn; 100_l; 2_l; 3_l ] ];
+        Next_hop (relay1 ()).local_id;
+      ] in
+      { withdrawn = []; nlri; path_attrs } 
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* Check that I receive the first update *)
+    read_update_loop flow2 (fun msg -> true) (module Sp2_log)
+    >>= fun () ->
+
+    (* Write the 2nd update *)
     let path_attrs = [
       Origin EGP;
-      As_path [ Asn_seq [ (relay1 ()).as_no; 100_l; 2_l; 3_l ] ];
-      Next_hop (relay1 ()).id;
+      As_path [ Asn_seq [ (relay2 ()).local_asn; 100_l; 2_l; 3_l; 20_l ] ];
+      Next_hop (relay2 ()).local_id;
     ] in
-    let update = { withdrawn = []; nlri; path_attrs } in
-    match%lwt Bgp_flow.write flow1 (Update update) with
-    | Error _ -> assert false
-    | Ok () -> 
-      (* Check that I receive the first update *)
-      let rec rloop1 () =
-        Bgp_flow.read flow2
-        >>= function 
-        | Error _ -> fail test_name "fail to read update 1"
-        | Ok Open _ | Ok Notification _ -> fail test_name "read wrong msg type when expecting an update. "
-        | Ok Keepalive -> rloop1 ()
-        | Ok Update { nlri } -> begin
-          (* More detailed check on this part is carried out in test_propagate_update *)
-          assert (List.length nlri = 1);
+    let update = {withdrawn = []; nlri; path_attrs } in
+    send_msg flow2 (Update update) (module Sp2_log)
+    >>= fun () ->
 
-          (* Write the 2nd update *)
-          let path_attrs = [
-            Origin EGP;
-            As_path [ Asn_seq [ (relay2 ()).as_no; 100_l; 2_l; 3_l; 20_l ] ];
-            Next_hop (relay2 ()).id;
-          ] in
-          let update = {withdrawn = []; nlri; path_attrs } in
-          Bgp_flow.write flow2 (Update update)
-          >>= function
-          | Error _ -> fail test_name "fail to write update 2"
-          | Ok () ->
-            (* Check the 2nd update *)
-            let rec rloop2 () =
-              match%lwt Bgp_flow.read flow1 with
-              | Error _ -> Lwt.return_unit
-              | Ok Open _ | Ok Notification _ -> fail test_name "read wrong msg type when expecting an update. "
-              | Ok Keepalive -> rloop2 ()
-              | Ok Update { nlri; path_attrs } ->
-                fail test_name "receive an update when none should come."
-            in
-            
-            Lwt.pick [rloop2 (); OS.Time.sleep_ns (Duration.of_sec 5)]
-            >>= fun () ->
-            (* This is the correct case, no update *)
-
-            (* Clean up *)
-            let%lwt () = close_session flow1 in
-            let%lwt () = close_session flow2 in 
-            pass test_name
-      end
-      in
-      rloop1 ()
+    (* Fail there is an update *)
+    Lwt.pick [ 
+      read_update_loop flow1 (fun u -> assert false) (module Sp2_log); 
+      OS.Time.sleep_ns (Duration.of_sec 5)
+    ]
+    >>= fun () ->
+    
+    (* This is the correct case, no update *)
+    (* Clean up *)
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
   ;;
 
 
-
+  (* TODO *)
+  let test_msg_error_handle_base s () = Lwt.return_unit
 
   let test_header_error_handle s () = 
-    let test_name = "test header error handle" in
-    let%lwt (flow, _) = create_session s (relay1 ()) test_name in
+    let test_name = "header error handle" in
+    
+    create_session s (relay1 ()) test_name
+    >>= fun (flow, _) ->
     let tcp_flow = Bgp_flow.tcp_flow flow in
     
     let buf = Cstruct.create 19 in
     Cstruct.BE.set_uint16 buf 16 19;
     Cstruct.set_uint8 buf 18 4;
+    send_buf tcp_flow buf (module Sp1_log)
+    >>= fun () ->
 
-    match%lwt S.TCPV4.write tcp_flow buf with
-    | Error _ -> assert false
-    | Ok () ->
-      let rec rloop () =
-        match%lwt Bgp_flow.read flow with
-        | Error _ -> assert false
-        | Ok Keepalive -> rloop ()
-        | Ok msg -> 
-          assert (msg = Notification (Message_header_error Connection_not_synchroniszed)); 
+    let cond msg = 
+      match msg with
+      | Keepalive -> false
+      | _ ->
+        if (msg = Notification (Message_header_error Connection_not_synchroniszed)) then true
+        else begin
+          Sp1_log.err (fun m -> m "Faulty msg: %s" (to_string msg));
+          assert false
+        end
+    in
+    read_loop flow cond (module Sp1_log)
+    >>= fun () -> 
 
-          pass test_name
-      in
-      rloop ()
+    close_session flow
+    >>= fun () ->
+    pass test_name
   ;;
 
   let test_update_attr_length_error_handle s () = 
     let test_name = "attr length error handle" in
-    let%lwt (flow, _) = create_session s (relay1 ()) test_name in
+
+    create_session s (relay1 ()) test_name
+    >>= fun (flow, _) ->
     let tcp_flow = Bgp_flow.tcp_flow flow in
-    
+
     let path_attrs = [
       Origin EGP;
       As_path [Asn_seq [1_l]];
       Next_hop (Ipaddr.V4.of_string_exn "192.168.1.253");
     ] in
     let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "192.168.45.0")] in
-    
     let buf = gen_msg (Update { withdrawn = []; path_attrs; nlri }) in
-
     Cstruct.set_uint8 buf 25 2;
+    send_buf tcp_flow buf (module Sp1_log)
+    >>= fun () ->
 
-    match%lwt S.TCPV4.write tcp_flow buf with
-    | Error _ -> assert false
-    | Ok () ->
-      let rec rloop () =
-        match%lwt Bgp_flow.read flow with
-        | Error _ -> assert false
-        | Ok Keepalive -> rloop ()
-        | Ok msg -> 
-          match msg with
-          | Notification (Update_message_error (Attribute_length_error _)) ->
-            pass test_name
-          | _ -> assert false
-      in
-      rloop ()
+    let cond msg = 
+      match msg with
+      | Keepalive -> false
+      | Notification (Update_message_error (Attribute_length_error _)) -> true
+      | _ ->
+        Sp1_log.err (fun m -> m "Faulty msg: %s" (to_string msg));
+        assert false
+    in
+    read_loop flow cond (module Sp1_log)
+    >>= fun () -> 
+
+    close_session flow
+    >>= fun () ->
+    pass test_name
   ;;
 
-  
-    
+
   let rec run tests = 
     let interval = 
       match (Key_gen.speaker ()) with
@@ -866,8 +906,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | [] -> Lwt.return_unit
   ;;
 
-
   let start s =
+    (* Enable debug mode *)
+    Printexc.record_backtrace true;
+
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
       (* test_create_session s; 
@@ -876,9 +918,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_propagate_update_to_new_peer s;
       test_propagate_group_update_to_new_peer s;
       test_route_withdrawn s;
-      test_simul_insert s; *)
-      (* test_no_propagate_update_to_src s; *)
-      (* test_route_withdrawn_diff_src s; *)
+      test_simul_insert s;
+      test_no_propagate_update_to_src s;
+      test_route_withdrawn_diff_src s; *)
       test_link_flap s;
       test_route_replace s;
       test_route_unchanged s;

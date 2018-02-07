@@ -20,30 +20,29 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let relay1 () = 
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay1
-    | "host" -> Relay.host_relay1
+    | "xen" -> Relay.xen_relay1
     | "frr" -> Relay.frr_relay1
     | "xorp" -> Relay.xorp_relay1
     | _ -> Relay.dev_relay1
   ;;
+  
 
   let relay2 () = 
     match Key_gen.speaker () with
     | "quagga" -> Relay.quagga_relay2
-    | "host" -> Relay.host_relay2
+    | "xen" -> Relay.xen_relay2
     | "frr" -> Relay.frr_relay2
     | "xorp" -> Relay.xorp_relay2
     | _ -> Relay.dev_relay2
   ;;
 
-
-
   let default_hold_time = 180
   
-  let default_open_msg relay = 
+  let default_open_msg (relay: Relay.t) = 
     let o = {
       version = 4;
-      local_id = relay.id;
-      local_asn = relay.as_no;
+      local_id = relay.local_id;
+      local_asn = relay.local_asn;
       options = [];
       hold_time = default_hold_time;
     } in
@@ -57,7 +56,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let create_session s relay (module Log : Logs.LOG) =
     let open Relay in
-    Bgp_flow.create_connection s (relay_id (), relay.port)
+    Bgp_flow.create_connection s (relay.remote_id, relay.remote_port)
     >>= function
     | Error _ -> 
       Log.err (fun m -> m "Create_session: tcp connect fail");
@@ -366,8 +365,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* Insert phase *)
     let path_attrs = 
       let origin = Origin EGP in
-      let next_hop = Next_hop (relay1 ()).id in
-      let as_path = As_path [Asn_seq [(relay1 ()).as_no; 1000_l; 1001_l; 1002_l; 1003_l]] in
+      let next_hop = Next_hop (relay1 ()).local_id in
+      let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1000_l; 1001_l; 1002_l; 1003_l]] in
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~seed:(Pfx_gen.default_seed) ~total ~flow1 ~flow2 
@@ -379,8 +378,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       let rloop = read_loop_count_nlri flow1 1 (module Sp1_log : Logs.LOG) in
       let path_attrs = 
         let origin = Origin EGP in
-        let next_hop = Next_hop (relay2 ()).id in
-        let as_path = As_path [Asn_seq [(relay2 ()).as_no; 1000_l; 1001_l; 1002_l; 1003_l; 1004_l]] in
+        let next_hop = Next_hop (relay2 ()).local_id in
+        let as_path = As_path [Asn_seq [(relay2 ()).local_asn; 1000_l; 1001_l; 1002_l; 1003_l; 1004_l]] in
         [origin; next_hop; as_path]
       in
       let start_time = Unix.gettimeofday () in
@@ -408,8 +407,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* Replace phase *)
     let path_attrs = 
       let origin = Origin EGP in
-      let next_hop = Next_hop (relay1 ()).id in
-      let as_path = As_path [Asn_seq [(relay1 ()).as_no; 1004_l; 1005_l; 1006_l]] in
+      let next_hop = Next_hop (relay1 ()).local_id in
+      let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1004_l; 1005_l; 1006_l]] in
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~path_attrs
@@ -430,8 +429,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let t1 () = 
       let path_attrs = 
         let origin = Origin EGP in
-        let next_hop = Next_hop (relay1 ()).id in
-        let as_path = As_path [Asn_seq [(relay1 ()).as_no; 1003_l]] in
+        let next_hop = Next_hop (relay1 ()).local_id in
+        let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1003_l]] in
         [origin; next_hop; as_path]
       in
       phased_insert ~stage_size ~cluster_size 
@@ -444,8 +443,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let t2 () = 
       let path_attrs = 
         let origin = Origin EGP in
-        let next_hop = Next_hop (relay2 ()).id in
-        let as_path = As_path [Asn_seq [(relay2 ()).as_no; 1003_l]] in
+        let next_hop = Next_hop (relay2 ()).local_id in
+        let as_path = As_path [Asn_seq [(relay2 ()).local_asn; 1003_l]] in
         [origin; next_hop; as_path]
       in
       phased_insert ~stage_size ~cluster_size 
@@ -487,14 +486,12 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   
-
-
   let start s =
     let test_sizes = [200000] in
     let rec loop seed = function
       | [] -> Lwt.return_unit
       | hd::tl -> 
-        start_perf_test s hd seed 
+        start_perf_test ~cluster_size:500 ~stage_size:50000 ~s ~total:hd ~seed 
         >>= fun new_seed ->
         (* Allow router to recover *)
         let interval = 

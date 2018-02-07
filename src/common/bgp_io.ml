@@ -6,61 +6,6 @@ next read. *)
 open Lwt.Infix
 open Bgp
 
-module Util = struct
-  (* let take pfxs len =
-    let rec loop pfxs len acc =
-      match pfxs with
-      | [] -> (acc, [])
-      | pfx::tl ->
-        let mask = Ipaddr.V4.Prefix.bits pfx in
-        let bs = pfxlen_to_bytes mask + 1 in
-        if bs > len then 
-          (acc, pfxs)
-        else 
-          loop tl (len - bs) (pfx::acc)
-    in
-    loop pfxs len []
-  ;;
-
-  let rec split pfxs len =
-    let rec loop pfxs len acc = 
-      let taken, rest = take pfxs len in
-      match rest with
-      | [] -> taken::acc
-      | _ -> loop rest len (taken::acc)
-    in
-    loop pfxs len []
-  ;;
-
-  let split_update update =
-    let rec loop ({ withdrawn; path_attrs; nlri } as u) acc = 
-      if len_update_buffer u <= 4096 then u::acc
-      else
-        let len_fixed = 23 in
-        let len_wd = len_pfxs_buffer withdrawn in
-
-        if len_wd > 4096 - len_fixed then
-          let taken, withdrawn = take withdrawn (4096 - len_fixed) in
-          let update = { withdrawn = taken; path_attrs = []; nlri = [] } in
-          loop { withdrawn; path_attrs; nlri } (update::acc)
-        else
-          let len_pa = len_path_attrs_buffer path_attrs in
-          if len_wd + len_pa + len_fixed >= 4096 then
-            let update = { withdrawn; path_attrs = []; nlri = [] } in
-            loop { withdrawn; path_attrs; nlri } (update::acc)
-          else if len_wd > 0 then
-            let taken, nlri = take nlri (4096 - len_wd - len_pa - len_fixed) in
-            let update = { withdrawn; path_attrs; nlri = taken } in
-            loop { withdrawn = []; path_attrs; nlri } (update::acc)
-          else
-            let taken, nlri = take nlri (4096 - len_pa - len_fixed) in
-            let update = { withdrawn = []; path_attrs; nlri = taken } in
-            loop { withdrawn; path_attrs; nlri } (update::acc)
-    in
-    loop update []
-  ;; *)
-end
-
 module type S = sig
   type s
   type t
@@ -70,7 +15,6 @@ module type S = sig
   | `Closed
   | `PARSE_ERROR of Bgp.parse_error
   | Mirage_protocols.Tcp.error
-  | `Closed_by_local
   ]
   type write_error
   
@@ -97,7 +41,6 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   | `Closed
   | `PARSE_ERROR of Bgp.parse_error
   | Mirage_protocols.Tcp.error
-  | `Closed_by_local
   ]
   type write_error = S.TCPV4.write_error
 
@@ -144,9 +87,9 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         match err with 
         | `Refused -> Lwt.return (Error `Refused)
         | `Timeout -> Lwt.return (Error `Timeout)
-        | _ -> 
-          Io_log.warn (fun m -> m "Some unknown exception: %a" S.TCPV4.pp_error err);
-          Lwt.return (Error `Closed_by_local)
+        | err -> 
+          Io_log.err (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
+          Lwt.fail_with "Crash due to unchecked exception."
       end
       | Ok (`Data b) -> begin
         if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then begin
@@ -168,34 +111,13 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           | `Refused -> Lwt.return (Error `Refused)
           | `Timeout -> Lwt.return (Error `Timeout)
           | err ->
-            (* Io_log.err (fun m -> m "Unknown TCP read error. Have you closed the flow before reading it?"); 
-            Lwt.fail_with "Unknown TCP read error. Have you closed the flow before reading it?" *)
-            Io_log.warn (fun m -> m "Some unknown exception: %a" S.TCPV4.pp_error err);
-            Lwt.return (Error `Closed_by_local)
+            Io_log.err (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
+            Lwt.fail_with "Crash due to unchecked exception."
         end
       else parse t b
   ;;
 
-  let write t msg = 
-    (* match msg with
-    | Open _ | Keepalive | Notification _ -> S.TCPV4.write t.flow (Bgp.gen_msg msg)
-    | Update u ->
-      Io_log.debug (fun m -> m "checkpoint 3");
-      let split_updates = Util.split_update u in
-      Io_log.debug (fun m -> m "checkpoint 4");
-      let rec sending_loop = function
-        | [] -> Lwt.return (Ok ())
-        | msg::tl -> 
-          S.TCPV4.write t.flow (Bgp.gen_msg (Bgp.Update msg))
-          >>= fun result ->
-          match result with
-          | Error _ -> Lwt.return result
-          | Ok () -> sending_loop tl
-      in
-      sending_loop split_updates *)
-    S.TCPV4.write t.flow (Bgp.gen_msg msg)
-  ;;
-  
+  let write t msg = S.TCPV4.write t.flow (Bgp.gen_msg msg)
 
   let close t = S.TCPV4.close t.flow
 
