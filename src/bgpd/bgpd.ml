@@ -537,7 +537,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     | _ -> Lwt.return_unit
   ;;
 
-  let rec command_loop console id_map =
+  let rec command_loop console peers =
     C.read console >>= function
     | Error err -> 
       Bgp_log.warn (fun m -> m "Fail to read command: %a" C.pp_error err);
@@ -552,15 +552,15 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
           handle_event t (Fsm.Manual_start)
         in
-        let _ = Id_map.map f id_map in
-        command_loop console id_map
+        let _ = Id_map.map f peers in
+        command_loop console peers
       | "stop" -> 
         let f t =
           Bgp_log.info (fun m -> m "BGP stops." ~tags:(stamp t.remote_id));
           handle_event t (Fsm.Manual_stop)
         in
-        let _ = Id_map.map f id_map in
-        command_loop console id_map
+        let _ = Id_map.map f peers in
+        command_loop console peers
       | "show peers" ->
         let f t =
           let fsm = Printf.sprintf "FSM: %s" (Fsm.to_string t.fsm) in
@@ -580,34 +580,15 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           in
           Bgp_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string t.remote_id) (String.concat "\n" [fsm; running_dev; msgs]));
         in
-        let _ = Id_map.map f id_map in
-        command_loop console id_map
-      (* | "show rib detail" ->
-        let input = 
-          match t.input_rib with
-          | None -> "No IN RIB."
-          | Some rib -> Printf.sprintf "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)
+        let _ = Id_map.map f peers in
+        command_loop console peers
+      | "show routes" ->
+        let () = 
+          match !Rib.Loc_rib.t_ref with
+          | None -> Bgp_log.info (fun m -> m "Empty")
+          | Some rib -> Bgp_log.info (fun m -> m "%s" (Rib.Loc_rib.to_string rib))
         in
-
-                  let rib =
-
-
-            let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
-          
-            (String.concat "; " [input; loc; output])
-          in
-
-        let loc = Printf.sprintf "%s" (Rib.Loc_rib.to_string t.loc_rib) in
-
-        let output = 
-          match t.output_rib with
-          | None -> "No OUT RIB."
-          | Some rib -> Printf.sprintf "Adj_RIB_OUT \n %s" (Rib.Adj_rib.to_string rib)
-        in
-
-        Bgp_log.info (fun m -> m "%s" (String.concat "\n" [input; loc; output]) ~tags:(stamp t.remote_id));
-        
-        command_loop t *)
+        command_loop console peers
       | "show gc" ->
         let word_to_KB ws = ws * 8 / 1024 in
 
@@ -621,12 +602,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                 gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
         Bgp_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
         
-        command_loop console id_map
+        command_loop console peers
       | "exit" ->
         Lwt.return_unit
       | str -> 
         Bgp_log.info (fun m -> m "Unrecognised command %s" str);
-        command_loop console id_map
+        command_loop console peers
   ;;
 
   (* let parse_config kv =

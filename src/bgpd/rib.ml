@@ -28,6 +28,7 @@ module Adj_rib_in = struct
   
   
   type t = {
+    mutable running: bool;
     remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
     db: Bgp.path_attrs Prefix_map.t;
@@ -36,6 +37,7 @@ module Adj_rib_in = struct
   }
 
   let set_db new_db t = {
+    running = t.running;
     remote_id = t.remote_id;
     callback = t.callback;
     db = new_db;
@@ -66,37 +68,39 @@ module Adj_rib_in = struct
   ;;
 
   let rec handle_loop t = 
-    Lwt_stream.get t.stream >>= function
-    | None -> Lwt.return_unit
-    | Some input -> begin
-      match input with
-      | Push update -> 
-        let new_db, out_update = update_db update t.db in
-        let new_t = set_db new_db t in
-        if is_empty_update out_update then handle_loop new_t
-        else 
-          (* Handle the callback before handling next input request. This guarantees update message ordering *)
-          t.callback out_update
+    if not t.running then Lwt.return_unit
+    else
+      Lwt_stream.get t.stream >>= function
+      | None -> Lwt.return_unit
+      | Some input -> begin
+        match input with
+        | Push update -> 
+          let new_db, out_update = update_db update t.db in
+          let new_t = set_db new_db t in
+          if is_empty_update out_update then handle_loop new_t
+          else 
+            (* Handle the callback before handling next input request. This guarantees update message ordering *)
+            t.callback out_update
+            >>= fun () ->
+            handle_loop new_t
+        | Pull pfx_list -> begin
+          let f pfx =
+            match Prefix_map.find_opt pfx t.db with
+            | None -> Lwt.return_unit
+            | Some path_attrs ->
+              let update = {
+                withdrawn = [];
+                path_attrs;
+                nlri = [ pfx ];
+              } in
+              t.callback update
+          in
+          Lwt.join (List.map f pfx_list)
           >>= fun () ->
-          handle_loop new_t
-      | Pull pfx_list -> begin
-        let f pfx =
-          match Prefix_map.find_opt pfx t.db with
-          | None -> Lwt.return_unit
-          | Some path_attrs ->
-            let update = {
-              withdrawn = [];
-              path_attrs;
-              nlri = [ pfx ];
-            } in
-            t.callback update
-        in
-        Lwt.join (List.map f pfx_list)
-        >>= fun () ->
-        handle_loop t
-      end
+          handle_loop t
+        end
       | Stop -> Lwt.return_unit
-    end
+      end
   ;;
 
   let create remote_id callback : t = 
@@ -104,6 +108,7 @@ module Adj_rib_in = struct
     let stream, pf = Lwt_stream.create () in
     let db = Prefix_map.empty in
     let t = {
+      running = true;
       remote_id; callback; db;
       stream; pf;
     } in
@@ -115,22 +120,13 @@ module Adj_rib_in = struct
   ;;
 
   let input t input = t.pf (Some input)
+  
   let push_update t update = input t (Push update)
-  let stop t = input t Stop
-
-  let to_string t =
-    let pfxs_str = 
-      let f pfx pa acc = 
-        let pfx_str = Printf.sprintf "%s | %s" (Ipaddr.V4.Prefix.to_string pfx) (Bgp.path_attrs_to_string pa) in
-        List.cons pfx_str acc
-      in 
-      String.concat "\n" (Prefix_map.fold f t.db [])
-    in
-
-    Printf.sprintf "Adj_RIB \n Remote: %s \n Prefixes: %s" (Ipaddr.V4.to_string t.remote_id) pfxs_str
+  
+  let stop t = 
+    input t Stop;
+    t.running <- false
   ;;
-
-  let size t = Prefix_map.cardinal t.db
 end
 
 
@@ -143,6 +139,7 @@ module Adj_rib_out = struct
     | Stop
 
   type t = {
+    mutable running: bool;
     remote_id: Ipaddr.V4.t;
     callback: update -> unit Lwt.t;
     past_routes: Prefix_set.t;
@@ -151,6 +148,7 @@ module Adj_rib_out = struct
   }
 
   let set_past_routes pr t = {
+    running = t.running;
     remote_id = t.remote_id;
     callback = t.callback;
     past_routes = pr;
@@ -225,67 +223,70 @@ module Adj_rib_out = struct
   ;;
     
   let rec handle_loop t = 
-    Lwt_stream.peek t.stream >>= function
-    | None -> Lwt.return_unit
-    | Some _ -> 
-      let inputs = Lwt_stream.get_available t.stream in
-      match List.exists (fun i -> i = Stop) inputs with
-      | true -> 
-        (* Dump any unhandled inputs when the RIB is stopped *)
-        Lwt.return_unit
-      | false ->
-        let rev_updates = 
-          let f acc i = match i with
-            | Stop -> acc
-            | Push u -> u::acc
+    if not t.running then Lwt.return_unit
+    else begin
+      Lwt_stream.peek t.stream >>= function
+      | None -> Lwt.return_unit
+      | Some _ -> 
+        let inputs = Lwt_stream.get_available t.stream in
+        match List.exists (fun i -> i = Stop) inputs with
+        | true -> 
+          (* Dump any unhandled inputs when the RIB is stopped *)
+          Lwt.return_unit
+        | false ->
+          let rev_updates = 
+            let f acc i = match i with
+              | Stop -> acc
+              | Push u -> u::acc
+            in
+            List.fold_left f [] inputs
           in
-          List.fold_left f [] inputs
-        in
 
-        (* Construct the db of updates in reverse time order *)
-        let banned, db = build_db rev_updates in
+          (* Construct the db of updates in reverse time order *)
+          let banned, db = build_db rev_updates in
 
-        (* Compute the withdrawn and insert set *)
-        let wd_set = Prefix_set.inter banned t.past_routes in
-        let insert_set = Prefix_set.of_list (List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings db)) in
-        
-        (* Transform the db into groups based on path_attrs *)
-        let attr_and_pfxs = group db in
+          (* Compute the withdrawn and insert set *)
+          let wd_set = Prefix_set.inter banned t.past_routes in
+          let insert_set = Prefix_set.of_list (List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings db)) in
+          
+          (* Transform the db into groups based on path_attrs *)
+          let attr_and_pfxs = group db in
 
-        (* Generate updates *)
-        let len_fixed = 23 in
-        let wd_updates =
-          let tmp = split (Prefix_set.elements wd_set) ((4096 - len_fixed) / 5) in 
-          List.map (fun pfxs -> { withdrawn = pfxs; path_attrs = []; nlri = [] }) tmp
-        in
-        let insert_updates =
-          let f acc (path_attrs, pfxs) = 
-            let len_attr = len_path_attrs_buffer path_attrs in
-            let tmp = split pfxs ((4096 - len_fixed - len_attr) / 5) in
-            let l = List.map (fun pfxs -> { withdrawn = []; path_attrs; nlri = pfxs }) tmp in
-            l @ acc
+          (* Generate updates *)
+          let len_fixed = 23 in
+          let wd_updates =
+            let tmp = split (Prefix_set.elements wd_set) ((4096 - len_fixed) / 5) in 
+            List.map (fun pfxs -> { withdrawn = pfxs; path_attrs = []; nlri = [] }) tmp
           in
-          List.fold_left f [] attr_and_pfxs
-        in
+          let insert_updates =
+            let f acc (path_attrs, pfxs) = 
+              let len_attr = len_path_attrs_buffer path_attrs in
+              let tmp = split pfxs ((4096 - len_fixed - len_attr) / 5) in
+              let l = List.map (fun pfxs -> { withdrawn = []; path_attrs; nlri = pfxs }) tmp in
+              l @ acc
+            in
+            List.fold_left f [] attr_and_pfxs
+          in
 
-        (* To guarantee the equivalence of operation, must send withdrawn first. *)
-        let updates = wd_updates @ insert_updates in
-        let rec send_loop = function
-          | [] -> Lwt.return_unit
-          | u::tl -> t.callback u >>= fun () -> send_loop tl
-        in
-        send_loop updates >>= fun () ->
-        
-        (* Decision choice: must send all previous updates before handling next batch. *)
-        (* Update data structure *)
-        let n_routes = Prefix_set.union (Prefix_set.diff t.past_routes wd_set) insert_set in
-        let n_t = set_past_routes n_routes t in
+          (* To guarantee the equivalence of operation, must send withdrawn first. *)
+          let updates = wd_updates @ insert_updates in
+          let rec send_loop = function
+            | [] -> Lwt.return_unit
+            | u::tl -> t.callback u >>= fun () -> send_loop tl
+          in
+          send_loop updates >>= fun () ->
+          
+          (* Decision choice: must send all previous updates before handling next batch. *)
+          (* Update data structure *)
+          let n_routes = Prefix_set.union (Prefix_set.diff t.past_routes wd_set) insert_set in
+          let n_t = set_past_routes n_routes t in
 
-        (* Minimal advertisement time interval 50ms *)
-        OS.Time.sleep_ns (Duration.of_ms 0)
-        >>= fun () ->
+          (* Minimal advertisement time interval 50ms *)
+          OS.Time.sleep_ns (Duration.of_ms 0)
+          >>= fun () ->
 
-        handle_loop n_t
+          handle_loop n_t
+    end
   ;;
 
 
@@ -294,6 +295,7 @@ module Adj_rib_out = struct
     let stream, pf = Lwt_stream.create () in
     let past_routes = Prefix_set.empty in
     let t = {
+      running = true;
       remote_id; callback; past_routes;
       stream; pf;
     } in
@@ -303,11 +305,13 @@ module Adj_rib_out = struct
 
     t
   ;;
-
   let input t input = t.pf (Some input)
 
   let push_update t u = input t (Push u) 
-  let stop t = input t Stop
+  let stop t = 
+    input t Stop;
+    t.running <- false
+  ;;
 end
 
 
@@ -328,6 +332,7 @@ module Loc_rib = struct
   }
 
   type t = {
+    mutable running: bool;
     local_asn: int32;
     local_id: Ipaddr.V4.t;
     subs: peer Ip_map.t;
@@ -337,6 +342,7 @@ module Loc_rib = struct
   }
 
   let set_subs subs t = {
+    running = t.running;
     local_asn = t.local_asn;
     local_id = t.local_id;
     subs;
@@ -346,6 +352,7 @@ module Loc_rib = struct
   }
 
   let set_db db t = {
+    running = t.running;
     local_asn = t.local_asn;
     local_id = t.local_id;
     subs = t.subs;
@@ -499,106 +506,109 @@ module Loc_rib = struct
 
   let rec handle_loop t = 
     t_ref := Some t;
-    Lwt_stream.get t.stream >>= function
-    | None -> Lwt.return_unit
-    | Some input ->
-      match input with
-      | Stop -> Lwt.return_unit
-      | Push (remote_id, update) ->
-        if not (Ip_map.mem remote_id t.subs) then handle_loop t
-        else begin
-          let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
-          
-          let ip_and_peer = Ip_map.bindings t.subs in
 
-          (* Send the updates: blocking *)
-          let () = 
-            if not (is_empty_update out_update) then
-              let f (peer_id, peer) = 
-                if peer_id <> remote_id then 
-                  Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
-              in
-              List.iter f ip_and_peer
-            else ()
+    if not t.running then Lwt.return_unit
+    else
+      Lwt_stream.get t.stream >>= function
+      | None -> Lwt.return_unit
+      | Some input ->
+        match input with
+        | Stop -> Lwt.return_unit
+        | Push (remote_id, update) ->
+          if not (Ip_map.mem remote_id t.subs) then handle_loop t
+          else begin
+            let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
+            
+            let ip_and_peer = Ip_map.bindings t.subs in
+
+            (* Send the updates: blocking *)
+            let () = 
+              if not (is_empty_update out_update) then
+                let f (peer_id, peer) = 
+                  if peer_id <> remote_id then 
+                    Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+                in
+                List.iter f ip_and_peer
+              else ()
+            in
+
+            (* Pull routes: blocking *)
+            let () = 
+              if out_update.withdrawn <> [] then
+                let f (_, peer) =
+                  Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+                in
+                List.iter f ip_and_peer
+              else ()
+            in
+
+            let new_t = set_db new_db t in
+            handle_loop new_t
+          end
+        | Sub (remote_id, in_rib, out_rib) -> begin
+          if Ip_map.mem remote_id t.subs then
+            Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
+                                    (Ipaddr.V4.to_string remote_id));
+          
+          let new_subs = Ip_map.add remote_id { remote_id; in_rib; out_rib } t.subs in
+          let new_t = set_subs new_subs t in
+            
+          (* Synchronize with peer: blocking *)
+          let () =
+            let f (pfx, (attr, _)) = 
+              let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
+              Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+            in
+            List.iter f (Prefix_map.bindings t.db)
           in
 
-          (* Pull routes: blocking *)
-          let () = 
-            if out_update.withdrawn <> [] then
-              let f (_, peer) =
+          handle_loop new_t
+        end
+        | Unsub remote_id ->
+          if not (Ip_map.mem remote_id t.subs) then
+            Rib_log.err (fun m -> m "No rib subscription for remote %s" 
+                                      (Ipaddr.V4.to_string remote_id));
+
+          (* Update subscribed ribs *)
+          let new_subs = Ip_map.remove remote_id t.subs in
+
+          let out_wd = get_assoc_pfxes t.db remote_id in
+
+          (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
+          match out_wd = [] with
+          | true -> 
+            let new_t = set_subs new_subs t in
+            handle_loop new_t
+          | false ->
+            (* Generate update *)
+            let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
+
+            (* Update db *)
+            let new_db = 
+              let f acc pfx = Prefix_map.remove pfx acc in
+              List.fold_left f t.db out_wd
+            in
+
+            let new_t = t |> set_subs new_subs |> set_db new_db in
+            let ip_and_peer = Ip_map.bindings new_t.subs in
+
+            (* Send the updates: blocking *)
+            let () =  
+              let f (peer_id, peer) = 
+                Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+              in
+              List.iter f ip_and_peer
+            in
+
+            (* Pull routes *)
+            let () =
+              let f (peer_id, peer) =
                 Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
               in
               List.iter f ip_and_peer
-            else ()
-          in
-
-          let new_t = set_db new_db t in
-          handle_loop new_t
-        end
-      | Sub (remote_id, in_rib, out_rib) -> begin
-        if Ip_map.mem remote_id t.subs then
-          Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
-                                   (Ipaddr.V4.to_string remote_id));
-        
-        let new_subs = Ip_map.add remote_id { remote_id; in_rib; out_rib } t.subs in
-        let new_t = set_subs new_subs t in
-          
-        (* Synchronize with peer: blocking *)
-        let () =
-          let f (pfx, (attr, _)) = 
-            let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
-            Adj_rib_out.input out_rib (Adj_rib_out.Push update)
-          in
-          List.iter f (Prefix_map.bindings t.db)
-        in
-
-        handle_loop new_t
-      end
-      | Unsub remote_id ->
-        if not (Ip_map.mem remote_id t.subs) then
-          Rib_log.err (fun m -> m "No rib subscription for remote %s" 
-                                    (Ipaddr.V4.to_string remote_id));
-
-        (* Update subscribed ribs *)
-        let new_subs = Ip_map.remove remote_id t.subs in
-
-        let out_wd = get_assoc_pfxes t.db remote_id in
-
-        (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
-        match out_wd = [] with
-        | true -> 
-          let new_t = set_subs new_subs t in
-          handle_loop new_t
-        | false ->
-          (* Generate update *)
-          let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
-
-          (* Update db *)
-          let new_db = 
-            let f acc pfx = Prefix_map.remove pfx acc in
-            List.fold_left f t.db out_wd
-          in
-
-          let new_t = t |> set_subs new_subs |> set_db new_db in
-          let ip_and_peer = Ip_map.bindings new_t.subs in
-
-          (* Send the updates: blocking *)
-          let () =  
-            let f (peer_id, peer) = 
-              Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
             in
-            List.iter f ip_and_peer
-          in
 
-          (* Pull routes *)
-          let () =
-            let f (peer_id, peer) =
-              Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
-            in
-            List.iter f ip_and_peer
-          in
-
-          handle_loop new_t
+            handle_loop new_t
   ;;
 
 
@@ -606,6 +616,7 @@ module Loc_rib = struct
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let t = {
+      running = true;
       local_id; local_asn;
       subs = Ip_map.empty;
       db = Prefix_map.empty;
@@ -640,7 +651,13 @@ module Loc_rib = struct
 
   let input t input = t.pf (Some input)
   let push_update t (id, u) = input t (Push (id, u)) 
-  let stop t = input t Stop
+  
+  let stop t = 
+    input t Stop;
+    t.running <- false;
+    t_ref := None
+  ;;
+
   let sub t (id, in_rib, out_rib) = input t (Sub (id, in_rib, out_rib))
   let unsub t id = input t (Unsub id) 
 end
