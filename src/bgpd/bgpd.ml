@@ -117,6 +117,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
               Fsm.Keepalive_msg
           in
           Bgp_log.debug (fun m -> m "receive message %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id));
+          
+          (* Spawn thread to handle the new message *)
           let _ = callback event in
 
           (* Load balancing *)
@@ -179,14 +181,10 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
   let init_tcp_connection t callback =
     Bgp_log.info (fun m -> m "try setting up TCP connection with remote" ~tags:(stamp t.remote_id));
-    if not (t.conn_starter = None) then begin
-      Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter." ~tags:(stamp t.remote_id));
-      Lwt.return_unit
-    end
-    else if not (t.flow = None) then begin
-      Bgp_log.warn (fun m -> m "new connection is initiated when there exists an old connection." ~tags:(stamp t.remote_id));
-      Lwt.return_unit
-    end
+    if not (t.conn_starter = None) then
+      Bgp_log.warn (fun m -> m "new connection is initiated when there exists another conn starter." ~tags:(stamp t.remote_id))
+    else if not (t.flow = None) then
+      Bgp_log.warn (fun m -> m "new connection is initiated when there exists an old connection." ~tags:(stamp t.remote_id))
     else begin
       let task = fun () ->
         Bgp_flow.create_connection t.socket (t.remote_id, t.remote_port)
@@ -196,9 +194,13 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         match result with
         | Error err ->
           (match err with
-          | `Timeout -> Bgp_log.info (fun m -> m "Connection init timeout." ~tags:(stamp t.remote_id))
-          | `Refused -> Bgp_log.info (fun m -> m "Connection init refused." ~tags:(stamp t.remote_id))
-          | _ -> Bgp_log.info (fun m -> m "Unknown connection init error." ~tags:(stamp t.remote_id)));
+          | `Timeout -> 
+            Bgp_log.info (fun m -> m "Connection init timeout." ~tags:(stamp t.remote_id))
+          | `Refused -> 
+            Bgp_log.info (fun m -> m "Connection init refused." ~tags:(stamp t.remote_id))
+          | err -> 
+            Bgp_log.info (fun m -> m "Unknown connection init error %a." 
+                                    S.TCPV4.pp_error err ~tags:(stamp t.remote_id)));
           
           callback (Fsm.Tcp_connection_fail)
         | Ok flow -> begin
@@ -239,8 +241,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
             Bgp_flow.close flow
         end
       in
-      t.conn_starter <- Some (Device.create task wrapped_callback);
-      Lwt.return_unit
+      t.conn_starter <- Some (Device.create task wrapped_callback)
     end
   ;;      
 
@@ -363,20 +364,24 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     send_msg t (Bgp.Open o) 
   ;;
 
-  let drop_tcp_connection t =    
-    (match t.conn_starter with
-    | None -> ()
-    | Some d -> 
-      Bgp_log.debug (fun m -> m "close conn starter." ~tags:(stamp t.remote_id)); 
-      t.conn_starter <- None;
-      Device.stop d);
+  let drop_tcp_connection t =
+    let () =    
+      match t.conn_starter with
+      | None -> ()
+      | Some d -> 
+        Bgp_log.debug (fun m -> m "close conn starter." ~tags:(stamp t.remote_id)); 
+        t.conn_starter <- None;
+        Device.stop d
+    in
 
-    (match t.flow_reader with
-    | None -> ()
-    | Some d -> 
-      Bgp_log.debug  (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
-      t.flow_reader <- None;
-      Device.stop d);
+    let () =
+      match t.flow_reader with
+      | None -> ()
+      | Some d -> 
+        Bgp_log.debug  (fun m -> m "close flow reader." ~tags:(stamp t.remote_id)); 
+        t.flow_reader <- None;
+        Device.stop d
+    in
     
     match t.flow with
     | None -> Lwt.return_unit
@@ -386,86 +391,90 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       Bgp_flow.close flow;
   ;;
 
-
-  let rec perform_action t action =
+  (* Design choices: I want all actions to be performed in a blocking way. *)
+  (* No other thread can update the data structure before all actions are performed. *)
+  let rec perform_action t action : unit =
     let open Fsm in
     let callback = fun event -> handle_event t event in
     match action with
     | Initiate_tcp_connection -> init_tcp_connection t callback
-    | Send_open_msg -> send_open_msg t
-    | Send_msg msg -> send_msg t msg
-    | Drop_tcp_connection -> drop_tcp_connection t
+    | Send_open_msg -> 
+      let _ = send_open_msg t in
+      ()
+    | Send_msg msg -> 
+      let _ = send_msg t msg in
+      ()
+    | Drop_tcp_connection -> 
+      let _ = drop_tcp_connection t in
+      ()
     | Start_conn_retry_timer -> 
-      if (t.fsm.conn_retry_time > 0) then begin
+      if (t.fsm.conn_retry_time > 0) then
         let callback () =
           t.conn_retry_timer <- None;
           handle_event t Connection_retry_timer_expired
         in
-        t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
-      end;
-      Lwt.return_unit
+        t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback)
     | Stop_conn_retry_timer -> begin
       match t.conn_retry_timer with
-      | None -> Lwt.return_unit
-      | Some d -> t.conn_retry_timer <- None; Device.stop d; Lwt.return_unit
+      | None -> ()
+      | Some d -> t.conn_retry_timer <- None; Device.stop d
     end
     | Reset_conn_retry_timer -> begin
-      (match t.conn_retry_timer with
-      | None -> ()
-      | Some t -> Device.stop t);
-      if (t.fsm.conn_retry_time > 0) then begin
+      let () =
+        match t.conn_retry_timer with
+        | None -> ()
+        | Some t -> Device.stop t
+      in
+      if (t.fsm.conn_retry_time > 0) then
         let callback () =
           t.conn_retry_timer <- None;
           handle_event t Connection_retry_timer_expired
         in
-        t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback);
-      end;
-      Lwt.return_unit
+        t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback)
     end
     | Start_hold_timer ht -> 
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired));
-      Lwt.return_unit
+        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired))
     | Stop_hold_timer -> begin
       match t.hold_timer with
-      | None -> Lwt.return_unit
-      | Some d -> t.hold_timer <- None; Device.stop d; Lwt.return_unit
+      | None -> ()
+      | Some d -> t.hold_timer <- None; Device.stop d
     end
     | Reset_hold_timer ht -> begin
-      (match t.hold_timer with
-      | None -> ()
-      | Some d -> Device.stop d);
+      let () =
+        match t.hold_timer with
+        | None -> ()
+        | Some d -> Device.stop d
+      in
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired));
-      Lwt.return_unit
+        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired))
     end
     | Start_keepalive_timer -> 
       if (t.fsm.keepalive_time > 0) then 
         t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time 
-                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired));
-      Lwt.return_unit
+                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired))
     | Stop_keepalive_timer -> begin
       match t.keepalive_timer with
-      | None -> Lwt.return_unit
-      | Some d -> t.keepalive_timer <- None; Device.stop d; Lwt.return_unit
+      | None -> ()
+      | Some d -> t.keepalive_timer <- None; Device.stop d
     end
     | Reset_keepalive_timer -> begin
-      (match t.keepalive_timer with
-      | None -> ()
-      | Some t -> Device.stop t);
+      let () =
+        match t.keepalive_timer with
+        | None -> ()
+        | Some t -> Device.stop t
+      in
       if (t.fsm.keepalive_time > 0) then 
         t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time 
-                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired));
-      Lwt.return_unit
+                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired))
     end
     | Process_update_msg u -> begin
       match t.input_rib with
       | None -> 
         Bgp_log.err (fun m -> m "Input RIB not initiated"); 
-        Lwt.fail_with "Input RIB not initiated."
+        failwith "Input RIB not initiated."
       | Some rib -> 
-        Rib.Adj_rib_in.push_update rib u;
-        Lwt.return_unit
+        Rib.Adj_rib_in.push_update rib u
     end
     | Initiate_rib ->
       let in_rib = 
@@ -483,8 +492,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       in
       t.output_rib <- Some out_rib;
 
-      Rib.Loc_rib.sub t.loc_rib (t.remote_id, in_rib, out_rib);
-      Lwt.return_unit
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, in_rib, out_rib)
     | Release_rib ->
       let () =
         match t.input_rib with
@@ -502,8 +510,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           Rib.Adj_rib_out.stop rib
       in
 
-      let () = Rib.Loc_rib.unsub t.loc_rib t.remote_id in
-      Lwt.return_unit
+      Rib.Loc_rib.unsub t.loc_rib t.remote_id
       
   
   and handle_event t event =
@@ -511,23 +518,13 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     
     (* Update finite state machine before performing any action. *)
     t.fsm <- new_fsm;
-    
-    (* Design choices: Perform actions from left to right before  *)
-    let rec perform_actions = function
-      | [] -> Lwt.return_unit
-      | hd::tl ->
-        let handle exn =
-          let raw_trace = Printexc.get_backtrace () in
-          Bgp_log.err (fun m -> m "Some exception has occured: %s \n %s" (Printexc.to_string exn)raw_trace);
-          (* Lwt.fail exn  *)
-          Lwt.return_unit
-        in
-        Lwt.catch (fun () -> perform_action t hd) handle
-        >>= fun () ->
-        perform_actions tl
+
+    (* Blocking perform all actions *)
+    let () =
+      let f t act = perform_action t act in
+      List.iter (f t) actions
     in
-    let _ = perform_actions actions in
-    
+      
     match Fsm.state t.fsm with
     | Fsm.IDLE -> begin
       match event with

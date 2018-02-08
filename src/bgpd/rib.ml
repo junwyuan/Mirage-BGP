@@ -115,7 +115,6 @@ module Adj_rib_in = struct
   ;;
 
   let input t input = t.pf (Some input)
-
   let push_update t update = input t (Push update)
   let stop t = input t Stop
 
@@ -282,8 +281,8 @@ module Adj_rib_out = struct
         let n_routes = Prefix_set.union (Prefix_set.diff t.past_routes wd_set) insert_set in
         let n_t = set_past_routes n_routes t in
 
-        (* Here is the pull timer, hard-coded 50ms *)
-        OS.Time.sleep_ns (Duration.of_ms 50)
+        (* Minimal advertisement time interval 50ms *)
+        OS.Time.sleep_ns (Duration.of_ms 0)
         >>= fun () ->
 
         handle_loop n_t
