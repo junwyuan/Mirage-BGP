@@ -464,34 +464,47 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         Bgp_log.err (fun m -> m "Input RIB not initiated"); 
         Lwt.fail_with "Input RIB not initiated."
       | Some rib -> 
-        Rib.Adj_rib_in.handle_update rib u
+        Rib.Adj_rib_in.push_update rib u;
+        Lwt.return_unit
     end
     | Initiate_rib ->
-      let input_rib = 
+      let in_rib = 
         let callback u = 
-          Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Update (u, t.remote_id)) 
+          Rib.Loc_rib.push_update t.loc_rib (t.remote_id, u);
+          Lwt.return_unit
         in
         Rib.Adj_rib_in.create t.remote_id callback
       in
-      t.input_rib <- Some input_rib;
+      t.input_rib <- Some in_rib;
 
-      let output_rib =
-        let callback u = 
-          send_msg t (Bgp.Update u)
-        in
+      let out_rib =
+        let callback u = send_msg t (Bgp.Update u) in
         Rib.Adj_rib_out.create t.remote_id callback
       in
-      t.output_rib <- Some output_rib;
+      t.output_rib <- Some out_rib;
 
-      Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Subscribe output_rib)
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, in_rib, out_rib);
+      Lwt.return_unit
     | Release_rib ->
-      t.input_rib <- None;
-      match t.output_rib with
-      | None -> Lwt.return_unit
-      | Some rib -> 
-        t.output_rib <- None; 
-        Rib.Adj_rib_out.close rib;
-        Rib.Loc_rib.handle_signal t.loc_rib (Rib.Loc_rib.Unsubscribe rib)
+      let () =
+        match t.input_rib with
+        | None -> ()
+        | Some rib ->
+          t.input_rib <- None;
+          Rib.Adj_rib_in.stop rib
+      in
+
+      let () = 
+        match t.output_rib with
+        | None -> ()
+        | Some rib -> 
+          t.output_rib <- None; 
+          Rib.Adj_rib_out.stop rib
+      in
+
+      let () = Rib.Loc_rib.unsub t.loc_rib t.remote_id in
+      Lwt.return_unit
+      
   
   and handle_event t event =
     let new_fsm, actions = Fsm.handle t.fsm event in
@@ -499,7 +512,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (* Update finite state machine before performing any action. *)
     t.fsm <- new_fsm;
     
-    (* Spawn threads to perform actions from left to right *)
+    (* Design choices: Perform actions from left to right before  *)
     let rec perform_actions = function
       | [] -> Lwt.return_unit
       | hd::tl ->
@@ -563,29 +576,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
             let str_list = List.filter (fun x -> not (x = "")) [dev1; dev2; dev3; dev4; dev5] in
             Printf.sprintf "Running Dev: %s" (String.concat "; " str_list)
           in
-          let rib =
-            let input = 
-            match t.input_rib with
-              | None -> "No IN RIB."
-              | Some rib -> Printf.sprintf "Adj_RIB_IN %d" (Rib.Adj_rib_in.size rib)
-            in
-
-            let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
-              
-            let output = 
-              match t.output_rib with
-              | None -> "No OUT RIB"
-              | Some rib -> Printf.sprintf "Adj_RIB_OUT %d" (Rib.Adj_rib_out.size rib)
-            in
-          
-            (String.concat "; " [input; loc; output])
-          in
           let msgs = 
             Printf.sprintf "Sent: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE; \n Rec: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE"
                           t.stat.sent_open t.stat.sent_update t.stat.sent_notif t.stat.sent_keepalive
                           t.stat.rec_open t.stat.rec_update t.stat.rec_notif t.stat.rec_keepalive
           in
-          Bgp_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string t.remote_id) (String.concat "\n" [fsm; running_dev; rib; msgs]));
+          Bgp_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string t.remote_id) (String.concat "\n" [fsm; running_dev; msgs]));
         in
         let _ = Id_map.map f id_map in
         command_loop console id_map
@@ -595,6 +591,14 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           | None -> "No IN RIB."
           | Some rib -> Printf.sprintf "Adj_RIB_IN \n %s" (Rib.Adj_rib.to_string rib)
         in
+
+                  let rib =
+
+
+            let loc = Printf.sprintf "Loc_RIB %d" (Rib.Loc_rib.size t.loc_rib) in
+          
+            (String.concat "; " [input; loc; output])
+          in
 
         let loc = Printf.sprintf "%s" (Rib.Loc_rib.to_string t.loc_rib) in
 
@@ -645,7 +649,9 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   ;; *)
         
   let start console s =
-    (* Enable backtrace *)
+    let open Config_parser in
+
+    (* Record backtrace *)
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
@@ -653,16 +659,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     let config = Config_parser.default_config in
 
     (* Init loc-rib *)
-    let loc_rib = Rib.Loc_rib.create config in
+    let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn in
 
-    let local_port = 
-      let open Config_parser in
-      config.local_port
-    in
+    let local_port = config.local_port in
     
     (* Init shared data *)
     let init_t peer =
-      let open Config_parser in
       let stat = {
         sent_open = 0;
         sent_update = 0;
@@ -698,23 +700,20 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       }
     in
     
-    let t_list = 
-      let open Config_parser in
-      List.map init_t config.peers 
-    in
-    let id_map = List.fold_left (fun acc t -> Id_map.add t.remote_id t acc) (Id_map.empty) t_list in
+    let t_list = List.map init_t config.peers in
+    let peers = List.fold_left (fun acc (t: t) -> Id_map.add t.remote_id t acc) (Id_map.empty) t_list in
 
     (* Start listening to BGP port. *)
-    listen_tcp_connection s local_port id_map handle_event;
+    listen_tcp_connection s local_port peers handle_event;
     
-    (* Automatic start *)
-    let f t =
+    (* Automatic passive start *)
+    let f (t: t) =
       Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
       handle_event t Fsm.Automatic_start_passive_tcp
     in
-    let _ = Id_map.map f id_map in
+    let _ = Id_map.map f peers in
 
-    command_loop console id_map
+    command_loop console peers
     >>= fun () ->
 
     (* Clean up *)

@@ -114,10 +114,10 @@ module Adj_rib_in = struct
     t
   ;;
 
-  let input t input = 
-    t.pf (Some input);
-    Lwt.return_unit
-  ;;
+  let input t input = t.pf (Some input)
+
+  let push_update t update = input t (Push update)
+  let stop t = input t Stop
 
   let to_string t =
     let pfxs_str = 
@@ -305,10 +305,10 @@ module Adj_rib_out = struct
     t
   ;;
 
-  let input t input = 
-    t.pf (Some input);
-    Lwt.return_unit
-  ;;
+  let input t input = t.pf (Some input)
+
+  let push_update t u = input t (Push u) 
+  let stop t = input t Stop
 end
 
 
@@ -506,37 +506,36 @@ module Loc_rib = struct
       match input with
       | Stop -> Lwt.return_unit
       | Push (remote_id, update) ->
-        let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
-        
-        let ip_and_peer = Ip_map.bindings t.subs in
+        if not (Ip_map.mem remote_id t.subs) then handle_loop t
+        else begin
+          let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
+          
+          let ip_and_peer = Ip_map.bindings t.subs in
 
-        (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
-        (* Send the updates *)
-        (match is_empty_update out_update with
-        | true -> Lwt.return_unit
-        | false ->
-          let f (peer_id, peer) = 
-            if peer_id = remote_id then 
-              (* Don't propagate updates to the src peer *)
-              Lwt.return_unit
-            else 
-              Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+          (* Send the updates: blocking *)
+          let () = 
+            if not (is_empty_update out_update) then
+              let f (peer_id, peer) = 
+                if peer_id <> remote_id then 
+                  Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+              in
+              List.iter f ip_and_peer
+            else ()
           in
-          Lwt.join (List.map f ip_and_peer))
-        >>= fun () ->
 
-        (* Pull routes *)
-        (match out_update.withdrawn = [] with
-        | true -> Lwt.return_unit
-        | false ->
-          let f (_, peer) =
-            Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+          (* Pull routes: blocking *)
+          let () = 
+            if out_update.withdrawn <> [] then
+              let f (_, peer) =
+                Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+              in
+              List.iter f ip_and_peer
+            else ()
           in
-          Lwt.join (List.map f ip_and_peer))
-        >>= fun () ->
 
-        let new_t = set_db new_db t in
-        handle_loop new_t
+          let new_t = set_db new_db t in
+          handle_loop new_t
+        end
       | Sub (remote_id, in_rib, out_rib) -> begin
         if Ip_map.mem remote_id t.subs then
           Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
@@ -545,13 +544,14 @@ module Loc_rib = struct
         let new_subs = Ip_map.add remote_id { remote_id; in_rib; out_rib } t.subs in
         let new_t = set_subs new_subs t in
           
-        (* Synchronize with peer *)
-        let f (pfx, (attr, _)) = 
-          let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
-          Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+        (* Synchronize with peer: blocking *)
+        let () =
+          let f (pfx, (attr, _)) = 
+            let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
+            Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+          in
+          List.iter f (Prefix_map.bindings t.db)
         in
-        Lwt.join (List.map f (Prefix_map.bindings t.db))
-        >>= fun () ->
 
         handle_loop new_t
       end
@@ -583,19 +583,21 @@ module Loc_rib = struct
           let new_t = t |> set_subs new_subs |> set_db new_db in
           let ip_and_peer = Ip_map.bindings new_t.subs in
 
-          (* Send the updates *)
-          let f (peer_id, peer) = 
-            Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+          (* Send the updates: blocking *)
+          let () =  
+            let f (peer_id, peer) = 
+              Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+            in
+            List.iter f ip_and_peer
           in
-          Lwt.join (List.map f ip_and_peer)
-          >>= fun () ->
 
           (* Pull routes *)
-          let f (peer_id, peer) =
-            Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+          let () =
+            let f (peer_id, peer) =
+              Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+            in
+            List.iter f ip_and_peer
           in
-          Lwt.join (List.map f ip_and_peer)
-          >>= fun () ->
 
           handle_loop new_t
   ;;
@@ -637,8 +639,9 @@ module Loc_rib = struct
 
   let size t = Prefix_map.cardinal t.db
 
-  let input t input =
-    t.pf (Some input);
-    Lwt.return_unit
-  ;;
+  let input t input = t.pf (Some input)
+  let push_update t (id, u) = input t (Push (id, u)) 
+  let stop t = input t Stop
+  let sub t (id, in_rib, out_rib) = input t (Sub (id, in_rib, out_rib))
+  let unsub t id = input t (Unsub id) 
 end
