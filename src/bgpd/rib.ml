@@ -3,6 +3,9 @@ open Lwt.Infix
 
 (* Design choices: To avoid dependency loop, I allow Loc-RIB to depend on In-RIB and out-RIB. *)
 (* This does cost some inflxibility as the form of callback is fixed. *)
+(* The interconnection between IN-RIB and Loc-RIB must be defined at initialisation in bgpd.ml *)
+
+(* Design choices: Only routes within the Loc-RIB have updated path_attrs *)
 
 (* Logging *)
 let rib_log = Logs.Src.create ~doc:"RIB logging" "RIB"
@@ -11,8 +14,7 @@ module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 (* The underlying data store is a binary tree *)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
-module Prefix_set = Set.Make(Prefix)
-module Str_map = Map.Make(String)
+
 
 type update = Bgp.update
 let is_empty_update u = u.withdrawn = [] && u.nlri = [] 
@@ -21,7 +23,7 @@ let is_empty_update u = u.withdrawn = [] && u.nlri = []
 module Adj_rib_in = struct
   type input = 
     | Push of update
-    | Pull of Prefix.t
+    | Pull of Prefix.t list
     | Stop
   
   
@@ -77,18 +79,21 @@ module Adj_rib_in = struct
           t.callback out_update
           >>= fun () ->
           handle_loop new_t
-      | Pull pfx -> begin
-        match Prefix_map.find_opt pfx t.db with
-        | None -> handle_loop t
-        | Some path_attrs ->
-          let update = {
-            withdrawn = [];
-            path_attrs;
-            nlri = [ pfx ];
-          } in
-          t.callback update
-          >>= fun () ->
-          handle_loop t
+      | Pull pfx_list -> begin
+        let f pfx =
+          match Prefix_map.find_opt pfx t.db with
+          | None -> Lwt.return_unit
+          | Some path_attrs ->
+            let update = {
+              withdrawn = [];
+              path_attrs;
+              nlri = [ pfx ];
+            } in
+            t.callback update
+        in
+        Lwt.join (List.map f pfx_list)
+        >>= fun () ->
+        handle_loop t
       end
       | Stop -> Lwt.return_unit
     end
@@ -131,6 +136,9 @@ end
 
 
 module Adj_rib_out = struct
+  module Prefix_set = Set.Make(Prefix)
+  module Str_map = Map.Make(String)
+
   type input = 
     | Push of update
     | Stop
@@ -296,101 +304,58 @@ module Adj_rib_out = struct
 
     t
   ;;
+
+  let input t input = 
+    t.pf (Some input);
+    Lwt.return_unit
+  ;;
 end
 
 
 module Loc_rib = struct
-  module Id_map = Map.Make(Ipaddr.V4)
+  
+  module Ip_map = Map.Make(Ipaddr.V4)
+
+  type input = 
+    | Push of Ipaddr.V4.t * update
+    | Sub of Ipaddr.V4.t * Adj_rib_in.t * Adj_rib_out.t
+    | Unsub of Ipaddr.V4.t
+    | Stop
+
+  type peer = {
+    remote_id: Ipaddr.V4.t;
+    in_rib: Adj_rib_in.t;
+    out_rib: Adj_rib_out.t;
+  }
 
   type t = {
     local_asn: int32;
     local_id: Ipaddr.V4.t;
-    mutable subs: Adj_rib_out.t Id_map.t;
-    mutable db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
+    subs: peer Ip_map.t;
+    db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
+    stream: input Lwt_stream.t;
+    pf: input option -> unit;
   }
 
+  let set_subs subs t = {
+    local_asn = t.local_asn;
+    local_id = t.local_id;
+    subs;
+    db = t.db;
+    stream = t.stream;
+    pf = t.pf;
+  }
 
-  type signal = 
-    | Update of (update * Ipaddr.V4.t)
-    | Subscribe of Adj_rib_out.t
-    | Unsubscribe of Adj_rib_out.t
+  let set_db db t = {
+    local_asn = t.local_asn;
+    local_id = t.local_id;
+    subs = t.subs;
+    db;
+    stream = t.stream;
+    pf = t.pf;
+  }
 
-
-  let create config = 
-    let open Config_parser in
-    {
-      local_id =  config.local_id;
-      local_asn = config.local_asn;
-      subs = Id_map.empty;
-      db = Prefix_map.empty;
-    }
-  ;;
-
-
-  let invoke_callback t (update, remote_id) =
-    let open Adj_rib_out in
-    let f k v acc = 
-      match k = remote_id with
-      | true -> acc
-      | false -> (Adj_rib_out.handle_update v update)::acc
-    in
-    Lwt.join (Id_map.fold f t.subs [])
-  ;;
-
-  let is_subscribed t rib = 
-    let open Adj_rib_out in
-    Id_map.mem rib.remote_id t.subs
-  ;;
-
-  let subscribe t rib = 
-    let open Adj_rib_out in
-    match (is_subscribed t rib) with
-    | true ->
-      Rib_log.warn (fun m -> m "Duplicated rib subscription for remote %s" 
-                            (Ipaddr.V4.to_string rib.remote_id));
-      Lwt.return_unit        
-    | false ->
-      t.subs <- Id_map.add rib.remote_id rib t.subs;
-      
-      let f p (pa, _) acc = 
-        let update = { withdrawn = []; path_attrs = pa; nlri = [p] } in
-        List.cons (Adj_rib_out.handle_update rib update) acc
-      in
-      Lwt.join (Prefix_map.fold f t.db [])
-  ;;
-
-  let get_assoc_pfxes db remote_id = 
-    let f acc (pfx, (_, stored_id)) =
-      if remote_id = stored_id then pfx::acc else acc
-    in
-    List.fold_left f [] (Prefix_map.bindings db)
-  ;;
-
-  let remove_assoc_pfxes db pfxs = 
-    let f acc pfx = Prefix_map.remove pfx acc in
-    List.fold_left f db pfxs
-  ;;
-
-  let unsubscribe t rib =
-    let open Adj_rib_out in
-    match not (is_subscribed t rib) with
-    | true ->
-      Rib_log.warn (fun m -> m "No rib subscription for remote %s" 
-                                (Ipaddr.V4.to_string rib.remote_id));
-      Lwt.return_unit
-    | false -> 
-
-      (* Update subscribed ribs *)
-      t.subs <- Id_map.remove rib.remote_id t.subs;
-      (* Update db *)
-      let withdrawn = get_assoc_pfxes t.db rib.remote_id in
-      let new_db = remove_assoc_pfxes t.db withdrawn in
-
-      t.db <- new_db;
-      (* Send withdraw to other peers *)
-      let update = { withdrawn; path_attrs = []; nlri = [] } in
-      invoke_callback t (update, rib.remote_id)
-  ;;
+  let t_ref : t option ref = ref None
   
   let is_aspath_loop local_asn segment_list =
     let f = function
@@ -470,96 +435,210 @@ module Loc_rib = struct
 
 
   (* This function is pure *)
-  let update_db local_id local_asn ({ withdrawn = in_wd; path_attrs; nlri = in_nlri }, peer_id) db =
-
+  let update_db local_id local_asn (peer_id, update) db =
     (* Withdrawn from Loc-RIB *)
-    let (db_aft_wd, out_wd) =
+    let (db_after_wd, out_wd) =
       let f (db, out_wd) pfx = 
-        let opt = Prefix_map.find_opt pfx db in
-        match opt with
+        match Prefix_map.find_opt pfx db with
         | None -> db, out_wd
-        | Some (_, stored) -> if (stored = peer_id) then (Prefix_map.remove pfx db, List.cons pfx out_wd) else db, out_wd
+        | Some (_, stored) -> 
+          if (stored = peer_id) then 
+            (Prefix_map.remove pfx db, List.cons pfx out_wd) 
+          else db, out_wd
       in
-      List.fold_left f (db, []) in_wd
+      List.fold_left f (db, []) update.withdrawn
     in
 
-    (* If the advertised path is looping, don't install any new routes *)
-    if in_nlri = [] || is_aspath_loop local_asn (find_aspath path_attrs) then begin
+    (* If the advertised path is looping, don't install any new routes OR no advertised route *)
+    if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
       let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
-      (db_aft_wd, out_update)
+      (db_after_wd, out_update)
     end else
       let updated_path_attrs = 
-        path_attrs 
+        update.path_attrs 
         |> update_nexthop local_id 
         |> update_aspath local_asn
       in
 
-      let db_aft_insert, out_nlri = 
+      let db_after_insert, out_nlri = 
         let f (db, out_nlri) pfx = 
-          let opt = Prefix_map.find_opt pfx db in
-          match opt with
-          | None -> 
-            (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-          | Some (stored_pattrs, src_id) ->
-            (* If from the same peer, replace without compare *)
-            if src_id = peer_id then 
+          match List.mem pfx out_wd with
+          | true -> 
+            (* We do not install new attrs immediately after withdrawn *)
+            (db, out_nlri)
+          | false ->
+            match Prefix_map.find_opt pfx db with
+            | None -> 
               (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-            else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then begin
-              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-            end
-            else begin
-              db, out_nlri
-            end
+            | Some (stored_pattrs, src_id) ->
+              if src_id = peer_id then 
+                (* If from the same peer, replace without compare *)
+                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
+              else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then
+                (* Replace if the new route is more preferable *)
+                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
+              else db, out_nlri
         in
-        List.fold_left f (db_aft_wd, []) in_nlri
+        List.fold_left f (db_after_wd, []) update.nlri
       in
 
       let out_update = {
         withdrawn = out_wd;
         path_attrs = updated_path_attrs;
         nlri = out_nlri
-      }
-      in 
+      } in 
 
-      (db_aft_insert, out_update)
+      (db_after_insert, out_update)
   ;;
 
-  let handle_update t (update, remote_id) =
-    let new_db, output = update_db t.local_id t.local_asn (update, remote_id) t.db in
-    t.db <- new_db;
-    if output.nlri = [] && output.withdrawn = [] then Lwt.return_unit
-    else invoke_callback t (output, remote_id)
+  let get_assoc_pfxes db remote_id = 
+    let f acc (pfx, (_, stored_id)) =
+      if remote_id = stored_id then pfx::acc else acc
+    in
+    List.fold_left f [] (Prefix_map.bindings db)
   ;;
 
-  let handle_signal t = function
-    | Subscribe rib -> subscribe t rib
-    | Unsubscribe rib -> unsubscribe t rib
-    | Update (update, remote_id) -> handle_update t (update, remote_id)
+  let rec handle_loop t = 
+    t_ref := Some t;
+    Lwt_stream.get t.stream >>= function
+    | None -> Lwt.return_unit
+    | Some input ->
+      match input with
+      | Stop -> Lwt.return_unit
+      | Push (remote_id, update) ->
+        let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
+        
+        let ip_and_peer = Ip_map.bindings t.subs in
+
+        (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
+        (* Send the updates *)
+        (match is_empty_update out_update with
+        | true -> Lwt.return_unit
+        | false ->
+          let f (peer_id, peer) = 
+            if peer_id = remote_id then 
+              (* Don't propagate updates to the src peer *)
+              Lwt.return_unit
+            else 
+              Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+          in
+          Lwt.join (List.map f ip_and_peer))
+        >>= fun () ->
+
+        (* Pull routes *)
+        (match out_update.withdrawn = [] with
+        | true -> Lwt.return_unit
+        | false ->
+          let f (_, peer) =
+            Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+          in
+          Lwt.join (List.map f ip_and_peer))
+        >>= fun () ->
+
+        let new_t = set_db new_db t in
+        handle_loop new_t
+      | Sub (remote_id, in_rib, out_rib) -> begin
+        if Ip_map.mem remote_id t.subs then
+          Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
+                                   (Ipaddr.V4.to_string remote_id));
+        
+        let new_subs = Ip_map.add remote_id { remote_id; in_rib; out_rib } t.subs in
+        let new_t = set_subs new_subs t in
+          
+        (* Synchronize with peer *)
+        let f (pfx, (attr, _)) = 
+          let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
+          Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+        in
+        Lwt.join (List.map f (Prefix_map.bindings t.db))
+        >>= fun () ->
+
+        handle_loop new_t
+      end
+      | Unsub remote_id ->
+        if not (Ip_map.mem remote_id t.subs) then
+          Rib_log.err (fun m -> m "No rib subscription for remote %s" 
+                                    (Ipaddr.V4.to_string remote_id));
+
+        (* Update subscribed ribs *)
+        let new_subs = Ip_map.remove remote_id t.subs in
+
+        let out_wd = get_assoc_pfxes t.db remote_id in
+
+        (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
+        match out_wd = [] with
+        | true -> 
+          let new_t = set_subs new_subs t in
+          handle_loop new_t
+        | false ->
+          (* Generate update *)
+          let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
+
+          (* Update db *)
+          let new_db = 
+            let f acc pfx = Prefix_map.remove pfx acc in
+            List.fold_left f t.db out_wd
+          in
+
+          let new_t = t |> set_subs new_subs |> set_db new_db in
+          let ip_and_peer = Ip_map.bindings new_t.subs in
+
+          (* Send the updates *)
+          let f (peer_id, peer) = 
+            Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+          in
+          Lwt.join (List.map f ip_and_peer)
+          >>= fun () ->
+
+          (* Pull routes *)
+          let f (peer_id, peer) =
+            Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+          in
+          Lwt.join (List.map f ip_and_peer)
+          >>= fun () ->
+
+          handle_loop new_t
   ;;
 
+
+  let create local_id local_asn = 
+    (* Initiate data structure *)
+    let stream, pf = Lwt_stream.create () in
+    let t = {
+      local_id; local_asn;
+      subs = Ip_map.empty;
+      db = Prefix_map.empty;
+      stream; pf
+    } in
+
+    (* Spawn handling loop thread *)
+    let _ = handle_loop t in
+
+    t
+  ;;
+ 
   let to_string t = 
+    let count = ref 0 in
     let pfxs_str = 
       let f pfx (pa, id) acc = 
-        let pfx_str = Printf.sprintf "%s | %s | %s" (Ipaddr.V4.Prefix.to_string pfx) 
-                                (Ipaddr.V4.to_string id) (Bgp.path_attrs_to_string pa) in
-        List.cons pfx_str acc
+        count := !count + 1;
+        let pfx_str = Printf.sprintf "%d: %s | %s | %s" 
+                                      (!count)
+                                      (Ipaddr.V4.Prefix.to_string pfx) 
+                                      (Ipaddr.V4.to_string id) 
+                                      (Bgp.path_attrs_to_string pa) 
+        in
+        pfx_str::acc
       in 
       String.concat "\n" (Prefix_map.fold f t.db [])
-    in
-
-    let subs_str = 
-      let open Adj_rib_in in
-      let tmp = List.map (fun (x, _) -> Ipaddr.V4.to_string x) (Id_map.bindings t.subs) in
-      String.concat " " tmp
-    in
-      
-    Printf.sprintf "Loc-RIB \n Connections: %s \n Routes:  %s" subs_str pfxs_str
+    in  
+    Printf.sprintf "Routes: \n %s" pfxs_str
   ;;
 
   let size t = Prefix_map.cardinal t.db
+
+  let input t input =
+    t.pf (Some input);
+    Lwt.return_unit
+  ;;
 end
-
-
-
-
-
