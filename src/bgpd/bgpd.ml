@@ -1,6 +1,8 @@
 open Lwt.Infix
 open Bgp
 
+(* Design choices: Use signal-and-continue *)
+
 (* Logging *)
 let bgpd_src = Logs.Src.create "BGP" ~doc:"BGP logging"
 module Bgp_log = (val Logs.src_log bgpd_src : Logs.LOG)
@@ -46,6 +48,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   }
   
   type t = {
+    mutable running: bool;
+
     remote_id: Ipaddr.V4.t;
     remote_port: int;
     remote_asn: int32;
@@ -64,7 +68,17 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     mutable output_rib: Rib.Adj_rib_out.t option;
     mutable loc_rib: Rib.Loc_rib.t;
     stat: stat;
+
+    stream: Fsm.event Lwt_stream.t;
+    pf: Fsm.event option -> unit;
   }
+
+  let push_event t event = t.pf (Some event)
+
+  let stop t =
+    t.running <- false;
+    t.pf None
+  ;;
 
   type id_map = t Id_map.t
 
@@ -119,7 +133,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           Bgp_log.debug (fun m -> m "receive message %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id));
           
           (* Spawn thread to handle the new message *)
-          let _ = callback event in
+          callback event;
 
           (* Load balancing *)
           OS.Time.sleep_ns (Duration.of_ms 1)
@@ -128,39 +142,39 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           flow_reader t callback
         | Error err ->
           t.flow_reader <- None;
-          (match err with
-          | `Closed -> 
-            Bgp_log.debug (fun m -> m "Connection closed when read." ~tags:(stamp t.remote_id));
-            callback Fsm.Tcp_connection_fail
-          | `Refused -> 
-            Bgp_log.debug (fun m -> m "Read refused." ~tags:(stamp t.remote_id));
-            callback Fsm.Tcp_connection_fail
-          | `Timeout -> 
-            Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
-            callback Fsm.Tcp_connection_fail
-          | `PARSE_ERROR err -> begin
-            match err with
-            | Bgp.Parsing_error -> 
-              Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id));
-              (* I don't know what the correct event for this should be. *)
+          let () = match err with
+            | `Closed -> 
+              Bgp_log.debug (fun m -> m "Connection closed when read." ~tags:(stamp t.remote_id));
               callback Fsm.Tcp_connection_fail
-            | Bgp.Msg_fmt_error err -> begin
-              Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id));
+            | `Refused -> 
+              Bgp_log.debug (fun m -> m "Read refused." ~tags:(stamp t.remote_id));
+              callback Fsm.Tcp_connection_fail
+            | `Timeout -> 
+              Bgp_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
+              callback Fsm.Tcp_connection_fail
+            | `PARSE_ERROR err -> begin
               match err with
-              | Bgp.Parse_msg_h_err sub_err -> callback (Fsm.Bgp_header_err sub_err)
-              | Bgp.Parse_open_msg_err sub_err -> callback (Fsm.Bgp_open_msg_err sub_err)
-              | Bgp.Parse_update_msg_err sub_err -> callback (Fsm.Update_msg_err sub_err)
+              | Bgp.Parsing_error -> 
+                Bgp_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id));
+                (* I don't know what the correct event for this should be. *)
+                callback Fsm.Tcp_connection_fail
+              | Bgp.Msg_fmt_error err -> begin
+                Bgp_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id));
+                match err with
+                | Bgp.Parse_msg_h_err sub_err -> callback (Fsm.Bgp_header_err sub_err)
+                | Bgp.Parse_open_msg_err sub_err -> callback (Fsm.Bgp_open_msg_err sub_err)
+                | Bgp.Parse_update_msg_err sub_err -> callback (Fsm.Update_msg_err sub_err)
+              end
+              | Bgp.Notif_fmt_error _ -> 
+                Bgp_log.err (fun m -> m "Got an notification message error" ~tags:(stamp t.remote_id));
+                (* I don't know what the correct event for this should be. *)
+                (* I should log this event locally *)
+                callback Fsm.Tcp_connection_fail
             end
-            | Bgp.Notif_fmt_error _ -> 
-              Bgp_log.err (fun m -> m "Got an notification message error" ~tags:(stamp t.remote_id));
-              (* I don't know what the correct event for this should be. *)
-              (* I should log this event locally *)
-              callback Fsm.Tcp_connection_fail
-          end
-          | _ -> 
-            Bgp_log.warn (fun m -> m "Unknown read error in flow reader" ~tags:(stamp t.remote_id));
-            Lwt.return_unit
-          )
+            | _ -> 
+              Bgp_log.warn (fun m -> m "Unknown read error in flow reader" ~tags:(stamp t.remote_id));
+          in
+          Lwt.return_unit
       in
       t.flow_reader <- Some (Device.create task wrapped_callback);
       Lwt.return_unit
@@ -193,48 +207,49 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         t.conn_starter <- None;
         match result with
         | Error err ->
-          (match err with
-          | `Timeout -> 
-            Bgp_log.info (fun m -> m "Connection init timeout." ~tags:(stamp t.remote_id))
-          | `Refused -> 
-            Bgp_log.info (fun m -> m "Connection init refused." ~tags:(stamp t.remote_id))
-          | err -> 
-            Bgp_log.info (fun m -> m "Unknown connection init error %a." 
-                                    S.TCPV4.pp_error err ~tags:(stamp t.remote_id)));
+          let () = match err with
+            | `Timeout -> 
+              Bgp_log.info (fun m -> m "Connection init timeout." ~tags:(stamp t.remote_id))
+            | `Refused -> 
+              Bgp_log.info (fun m -> m "Connection init refused." ~tags:(stamp t.remote_id))
+            | err -> 
+              Bgp_log.info (fun m -> m "Unknown connection init error %a." 
+                                                S.TCPV4.pp_error err ~tags:(stamp t.remote_id))
+          in
           
-          callback (Fsm.Tcp_connection_fail)
+          callback (Fsm.Tcp_connection_fail);
+          Lwt.return_unit
         | Ok flow -> begin
-          Bgp_log.info (fun m -> m "Connected to remote %s" (Ipaddr.V4.to_string t.remote_id));
-          let connection = t in
           let open Fsm in
-          match connection.fsm.state with
+          Bgp_log.info (fun m -> m "Connected to remote %s" (Ipaddr.V4.to_string t.remote_id));
+          let peer = t in
+          match peer.fsm.state with
           | IDLE -> 
             Bgp_log.info (fun m -> m "Drop connection to remote %s because fsm is at IDLE" (Ipaddr.V4.to_string t.remote_id));
             Bgp_flow.close flow
           | CONNECT | ACTIVE ->
-            connection.flow <- Some flow;
-            callback Tcp_CR_Acked
-            >>= fun () ->
-            flow_reader connection callback
+            peer.flow <- Some flow;
+            callback Tcp_CR_Acked;
+            flow_reader peer callback
           | OPEN_SENT | OPEN_CONFIRMED -> 
-            if (Ipaddr.V4.compare connection.local_id connection.remote_id < 0) then begin
+            if (Ipaddr.V4.compare peer.local_id peer.remote_id < 0) then begin
               Bgp_log.info (fun m -> m "Connection collision detected and dump new connection." ~tags:(stamp t.remote_id));
               Bgp_flow.close flow
             end
             else begin
               Bgp_log.info (fun m -> m "Connection collision detected and dump existing connection." ~tags:(stamp t.remote_id));
-              callback Open_collision_dump
-              >>= fun () ->
+              callback Open_collision_dump;
               let new_fsm = {
                 state = CONNECT;
-                conn_retry_counter = connection.fsm.conn_retry_counter;
-                conn_retry_time = connection.fsm.conn_retry_time;
-                hold_time = connection.fsm.hold_time;
-                keepalive_time = connection.fsm.keepalive_time;
+                conn_retry_counter = peer.fsm.conn_retry_counter;
+                conn_retry_time = peer.fsm.conn_retry_time;
+                hold_time = peer.fsm.hold_time;
+                keepalive_time = peer.fsm.keepalive_time;
               } in
-              connection.flow <- Some flow;
-              connection.fsm <- new_fsm;
-              callback Tcp_CR_Acked
+              peer.flow <- Some flow;
+              peer.fsm <- new_fsm;
+              callback Tcp_CR_Acked;
+              Lwt.return_unit
             end
           | ESTABLISHED -> 
             Bgp_log.info (fun m -> m "Connection collision detected and dump new connection.");
@@ -245,20 +260,20 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     end
   ;;      
 
-  let listen_tcp_connection s local_port id_map callback =
+  let listen_tcp_connection s local_port id_map =
     let on_connect flow =
       Bgp_flow.read flow
       >>= function
       | Error err ->
         let ip, _ = Bgp_flow.dst flow in
-        (match err with
-        | `PARSE_ERROR err ->  
-          Bgp_log.debug (fun m -> m "receive an unknown connection from ip %s with err %s" 
-                            (Ipaddr.V4.to_string ip) (Bgp.parse_error_to_string err))
-        | _ ->
-          Bgp_log.debug (fun m -> m "receive an unknown connection from ip %s, but failed" 
-                            (Ipaddr.V4.to_string ip))
-        );
+        let () = match err with
+          | `PARSE_ERROR err ->  
+            Bgp_log.debug (fun m -> m "receive an unknown connection from ip %s with err %s" 
+                                      (Ipaddr.V4.to_string ip) (Bgp.parse_error_to_string err))
+          | _ ->
+            Bgp_log.debug (fun m -> m "receive an unknown connection from ip %s, but failed" 
+                                      (Ipaddr.V4.to_string ip))
+        in
         Lwt.return_unit
       | Ok Open opent -> begin
         Bgp_log.debug (fun m -> m "Receive incoming connection with open message %s" (Bgp.to_string (Open opent)));
@@ -268,49 +283,44 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
         match Id_map.mem remote_id id_map with
         | false -> 
-          Bgp_log.info (fun m -> m "Refuse connection because remote id %s is unknown." (Ipaddr.V4.to_string remote_id));
+          Bgp_log.info (fun m -> m "Refuse connection because remote id %s is unconfigured." (Ipaddr.V4.to_string remote_id));
           Bgp_flow.close flow
         | true -> begin
-          let connection = Id_map.find remote_id id_map in
+          let peer = Id_map.find remote_id id_map in
           let open Fsm in
-          match connection.fsm.state with
+          match peer.fsm.state with
           | IDLE -> 
             Bgp_log.info (fun m -> m "Refuse connection %s because fsm is at IDLE." (Ipaddr.V4.to_string remote_id));
             (* Confusion with RFC4271: do I need to increment the connect retry counter?? *)
             let _ = Bgp_flow.write flow (Notification Cease) in
             Bgp_flow.close flow
           | CONNECT | ACTIVE ->
-            connection.flow <- Some flow;
-            callback connection Tcp_connection_confirmed
-            >>= fun () ->
-            callback connection (BGP_open opent)
-            >>= fun () ->
-            flow_reader connection (callback connection)
+            peer.flow <- Some flow;
+            push_event peer Tcp_connection_confirmed;
+            push_event peer (BGP_open opent);
+            flow_reader peer (push_event peer)
           | OPEN_SENT | OPEN_CONFIRMED -> 
-            if (Ipaddr.V4.compare connection.local_id connection.remote_id > 0) then begin
+            if (Ipaddr.V4.compare peer.local_id peer.remote_id > 0) then begin
               Bgp_log.info (fun m -> m "Collision detected and dump new connection.");
               let _ = Bgp_flow.write flow (Notification Cease) in
               Bgp_flow.close flow
             end
             else begin
               Bgp_log.info (fun m -> m "Collision detected and dump existing connection.");
-              callback connection Open_collision_dump
-              >>= fun () ->
+              push_event peer Open_collision_dump;
               let new_fsm = {
                 state = CONNECT;
-                conn_retry_counter = connection.fsm.conn_retry_counter;
-                conn_retry_time = connection.fsm.conn_retry_time;
-                hold_time = connection.fsm.hold_time;
-                keepalive_time = connection.fsm.keepalive_time;
+                conn_retry_counter = peer.fsm.conn_retry_counter;
+                conn_retry_time = peer.fsm.conn_retry_time;
+                hold_time = peer.fsm.hold_time;
+                keepalive_time = peer.fsm.keepalive_time;
               } in
-              connection.flow <- Some flow;
-              connection.fsm <- new_fsm;
+              peer.flow <- Some flow;
+              peer.fsm <- new_fsm;
               
-              callback connection Tcp_connection_confirmed
-              >>= fun () ->
-              callback connection (BGP_open opent) 
-              >>= fun () ->
-              flow_reader connection (callback connection)
+              push_event peer Tcp_connection_confirmed;
+              push_event peer (BGP_open opent);
+              flow_reader peer (push_event peer)
             end
           | ESTABLISHED -> 
             Bgp_log.info (fun m -> m "Connection collision detected and dump new connection.");
@@ -395,7 +405,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   (* No other thread can update the data structure before all actions are performed. *)
   let rec perform_action t action : unit =
     let open Fsm in
-    let callback = fun event -> handle_event t event in
+    let callback event = push_event t event in
     match action with
     | Initiate_tcp_connection -> init_tcp_connection t callback
     | Send_open_msg -> 
@@ -411,7 +421,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       if (t.fsm.conn_retry_time > 0) then
         let callback () =
           t.conn_retry_timer <- None;
-          handle_event t Connection_retry_timer_expired
+          push_event t Connection_retry_timer_expired
         in
         t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback)
     | Stop_conn_retry_timer -> begin
@@ -428,13 +438,13 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       if (t.fsm.conn_retry_time > 0) then
         let callback () =
           t.conn_retry_timer <- None;
-          handle_event t Connection_retry_timer_expired
+          push_event t Connection_retry_timer_expired
         in
         t.conn_retry_timer <- Some (create_timer t.fsm.conn_retry_time callback)
     end
     | Start_hold_timer ht -> 
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired))
+        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; push_event t Hold_timer_expired))
     | Stop_hold_timer -> begin
       match t.hold_timer with
       | None -> ()
@@ -447,12 +457,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         | Some d -> Device.stop d
       in
       if (t.fsm.hold_time > 0) then 
-        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; handle_event t Hold_timer_expired))
+        t.hold_timer <- Some (create_timer ht (fun () -> t.hold_timer <- None; push_event t Hold_timer_expired))
     end
     | Start_keepalive_timer -> 
       if (t.fsm.keepalive_time > 0) then 
         t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time 
-                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired))
+                            (fun () -> t.keepalive_timer <- None; push_event t Keepalive_timer_expired))
     | Stop_keepalive_timer -> begin
       match t.keepalive_timer with
       | None -> ()
@@ -466,7 +476,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       in
       if (t.fsm.keepalive_time > 0) then 
         t.keepalive_timer <- Some (create_timer t.fsm.keepalive_time 
-                            (fun () -> t.keepalive_timer <- None; handle_event t Keepalive_timer_expired))
+                            (fun () -> t.keepalive_timer <- None; push_event t Keepalive_timer_expired))
     end
     | Process_update_msg u -> begin
       match t.input_rib with
@@ -511,30 +521,38 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       in
 
       Rib.Loc_rib.unsub t.loc_rib t.remote_id
-      
+  ;;    
   
-  and handle_event t event =
-    let new_fsm, actions = Fsm.handle t.fsm event in
-    
-    (* Update finite state machine before performing any action. *)
-    t.fsm <- new_fsm;
+  let rec handle_event_loop t =
+    if not t.running then Lwt.return_unit
+    else begin
+      Lwt_stream.get t.stream
+      >>= function
+      | None -> Lwt.return_unit
+      | Some event ->
+        let new_fsm, actions = Fsm.handle t.fsm event in
+        
+        (* Update finite state machine before performing any action. *)
+        t.fsm <- new_fsm;
 
-    (* Blocking perform all actions *)
-    let () =
-      let f t act = perform_action t act in
-      List.iter (f t) actions
-    in
-      
-    match Fsm.state t.fsm with
-    | Fsm.IDLE -> begin
-      match event with
-      | Fsm.Manual_stop -> Lwt.return_unit
-      | _ ->
-        (* Automatic restart *)
-        Bgp_log.info (fun m -> m "BGP automatic restarts." ~tags:(stamp t.remote_id));
-        handle_event t Fsm.Automatic_start_passive_tcp
+        (* Blocking perform all actions *)
+        let () =
+          let f t act = perform_action t act in
+          List.iter (f t) actions
+        in
+          
+        match Fsm.state t.fsm with
+        | Fsm.IDLE -> begin
+          match event with
+          | Fsm.Manual_stop -> Lwt.return_unit
+          | _ ->
+            (* Automatic restart *)
+            Bgp_log.info (fun m -> m "BGP automatic restarts." ~tags:(stamp t.remote_id));
+            push_event t Fsm.Automatic_start_passive_tcp;
+            handle_event_loop t
+        end
+        | _ -> handle_event_loop t
     end
-    | _ -> Lwt.return_unit
   ;;
 
   let rec command_loop console peers =
@@ -550,14 +568,14 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       | "start" -> 
         let f t =
           Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
-          handle_event t (Fsm.Manual_start)
+          push_event t (Fsm.Manual_start)
         in
         let _ = Id_map.map f peers in
         command_loop console peers
       | "stop" -> 
         let f t =
           Bgp_log.info (fun m -> m "BGP stops." ~tags:(stamp t.remote_id));
-          handle_event t (Fsm.Manual_stop)
+          push_event t (Fsm.Manual_stop)
         in
         let _ = Id_map.map f peers in
         command_loop console peers
@@ -625,7 +643,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         let str = String.concat "" @@ List.map (fun b -> Cstruct.to_string b) data in     
         Lwt.return @@ Config_parser.parse_from_string str
   ;; *)
-        
+
   let start console s =
     let open Config_parser in
 
@@ -643,6 +661,8 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     
     (* Init shared data *)
     let init_t peer =
+      let stream, pf = Lwt_stream.create () in
+
       let stat = {
         sent_open = 0;
         sent_update = 0;
@@ -653,19 +673,19 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         rec_keepalive = 0;
         rec_notif = 0;
       } in
-      {
+
+      let t = {
+        running = true;
+
+        socket = s; 
         remote_id = peer.remote_id;
         remote_port = peer.remote_port;
         remote_asn = peer.remote_asn;
-
         local_id = config.local_id;
         local_port = config.local_port;
         local_asn = config.local_asn;
 
-        socket = s; 
         fsm = Fsm.create 240 (peer.hold_time) (peer.hold_time / 3);
-        stat;
-
         flow = None;
         conn_retry_timer = None; 
         hold_timer = None; 
@@ -675,21 +695,29 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         input_rib = None;
         output_rib = None;
         loc_rib;
-      }
+
+        stat;
+
+        stream; pf;
+      } in
+
+      let _ = handle_event_loop t in
+
+      t
     in
     
     let t_list = List.map init_t config.peers in
     let peers = List.fold_left (fun acc (t: t) -> Id_map.add t.remote_id t acc) (Id_map.empty) t_list in
 
     (* Start listening to BGP port. *)
-    listen_tcp_connection s local_port peers handle_event;
+    listen_tcp_connection s local_port peers;
     
     (* Automatic passive start *)
-    let f (t: t) =
+    let f _id (t: t) =
       Bgp_log.info (fun m -> m "BGP starts." ~tags:(stamp t.remote_id));
-      handle_event t Fsm.Automatic_start_passive_tcp
+      push_event t Fsm.Automatic_start_passive_tcp
     in
-    let _ = Id_map.map f peers in
+    let () = Id_map.iter f peers in
 
     command_loop console peers
     >>= fun () ->
