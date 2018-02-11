@@ -30,7 +30,7 @@ module Adj_rib_in = struct
   type t = {
     mutable running: bool;
     remote_id: Ipaddr.V4.t;
-    callback: update -> unit Lwt.t;
+    callback: update -> unit;
     db: Bgp.path_attrs Prefix_map.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
@@ -80,13 +80,12 @@ module Adj_rib_in = struct
           if is_empty_update out_update then handle_loop new_t
           else 
             (* Handle the callback before handling next input request. This guarantees update message ordering *)
-            t.callback out_update
-            >>= fun () ->
+            let () = t.callback out_update in
             handle_loop new_t
         | Pull pfx_list -> begin
           let f pfx =
             match Prefix_map.find_opt pfx t.db with
-            | None -> Lwt.return_unit
+            | None -> ()
             | Some path_attrs ->
               let update = {
                 withdrawn = [];
@@ -95,8 +94,7 @@ module Adj_rib_in = struct
               } in
               t.callback update
           in
-          Lwt.join (List.map f pfx_list)
-          >>= fun () ->
+          let () = List.iter f pfx_list in
           handle_loop t
         end
       | Stop -> Lwt.return_unit
@@ -141,7 +139,7 @@ module Adj_rib_out = struct
   type t = {
     mutable running: bool;
     remote_id: Ipaddr.V4.t;
-    callback: update -> unit Lwt.t;
+    callback: update -> unit;
     past_routes: Prefix_set.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
@@ -270,11 +268,7 @@ module Adj_rib_out = struct
 
           (* To guarantee the equivalence of operation, must send withdrawn first. *)
           let updates = wd_updates @ insert_updates in
-          let rec send_loop = function
-            | [] -> Lwt.return_unit
-            | u::tl -> t.callback u >>= fun () -> send_loop tl
-          in
-          send_loop updates >>= fun () ->
+          let () = List.iter (fun u -> t.callback u) updates in
           
           (* Decision choice: must send all previous updates before handling next batch. *)
           (* Update data structure *)

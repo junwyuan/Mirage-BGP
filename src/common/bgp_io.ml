@@ -88,7 +88,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         | `Refused -> Lwt.return (Error `Refused)
         | `Timeout -> Lwt.return (Error `Timeout)
         | err -> 
-          Io_log.err (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
+          Io_log.debug (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
           Lwt.fail_with "Crash due to unchecked exception."
       end
       | Ok (`Data b) -> begin
@@ -111,7 +111,7 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
           | `Refused -> Lwt.return (Error `Refused)
           | `Timeout -> Lwt.return (Error `Timeout)
           | err ->
-            Io_log.err (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
+            Io_log.debug (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
             Lwt.fail_with "Crash due to unchecked exception."
         end
       else parse t b

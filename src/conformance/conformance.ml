@@ -124,8 +124,25 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let rec read_loop flow cond (module Log : Logs.LOG) =
     Bgp_flow.read flow
     >>= function
-    | Error _ -> 
-      Log.err (fun m -> m "Error when read");
+    | Error err ->
+      let () = match err with
+        | `Closed -> 
+          Log.debug (fun m -> m "Connection closed when read.");
+        | `Refused -> 
+          Log.debug (fun m -> m "Read refused.");
+        | `Timeout -> 
+          Log.debug (fun m -> m "Read timeout.");
+        | `PARSE_ERROR err -> begin
+          match err with
+          | Bgp.Parsing_error -> 
+            Log.warn (fun m -> m "Message parsing error");
+          | Bgp.Msg_fmt_error err -> 
+            Log.warn (fun m -> m "Message format error")
+          | Bgp.Notif_fmt_error _ -> 
+            Log.err (fun m -> m "Got an notification message error");
+        end
+        | err -> Log.err (fun m -> m "Unknown")
+      in
       assert false
     | Ok Update u -> 
       Log.debug (fun m -> m "Rec: %s" (to_string (Update u)));
@@ -287,10 +304,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun (flow2, _) ->
 
     let cond u = 
+      assert (find_origin u.path_attrs <> None);
+      assert (find_aspath u.path_attrs <> None);
+      assert (find_next_hop u.path_attrs <> None);
+      
       match u.nlri with 
       | [ pfx ] ->
-        if Ipaddr.V4.Prefix.network pfx = sample_id then true
-        else assert false
+        assert (Ipaddr.V4.Prefix.network pfx = sample_id);
+        true
       | _ -> assert false
     in
     read_update_loop flow2 cond (module Sp2_log)
@@ -920,7 +941,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      (* test_create_session s; 
+      test_create_session s; 
       test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
@@ -933,7 +954,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_route_replace s;
       test_route_unchanged s;
       test_header_error_handle s;
-      test_update_attr_length_error_handle s; *)
+      test_update_attr_length_error_handle s;
       test_route_selection_after_wd s;
     ] in
     run tests
