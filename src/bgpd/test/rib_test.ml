@@ -192,7 +192,7 @@ let test_loc_rib_update_db () =
   
   let db = Prefix_map.empty in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
   assert (Prefix_map.cardinal db = 1);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -206,7 +206,7 @@ let test_loc_rib_update_db () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -222,7 +222,7 @@ let test_loc_rib_update_db () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
@@ -239,7 +239,7 @@ let test_loc_rib_update_db () =
   ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -255,7 +255,7 @@ let test_loc_rib_update_db () =
   ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -274,7 +274,7 @@ let test_loc_rib_update_db () =
   ] in
   let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id1) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
@@ -287,7 +287,7 @@ let test_loc_rib_update_db () =
     path_attrs = [];
     nlri = [];
   } in
-  let db, out_update = Loc_rib.update_db local_id local_asn (update, id2) db in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 1);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 1);
@@ -312,7 +312,7 @@ let test_loc_rib_get_assoc_pfxs () =
   let update = { withdrawn = []; path_attrs; nlri } in
   
   let db = Prefix_map.empty in
-  let db, _ = Loc_rib.update_db local_id local_asn (update, id1) db in
+  let db, _ = Loc_rib.update_db local_id local_asn (id1, update) db in
 
   (* speaker2 inserts one pfx *)
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
@@ -324,13 +324,10 @@ let test_loc_rib_get_assoc_pfxs () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.21.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, _ = Loc_rib.update_db local_id local_asn (update, id2) db in
-
+  let db, _ = Loc_rib.update_db local_id local_asn (id2, update) db in
 
   (* remove speaker1 *)
   let wd = Loc_rib.get_assoc_pfxes db id1 in
-  let db = Loc_rib.remove_assoc_pfxes db wd in
-  assert (Prefix_map.cardinal db = 1);
   assert (List.length wd = 2);
   assert (List.mem (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")) wd);
   assert (List.mem (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")) wd);
@@ -354,28 +351,22 @@ let test_util_take () =
     Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "66.173.0.0");
     Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "172.168.13.0");
   ] in
-  let taken, rest = Util.take pfxs 5 in
-  assert (List.length rest = 1);
-  assert (List.length taken = 2);
-  let taken2, rest2 = Util.take pfxs 6 in
-  assert (List.length rest2 = 1);
-  assert (List.length taken2 = 2);
-  let taken3, rest3 = Util.take pfxs 9 in
-  assert (List.length rest3 = 0);
-  assert (List.length taken3 = 3);
+  let taken, rest = Adj_rib_out.take_n pfxs 1 in
+  assert (List.length taken = 1);
+  assert (List.length rest = 2);
 ;;
 
 let test_util_split () =
   let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
-  let split = Util.split pfxs (4096 - 23) in
-  assert (List.length split = 1);
+  let split = Adj_rib_out.split pfxs 400 in
+  assert (List.length split = 3);
 
   let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
-  let split = Util.split pfxs (4096 - 23) in
-  assert (List.length split = 2);
+  let split = Adj_rib_out.split pfxs 400 in
+  assert (List.length split = 5);
 ;;
 
-let test_split_update () =
+(* let test_split_update () =
   let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
   let update = { withdrawn; path_attrs = []; nlri = [] } in
   let split = Util.split_update update in
@@ -395,7 +386,7 @@ let test_split_update () =
   let nlri, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
   let update = { withdrawn; path_attrs; nlri } in
   assert (List.length (Util.split_update update) = 4);
-;;
+;; *)
 
 let test_util_update_nexthop () =
   let path_attrs = [
@@ -438,7 +429,6 @@ let () =
     "util", [
       test_case "test util.take" `Slow test_util_take;
       test_case "test util.split" `Slow test_util_split;
-      test_case "test Util.split_update" `Slow test_split_update;
       test_case "test Util.append_aspath" `Slow test_append_aspath;
       test_case "test Util.update_nexthop" `Slow test_util_update_nexthop;
       test_case "test Util.update_aspath" `Slow test_util_update_aspath;
