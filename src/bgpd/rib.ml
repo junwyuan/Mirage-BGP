@@ -636,7 +636,7 @@ module Loc_rib = struct
         in
         pfx_str::acc
       in 
-      String.concat "\n" (Prefix_map.fold f t.db [])
+      String.concat "\n" (List.rev (Prefix_map.fold f t.db []))
     in  
     Printf.sprintf "Routes: \n %s" pfxs_str
   ;;

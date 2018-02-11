@@ -1,14 +1,6 @@
 open Bgp
 open Lwt.Infix
 
-let flow_src = Logs.Src.create "Flow" ~doc:"Flow Handler logging"
-module Flow_log = (val Logs.src_log flow_src : Logs.LOG)
-
-let peer_tag : Ipaddr.V4.t Logs.Tag.def =
-  Logs.Tag.def "peer" ~doc:"Peer id" (fun ppf id -> Format.fprintf ppf "%s" (Ipaddr.V4.to_string id))
-
-let stamp id = Logs.Tag.(empty |> add peer_tag id)
-
 module Make (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
     
@@ -19,24 +11,27 @@ module Make (S: Mirage_stack_lwt.V4) = struct
     flow: Bgp_flow.t;
     stream: Bgp.t Lwt_stream.t;
     pf: Bgp.t option -> unit;
+    log: (module Logs.LOG);
   }
 
   let rec flow_writer t = 
     Lwt_stream.get t.stream >>= function
     | None -> Bgp_flow.close t.flow
     | Some msg -> 
-      Flow_log.debug (fun m -> m "send message %s" (Bgp.to_string msg) 
-                                            ~tags:(stamp t.remote_id));
+      let module Log = (val t.log : Logs.LOG) in
+
+      Log.debug (fun m -> m "send message %s" (Bgp.to_string msg)
+                                          );
       Bgp_flow.write t.flow msg
       >>= function
       | Error err ->
         let () = match err with
-          | `Timeout -> Flow_log.debug (fun m -> m "Timeout when write %s" 
-                                      (Bgp.to_string msg) ~tags:(stamp t.remote_id))
-          | `Refused -> Flow_log.debug (fun m -> m "Refused when Write %s" 
-                                      (Bgp.to_string msg) ~tags:(stamp t.remote_id))
-          | `Closed -> Flow_log.debug (fun m -> m "Connection closed when write %s." 
-                                      (Bgp.to_string msg) ~tags:(stamp t.remote_id)) 
+          | `Timeout -> Log.debug (fun m -> m "Timeout when write %s" 
+                                      (Bgp.to_string msg))
+          | `Refused -> Log.debug (fun m -> m "Refused when Write %s" 
+                                      (Bgp.to_string msg))
+          | `Closed -> Log.debug (fun m -> m "Connection closed when write %s." 
+                                      (Bgp.to_string msg)) 
           | _ -> ()
         in
         Lwt.return_unit
@@ -44,6 +39,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
   ;;
 
   let rec flow_reader t =
+    let module Log = (val t.log : Logs.LOG) in
     Bgp_flow.read t.flow >>= function 
     | Ok msg -> 
       let event = match msg with
@@ -76,7 +72,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
         | Bgp.Notification e -> Fsm.Notif_msg e
         | Bgp.Keepalive -> Fsm.Keepalive_msg
       in
-      Flow_log.debug (fun m -> m "receive message %s" (Bgp.to_string msg) ~tags:(stamp t.remote_id));
+      Log.debug (fun m -> m "receive message %s" (Bgp.to_string msg));
       
       (* Spawn thread to handle the new message *)
       t.callback event;
@@ -89,42 +85,42 @@ module Make (S: Mirage_stack_lwt.V4) = struct
     | Error err ->
       let () = match err with
         | `Closed -> 
-          Flow_log.debug (fun m -> m "Connection closed when read." ~tags:(stamp t.remote_id));
+          Log.debug (fun m -> m "Connection closed when read.");
           t.callback Fsm.Tcp_connection_fail
         | `Refused -> 
-          Flow_log.debug (fun m -> m "Read refused." ~tags:(stamp t.remote_id));
+          Log.debug (fun m -> m "Read refused.");
           t.callback Fsm.Tcp_connection_fail
         | `Timeout -> 
-          Flow_log.debug (fun m -> m "Read timeout." ~tags:(stamp t.remote_id));
+          Log.debug (fun m -> m "Read timeout.");
           t.callback Fsm.Tcp_connection_fail
         | `PARSE_ERROR err -> begin
           match err with
           | Bgp.Parsing_error -> 
-            Flow_log.warn (fun m -> m "Message parsing error" ~tags:(stamp t.remote_id));
+            Log.warn (fun m -> m "Message parsing error");
             (* I don't know what the correct event for this should be. *)
             t.callback Fsm.Tcp_connection_fail
           | Bgp.Msg_fmt_error err -> begin
-            Flow_log.warn (fun m -> m "Message format error" ~tags:(stamp t.remote_id));
+            Log.warn (fun m -> m "Message format error");
             match err with
             | Bgp.Parse_msg_h_err sub_err -> t.callback (Fsm.Bgp_header_err sub_err)
             | Bgp.Parse_open_msg_err sub_err -> t.callback (Fsm.Bgp_open_msg_err sub_err)
             | Bgp.Parse_update_msg_err sub_err -> t.callback (Fsm.Update_msg_err sub_err)
           end
           | Bgp.Notif_fmt_error _ -> 
-            Flow_log.err (fun m -> m "Got an notification message error" ~tags:(stamp t.remote_id));
+            Log.err (fun m -> m "Got an notification message error");
             (* I don't know what the correct event for this should be. *)
             (* I should log this event locally *)
             t.callback Fsm.Tcp_connection_fail
         end
         | _ -> 
-          Flow_log.debug (fun m -> m "Unknown read error in flow reader" ~tags:(stamp t.remote_id));
+          Log.debug (fun m -> m "Unknown read error in flow reader");
       in
       Lwt.return_unit
   ;;
 
-  let create remote_id remote_asn callback flow =
+  let create remote_id remote_asn callback flow log =
     let stream, pf = Lwt_stream.create () in
-    let t = { stream; pf; remote_id; remote_asn; callback; flow; } in
+    let t = { stream; pf; remote_id; remote_asn; callback; flow; log } in
     let _ = flow_writer t in
     let _ = flow_reader t in
     t
