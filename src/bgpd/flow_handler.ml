@@ -11,56 +11,6 @@ let stamp id = Logs.Tag.(empty |> add peer_tag id)
 
 module Make (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
-
-  type msg_count = {
-    opent: int;
-    update: int;
-    keepalive: int;
-    notif: int;
-  }
-
-  let inc_count c msg = 
-    match msg with
-    | Open _ -> {
-      opent = c.opent + 1;
-      update = c.update;
-      keepalive = c.keepalive;
-      notif = c.notif;
-    }
-    | Update _ -> {
-      opent = c.opent;
-      update = c.update + 1;
-      keepalive = c.keepalive;
-      notif = c.notif;
-    }
-    | Keepalive -> {
-      opent = c.opent;
-      update = c.update;
-      keepalive = c.keepalive + 1;
-      notif = c.notif;
-    }
-    | Notification _ -> {
-      opent = c.opent;
-      update = c.update;
-      keepalive = c.keepalive;
-      notif = c.notif + 1;
-    }
-  ;;
-
-  type stat = {
-    sent: msg_count;
-    received: msg_count;
-  }
-
-  let update_sent_count stat msg = {
-    sent = inc_count stat.sent msg;
-    received = stat.received;
-  }
-
-  let update_rec_count stat msg = {
-    sent = stat.sent;
-    received = inc_count stat.received msg;
-  }
     
   type t = {
     remote_id: Ipaddr.V4.t;
@@ -69,17 +19,6 @@ module Make (S: Mirage_stack_lwt.V4) = struct
     flow: Bgp_flow.t;
     stream: Bgp.t Lwt_stream.t;
     pf: Bgp.t option -> unit;
-    stat: stat;
-  }
-
-  let set_stat t n_stat = {
-    remote_id = t.remote_id;
-    remote_asn = t.remote_asn;
-    callback = t.callback;
-    flow = t.flow;
-    stream = t.stream;
-    pf = t.pf;
-    stat = n_stat;
   }
 
   let rec flow_writer t = 
@@ -101,9 +40,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
           | _ -> ()
         in
         Lwt.return_unit
-      | Ok () -> 
-        let new_t = set_stat t (update_sent_count t.stat msg) in
-        flow_writer new_t
+      | Ok () -> flow_writer t
   ;;
 
   let rec flow_reader t =
@@ -148,8 +85,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
       OS.Time.sleep_ns (Duration.of_ms 1)
       >>= fun () ->
 
-      let new_t = set_stat t (update_rec_count t.stat msg) in
-      flow_reader new_t
+      flow_reader t
     | Error err ->
       let () = match err with
         | `Closed -> 
@@ -188,21 +124,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
 
   let create remote_id remote_asn callback flow =
     let stream, pf = Lwt_stream.create () in
-    let stat = {
-      sent = {
-        opent = 0;
-        update = 0;
-        keepalive = 0;
-        notif = 0;
-      };
-      received = {
-        opent = 0;
-        update = 0;
-        keepalive = 0;
-        notif = 0;
-      };
-    } in
-    let t = { stream; pf; remote_id; remote_asn; callback; flow; stat } in
+    let t = { stream; pf; remote_id; remote_asn; callback; flow; } in
     let _ = flow_writer t in
     let _ = flow_reader t in
     t

@@ -261,6 +261,13 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   ;;
                     
   let send_msg t msg =   
+    let () = match msg with
+      | Open _ -> t.stat.sent_open <- t.stat.sent_open + 1
+      | Update _ -> t.stat.sent_update <- t.stat.sent_update + 1
+      | Keepalive -> t.stat.sent_keepalive <- t.stat.sent_keepalive + 1
+      | Notification _ -> t.stat.sent_notif <- t.stat.sent_notif + 1
+    in 
+
     match t.flow_handler with
     | None -> Bgp_log.debug (fun m -> m "Flow handler is missing.")
     | Some handler -> Flow_handler.write handler msg
@@ -319,7 +326,9 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     | Stop_conn_retry_timer -> begin
       match t.conn_retry_timer with
       | None -> ()
-      | Some d -> t.conn_retry_timer <- None; Device.stop d
+      | Some d -> 
+        t.conn_retry_timer <- None; 
+        Device.stop d
     end
     | Reset_conn_retry_timer -> begin
       let () =
@@ -423,6 +432,14 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       >>= function
       | None -> Lwt.return_unit
       | Some event ->
+        let () = match event with
+          | Fsm.BGP_open _ -> t.stat.rec_open <- t.stat.rec_open + 1
+          | Fsm.Update_msg _ -> t.stat.rec_update <- t.stat.rec_update + 1
+          | Fsm.Keepalive_msg -> t.stat.rec_keepalive <- t.stat.rec_keepalive + 1
+          | Fsm.Notif_msg _ -> t.stat.rec_notif <- t.stat.rec_notif + 1
+          | _ -> ()
+        in
+
         let new_fsm, actions = Fsm.handle t.fsm event in
         
         (* Update finite state machine before performing any action. *)
