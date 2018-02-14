@@ -1,0 +1,3 @@
+true: package(result), package(cstruct), package(cstruct.ppx), package(lwt.ppx), debug
+"common": include
+"common/lib": include

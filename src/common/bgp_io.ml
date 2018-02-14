@@ -79,9 +79,9 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
     in
 
     match t.buf with
-    | None ->
+    | None -> begin
       S.TCPV4.read t.flow
-      >>= (function
+      >>= function
       | Ok (`Eof) -> Lwt.return (Error `Closed)
       | Error err -> begin
         match err with 
@@ -90,13 +90,15 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
         | err -> 
           Io_log.debug (fun m -> m "Crash due to: %a" S.TCPV4.pp_error err);
           Lwt.fail_with "Crash due to unchecked exception."
+          (* Lwt.return @@ (Error err) *)
       end
       | Ok (`Data b) -> begin
         if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then begin
           t.buf <- Some b;
           read t
         end else parse t b
-      end)
+      end
+    end
     | Some b ->
       if (Cstruct.len b < 19) || (Cstruct.len b < Bgp.get_msg_len b) then
         S.TCPV4.read t.flow

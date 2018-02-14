@@ -152,10 +152,6 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
               push_event t Tcp_connection_confirmed;
 
               push_event t (BGP_open opent);
-
-              (* Buggy *)
-              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-              t.flow_handler <- Some flow_handler; 
               
               Lwt.return_unit
             end
@@ -425,7 +421,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           | Fsm.Notif_msg _ -> t.stat.rec_notif <- t.stat.rec_notif + 1
           | _ -> ()
         in
-
+        
         let new_fsm, actions = Fsm.handle t.fsm event in
 
         (* Update finite state machine before performing any action. *)
@@ -435,7 +431,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         let () = match event with
           | Fsm.Tcp_CR_Acked -> begin
             match t.out_flow with
-            | None -> Bgp_log.warn (fun m -> m "In_flow missing.")
+            | None -> Bgp_log.err (fun m -> m "In_flow missing.")
             | Some flow ->
               let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
               t.flow_handler <- Some flow_handler;
@@ -443,7 +439,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           end
           | Fsm.Tcp_connection_confirmed -> begin
             match t.in_flow with
-            | None -> Bgp_log.warn (fun m -> m "Out_flow missing.")
+            | None -> Bgp_log.err (fun m -> m "Out_flow missing.")
             | Some flow ->
               let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
               t.flow_handler <- Some flow_handler;
@@ -461,10 +457,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         match Fsm.state t.fsm with
         | Fsm.IDLE -> begin
           match event with
-          | Fsm.Manual_stop -> Lwt.return_unit
+          | Fsm.Manual_stop -> handle_event_loop t
           | _ ->
             (* Automatic restart *)
-            Bgp_log.info (fun m -> m "BGP automatic restarts.");
+            Bgp_log.app (fun m -> m "BGP automatic restarts.");
             push_event t Fsm.Automatic_start_passive_tcp;
             handle_event_loop t
         end
@@ -508,7 +504,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_port = config.local_port;
       local_asn = config.local_asn;
 
-      fsm = Fsm.create 240 (peer_config.hold_time) (peer_config.hold_time / 3);
+      fsm = Fsm.create peer_config.conn_retry_time (peer_config.hold_time) (peer_config.hold_time / 3);
 
       conn_retry_timer = None; 
       hold_timer = None; 

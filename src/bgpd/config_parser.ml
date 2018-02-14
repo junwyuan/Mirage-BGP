@@ -5,6 +5,7 @@ type peer = {
   remote_id: Ipaddr.V4.t;
   remote_port: int;
   hold_time: int;
+  conn_retry_time: int;
 }
 
 type config = {
@@ -24,15 +25,18 @@ let default_config = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.3";
       remote_port = 179;
       hold_time = 90;
+      conn_retry_time = 0;
     };
     {
       remote_asn = 5_l;
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.4";
       remote_port = 179;
       hold_time = 90;
+      conn_retry_time = 0;
     };
   ]
 }
+
 
 let peer_to_string { remote_asn; remote_id; remote_port; hold_time } =
   Printf.sprintf "{ remote_asn: %d, remote_id: %s, remote_port: %d, hold_time %d }" (Int32.to_int remote_asn) 
@@ -84,7 +88,11 @@ let parse_from_string data =
       Basic.Util.member "hold_time" json_peer
       |> Basic.Util.to_int
     in
-    { remote_asn; remote_id; remote_port; hold_time }
+    let conn_retry_time = 
+      Basic.Util.member "conn_retry_time" json_peer
+      |> Basic.Util.to_int
+    in
+    { remote_asn; remote_id; remote_port; hold_time; conn_retry_time }
   in
   let json_peers = 
     Basic.Util.member "peers" json_config 

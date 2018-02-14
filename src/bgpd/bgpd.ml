@@ -126,7 +126,7 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
     (* Automatic passive start *)
     let f _id (peer: Router.t) =
       Ctl_log.info (fun m -> m "BGP peer %s autostarts." (Ipaddr.V4.to_string peer.remote_id));
-      push_event peer Fsm.Automatic_start_passive_tcp
+      push_event peer Fsm.Automatic_start
     in
     let () = Id_map.iter f peers in
 
