@@ -8,7 +8,7 @@ module Ctl_log = (val Logs.src_log ctl_src : Logs.LOG)
 
 module Id_map = Map.Make(Ipaddr.V4)
 
-module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
+module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_lwt.V4) = struct
   module Router = Router.Make(S)
   open Router
 
@@ -85,7 +85,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         command_loop console peers
   ;;
 
-  (* let parse_config kv =
+  let parse_config kv =
     let key = Key_gen.config () in
     KV.size kv key >>= function
     | Error e -> 
@@ -99,17 +99,17 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
       | Ok data ->
         let str = String.concat "" @@ List.map (fun b -> Cstruct.to_string b) data in     
         Lwt.return @@ Config_parser.parse_from_string str
-  ;; *)
+  ;;
 
-  let start console s =
+  let start console kv s =
     let open Config_parser in
 
     (* Record backtrace *)
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
-    (* parse_config kv >>= fun config -> *)
-    let config = Config_parser.default_config in
+    parse_config kv >>= fun config ->
+    (* let config = Config_parser.default_config in *)
 
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn in
