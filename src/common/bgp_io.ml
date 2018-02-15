@@ -50,7 +50,6 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
     mutable buf: Cstruct.t option;
   }
 
-
   let create_connection s (addr, port) =
     S.TCPV4.create_connection (S.tcpv4 s) (addr, port)
     >>= function

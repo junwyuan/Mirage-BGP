@@ -381,7 +381,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         let callback u = 
           send_msg t (Bgp.Update u)
         in
-        Rib.Adj_rib_out.create t.remote_id callback
+        Rib.Adj_rib_out.create t.local_id t.local_asn t.remote_id callback
       in
       t.output_rib <- Some out_rib;
 
@@ -392,6 +392,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         | None -> ()
         | Some rib ->
           t.input_rib <- None;
+
+          Bgp_log.app (fun m -> m "Check2");
+
           Rib.Adj_rib_in.stop rib
       in
 

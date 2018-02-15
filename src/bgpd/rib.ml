@@ -15,14 +15,104 @@ module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
 
+module Attr_dict = struct
+  module Index = struct
+    type t = int
+    let compare (a: t) (b: t) : int = a - b
+    let create str : t = Hashtbl.hash str 
+  end
 
-type update = Bgp.update
+  module Idx_map = Map.Make(Index)
+
+  type t = (path_attrs * int) Idx_map.t
+  type index = Idx_map.key
+
+  let empty : (path_attrs * int) Idx_map.t = Idx_map.empty
+
+  let gen_index attrs = 
+    let str = path_attrs_to_string attrs in
+    Index.create str
+  ;;
+
+  let null = gen_index []
+
+  let mem idx t = Idx_map.mem idx t
+  
+  let add idx attrs t =
+    match Idx_map.find_opt idx t with
+    | None ->
+      Rib_log.debug (fun m -> m "Idx: %d, add" idx);
+      Idx_map.add idx (attrs, 1) t
+    | Some (attrs, c) ->
+      Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c+1)); 
+      Idx_map.add idx (attrs, c+1) t
+  ;;
+
+  let inc idx t =
+    if idx <> null then
+      match Idx_map.find_opt idx t with
+      | None ->
+        Rib_log.err (fun m -> m "Attr %d missing. #Binding %d" idx (Idx_map.cardinal t));
+        assert false
+      | Some (attrs, c) ->
+        Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c+1));
+        Idx_map.add idx (attrs, c+1) t
+    else t
+  ;;
+
+  let find_opt idx (t: t) =
+    if idx = null then Some []
+    else
+      match Idx_map.find_opt idx t with
+      | None -> None
+      | Some (attrs, _c) -> Some attrs
+  ;;
+
+  let find idx t =
+    if idx = null then []
+    else
+      match Idx_map.find_opt idx t with
+      | None -> 
+        Rib_log.err (fun m -> m "Attr %d missing. #Binding %d" idx (Idx_map.cardinal t));
+        assert false
+      | Some (attrs, _c) -> attrs
+  ;;
+
+  let remove idx t =
+    if idx <> null then
+      match Idx_map.find_opt idx t with
+      | None -> t
+      | Some (attrs, c) ->
+        if c > 1 then begin
+          Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c-1));
+          Idx_map.add idx (attrs, c-1) t
+        end 
+        else begin
+          Rib_log.debug (fun m -> m "Idx: %d, remove" idx);
+          Idx_map.remove idx t
+        end
+    else t
+  ;;
+
+  
+
+  let cardinal t = Idx_map.cardinal t
+end
+
+let dict_ref = ref Attr_dict.empty
+
+type change = {
+  wd: Prefix.t list;
+  idx: Attr_dict.index;
+  ins: Prefix.t list;
+}
+
+let is_empty_change u = u.wd = [] && u.ins = [] 
 let is_empty_update u = u.withdrawn = [] && u.nlri = [] 
-
 
 module Adj_rib_in = struct
   type input = 
-    | Push of update
+    | Push of Bgp.update
     | Pull of Prefix.t list
     | Stop
   
@@ -30,8 +120,8 @@ module Adj_rib_in = struct
   type t = {
     mutable running: bool;
     remote_id: Ipaddr.V4.t;
-    callback: update -> unit;
-    db: Bgp.path_attrs Prefix_map.t;
+    callback: change -> unit;
+    db: Attr_dict.index Prefix_map.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -45,26 +135,37 @@ module Adj_rib_in = struct
     pf = t.pf;
   }
     
-  let update_db { withdrawn; path_attrs; nlri } db  = 
+  let update_db { withdrawn; path_attrs; nlri } db = 
     let to_be_wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
 
+    let attr_idx = Attr_dict.gen_index path_attrs in
+
     let db_after_wd =
-      let f rib pfx = Prefix_map.remove pfx rib in
+      let f db pfx = 
+        match Prefix_map.find_opt pfx db with
+        | None -> db
+        | Some idx ->
+          dict_ref := Attr_dict.remove idx (!dict_ref);
+          Prefix_map.remove pfx db
+      in
       List.fold_left f db to_be_wd
     in
     
     let db_after_insert = 
-      let f rib pfx = Prefix_map.add pfx path_attrs rib in
+      let f db pfx = 
+        dict_ref := Attr_dict.add attr_idx path_attrs (!dict_ref);
+        Prefix_map.add pfx attr_idx db
+      in
       List.fold_left f db_after_wd nlri
     in
 
-    let out_update = {
-      withdrawn = to_be_wd;
-      path_attrs;
-      nlri
+    let out_change = {
+      wd = to_be_wd;
+      idx = attr_idx;
+      ins = nlri;
     } in
 
-    (db_after_insert, out_update)
+    (db_after_insert, out_change)
   ;;
 
   let rec handle_loop t = 
@@ -74,26 +175,32 @@ module Adj_rib_in = struct
       | None -> Lwt.return_unit
       | Some input -> begin
         match input with
-        | Push update -> 
-          let new_db, out_update = update_db update t.db in
+        | Push change -> 
+          let new_db, out_change = update_db change t.db in
           let new_t = set_db new_db t in
-          if is_empty_update out_update then handle_loop new_t
-          else 
+          if is_empty_change out_change then handle_loop new_t
+          else begin
+            dict_ref := Attr_dict.inc out_change.idx (!dict_ref);
+            
             (* Handle the callback before handling next input request. This guarantees update message ordering *)
-            let () = t.callback out_update in
+            let () = t.callback out_change in
+            
             handle_loop new_t
+          end
         | Pull pfx_list -> begin
           let f pfx =
             match Prefix_map.find_opt pfx t.db with
             | None -> ()
-            | Some path_attrs ->
-              let update = {
-                withdrawn = [];
-                path_attrs;
-                nlri = [ pfx ];
+            | Some idx ->
+              let change = {
+                wd = []; idx; ins = [ pfx ];
               } in
-              t.callback update
+
+              dict_ref := Attr_dict.inc idx (!dict_ref);
+
+              t.callback change
           in
+
           let () = List.iter f pfx_list in
           handle_loop t
         end
@@ -122,6 +229,12 @@ module Adj_rib_in = struct
   let push_update t update = input t (Push update)
   
   let stop t = 
+    let f _pfx idx =
+      Rib_log.app (fun m -> m "check");
+      dict_ref := Attr_dict.remove idx (!dict_ref)
+    in
+    let () = Prefix_map.iter f t.db in
+    Rib_log.app (fun m -> m "check3 %d" (Prefix_map.cardinal t.db));
     input t Stop;
     t.running <- false
   ;;
@@ -130,14 +243,16 @@ end
 
 module Adj_rib_out = struct
   module Prefix_set = Set.Make(Prefix)
-  module Str_map = Map.Make(String)
+  module Idx_map = Attr_dict.Idx_map
 
   type input = 
-    | Push of update
+    | Push of change
     | Stop
 
   type t = {
     mutable running: bool;
+    local_id: Ipaddr.V4.t;
+    local_asn: int32;
     remote_id: Ipaddr.V4.t;
     callback: update -> unit;
     past_routes: Prefix_set.t;
@@ -147,6 +262,8 @@ module Adj_rib_out = struct
 
   let set_past_routes pr t = {
     running = t.running;
+    local_id = t.local_id;
+    local_asn = t.local_asn;
     remote_id = t.remote_id;
     callback = t.callback;
     past_routes = pr;
@@ -157,9 +274,9 @@ module Adj_rib_out = struct
   let build_db rev_updates =
     (* The argument are updates in reverse time order. The latest can first. *)
 
-    let f (banned, db) u =
+    let f (banned, db) change =
       (* Insert the newest paths into db *)
-      let allowed = List.filter (fun pfx -> not (Prefix_set.mem pfx banned)) u.nlri in
+      let allowed = List.filter (fun pfx -> not (Prefix_set.mem pfx banned)) change.ins in
       let new_db = 
         let f db pfx = 
           match Prefix_map.mem pfx db with
@@ -168,33 +285,33 @@ module Adj_rib_out = struct
             db
           | false ->
             (* This is the newest route *)
-            Prefix_map.add pfx u.path_attrs db
+            dict_ref := Attr_dict.inc change.idx (!dict_ref);
+            Prefix_map.add pfx change.idx db
         in
         List.fold_left f db allowed
       in
+      dict_ref := Attr_dict.remove change.idx (!dict_ref);
 
       (* Update the banned list *)
       (* A route is banned if it has been withdrawn. All previous advertisements should be ignored. *)
-      let new_banned = List.fold_left (fun acc pfx -> Prefix_set.add pfx acc) banned u.withdrawn in
+      let new_banned = List.fold_left (fun acc pfx -> Prefix_set.add pfx acc) banned change.wd in
       (new_banned, new_db)
     in
     List.fold_left f (Prefix_set.empty, Prefix_map.empty) rev_updates
   ;;
 
   let group db =
-    let f (attr_map, pfx_map) (pfx, attrs) =
-      (* Generate an id for the attrs *)
-      let attr_id = path_attrs_to_string attrs in
-      
-      match Str_map.mem attr_id pfx_map with
+    let f pfx_map (pfx, idx) =
+      match Idx_map.mem idx pfx_map with
       | true -> 
-        let l = Str_map.find attr_id pfx_map in
-        attr_map, Str_map.add attr_id (pfx::l) pfx_map
+        let l = Idx_map.find idx pfx_map in
+        dict_ref := Attr_dict.remove idx (!dict_ref);
+        Idx_map.add idx (pfx::l) pfx_map
       | false ->
-        Str_map.add attr_id attrs attr_map, Str_map.add attr_id [pfx] pfx_map 
+        Idx_map.add idx [pfx] pfx_map 
     in
-    let attr_map, pfx_map = List.fold_left f (Str_map.empty, Str_map.empty) (Prefix_map.bindings db) in
-    List.map (fun (id, pfx_list) -> (Str_map.find id attr_map, pfx_list)) (Str_map.bindings pfx_map)
+    let pfx_map = List.fold_left f Idx_map.empty (Prefix_map.bindings db) in
+    Idx_map.bindings pfx_map
   ;;
 
   let take_n l n =
@@ -218,6 +335,30 @@ module Adj_rib_out = struct
         loop rest len (taken::acc)
     in
     loop pfxs len []
+  ;;
+
+  let append_aspath asn segments = 
+    match segments with
+    | [] -> [ Asn_seq [asn] ]
+    | hd::tl -> match hd with
+      | Asn_set _ -> (Asn_seq [asn])::segments
+      | Asn_seq l -> (Asn_seq (asn::l))::tl
+  ;;
+
+  let update_aspath asn path_attrs = 
+    match find_aspath path_attrs with
+    | None ->
+      Rib_log.warn (fun m -> m "MISSING AS PATH");
+      As_path [Asn_seq [asn]]::path_attrs
+    | Some aspath ->
+      let appended = append_aspath asn aspath in
+      let tmp = path_attrs_remove AS_PATH path_attrs in
+      As_path appended::tmp
+  ;;
+
+  let update_nexthop ip path_attrs =
+    let tmp = path_attrs_remove NEXT_HOP path_attrs in
+    (Next_hop ip)::tmp
   ;;
     
   let rec handle_loop t = 
@@ -257,10 +398,19 @@ module Adj_rib_out = struct
             List.map (fun pfxs -> { withdrawn = pfxs; path_attrs = []; nlri = [] }) tmp
           in
           let insert_updates =
-            let f acc (path_attrs, pfxs) = 
-              let len_attr = len_path_attrs_buffer path_attrs in
+            let f acc (idx, pfxs) = 
+              let attrs = Attr_dict.find idx (!dict_ref) in
+              dict_ref := Attr_dict.remove idx (!dict_ref);
+              
+              let updated_attrs = 
+                attrs 
+                |> update_nexthop t.local_id 
+                |> update_aspath t.local_asn
+              in
+
+              let len_attr = len_path_attrs_buffer updated_attrs in
               let tmp = split pfxs ((4096 - len_fixed - len_attr) / 5) in
-              let l = List.map (fun pfxs -> { withdrawn = []; path_attrs; nlri = pfxs }) tmp in
+              let l = List.map (fun pfxs -> { withdrawn = []; path_attrs = updated_attrs; nlri = pfxs }) tmp in
               l @ acc
             in
             List.fold_left f [] attr_and_pfxs
@@ -284,12 +434,13 @@ module Adj_rib_out = struct
   ;;
 
 
-  let create remote_id callback : t = 
+  let create local_id local_asn remote_id callback : t = 
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let past_routes = Prefix_set.empty in
     let t = {
       running = true;
+      local_id; local_asn;
       remote_id; callback; past_routes;
       stream; pf;
     } in
@@ -314,7 +465,7 @@ module Loc_rib = struct
   module Ip_map = Map.Make(Ipaddr.V4)
 
   type input = 
-    | Push of Ipaddr.V4.t * update
+    | Push of Ipaddr.V4.t * change
     | Sub of Ipaddr.V4.t * Adj_rib_in.t * Adj_rib_out.t
     | Unsub of Ipaddr.V4.t
     | Stop
@@ -330,7 +481,7 @@ module Loc_rib = struct
     local_asn: int32;
     local_id: Ipaddr.V4.t;
     subs: peer Ip_map.t;
-    db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
+    db: (Attr_dict.index * Ipaddr.V4.t) Prefix_map.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -376,29 +527,9 @@ module Loc_rib = struct
   ;;
 
 
-  let append_aspath asn segments = 
-    match segments with
-    | [] -> [ Asn_seq [asn] ]
-    | hd::tl -> match hd with
-      | Asn_set _ -> (Asn_seq [asn])::segments
-      | Asn_seq l -> (Asn_seq (asn::l))::tl
-  ;;
+  
 
-  let update_aspath asn path_attrs = 
-    match find_aspath path_attrs with
-    | None ->
-      Rib_log.warn (fun m -> m "MISSING AS PATH");
-      As_path [Asn_seq [asn]]::path_attrs
-    | Some aspath ->
-      let appended = append_aspath asn aspath in
-      let tmp = path_attrs_remove AS_PATH path_attrs in
-      As_path appended::tmp
-  ;;
 
-  let update_nexthop ip path_attrs =
-    let tmp = path_attrs_remove NEXT_HOP path_attrs in
-    (Next_hop ip)::tmp
-  ;;
 
   let find_origin path_attrs = 
     match Bgp.find_origin path_attrs with
@@ -433,62 +564,66 @@ module Loc_rib = struct
     end
   ;;
 
-
   (* This function is pure *)
-  let update_db local_id local_asn (peer_id, update) db =
+  let update_db local_asn (peer_id, change) db =
     (* Withdrawn from Loc-RIB *)
     let (db_after_wd, out_wd) =
       let f (db, out_wd) pfx = 
         match Prefix_map.find_opt pfx db with
         | None -> db, out_wd
         | Some (_, stored) -> 
-          if (stored = peer_id) then 
+          if (stored = peer_id) then begin
+            dict_ref := Attr_dict.remove change.idx (!dict_ref);
             (Prefix_map.remove pfx db, List.cons pfx out_wd) 
+          end
           else db, out_wd
       in
-      List.fold_left f (db, []) update.withdrawn
+      List.fold_left f (db, []) change.wd
     in
 
-    (* If the advertised path is looping, don't install any new routes OR no advertised route *)
-    if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
-      let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
-      (db_after_wd, out_update)
-    end else
-      let updated_path_attrs = 
-        update.path_attrs 
-        |> update_nexthop local_id 
-        |> update_aspath local_asn
-      in
+    let attrs = Attr_dict.find change.idx (!dict_ref) in
 
-      let db_after_insert, out_nlri = 
-        let f (db, out_nlri) pfx = 
+    (* If the advertised path is looping, don't install any new routes OR no advertised route *)
+    if change.ins = [] || is_aspath_loop local_asn (find_aspath attrs) then begin
+      let out_change = { wd = out_wd; idx = Attr_dict.null; ins = [] } in
+      (db_after_wd, out_change)
+    end 
+    else
+      let db_after_insert, out_ins = 
+        let f (db, out_ins) pfx = 
           match List.mem pfx out_wd with
           | true -> 
             (* We do not install new attrs immediately after withdrawn *)
-            (db, out_nlri)
+            (db, out_ins)
           | false ->
             match Prefix_map.find_opt pfx db with
             | None -> 
-              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-            | Some (stored_pattrs, src_id) ->
-              if src_id = peer_id then 
+              dict_ref := Attr_dict.inc change.idx (!dict_ref);
+              (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
+            | Some (stored_idx, src_id) ->
+              let stored_attrs = Attr_dict.find stored_idx (!dict_ref) in
+              if src_id = peer_id then begin
                 (* If from the same peer, replace without compare *)
-                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-              else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then
+                dict_ref := Attr_dict.inc change.idx (!dict_ref);
+                (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
+              end
+              else if tie_break (attrs, peer_id) (stored_attrs, src_id) then begin
                 (* Replace if the new route is more preferable *)
-                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-              else db, out_nlri
+                dict_ref := Attr_dict.inc change.idx (!dict_ref);
+                (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
+              end 
+              else db, out_ins
         in
-        List.fold_left f (db_after_wd, []) update.nlri
+        List.fold_left f (db_after_wd, []) change.ins
       in
 
-      let out_update = {
-        withdrawn = out_wd;
-        path_attrs = updated_path_attrs;
-        nlri = out_nlri
+      let out_change = {
+        wd = out_wd;
+        idx = change.idx;
+        ins = out_ins
       } in 
 
-      (db_after_insert, out_update)
+      (db_after_insert, out_change)
   ;;
 
   let get_assoc_pfxes db remote_id = 
@@ -508,19 +643,21 @@ module Loc_rib = struct
       | Some input ->
         match input with
         | Stop -> Lwt.return_unit
-        | Push (remote_id, update) ->
+        | Push (remote_id, change) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
-            let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
+            let new_db, out_change = update_db t.local_asn (remote_id, change) t.db in
             
             let ip_and_peer = Ip_map.bindings t.subs in
 
             (* Send the updates: blocking *)
             let () = 
-              if not (is_empty_update out_update) then
+              if not (is_empty_change out_change) then
                 let f (peer_id, peer) = 
-                  if peer_id <> remote_id then 
-                    Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+                  if peer_id <> remote_id then begin
+                    dict_ref := Attr_dict.inc change.idx (!dict_ref);
+                    Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_change)
+                  end
                 in
                 List.iter f ip_and_peer
               else ()
@@ -528,13 +665,15 @@ module Loc_rib = struct
 
             (* Pull routes: blocking *)
             let () = 
-              if out_update.withdrawn <> [] then
+              if out_change.wd <> [] then
                 let f (_, peer) =
-                  Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+                  Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_change.wd)
                 in
                 List.iter f ip_and_peer
               else ()
             in
+
+            dict_ref := Attr_dict.remove change.idx (!dict_ref);
 
             let new_t = set_db new_db t in
             handle_loop new_t
@@ -549,9 +688,10 @@ module Loc_rib = struct
             
           (* Synchronize with peer: blocking *)
           let () =
-            let f (pfx, (attr, _)) = 
-              let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
-              Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+            let f (pfx, (idx, _)) = 
+              let change = { wd = []; idx; ins = [pfx] } in
+              dict_ref := Attr_dict.inc change.idx (!dict_ref);
+              Adj_rib_out.input out_rib (Adj_rib_out.Push change)
             in
             List.iter f (Prefix_map.bindings t.db)
           in
@@ -575,11 +715,16 @@ module Loc_rib = struct
             handle_loop new_t
           | false ->
             (* Generate update *)
-            let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
+            let out_change = { wd = out_wd; idx = Attr_dict.gen_index []; ins = [] } in
 
             (* Update db *)
             let new_db = 
-              let f acc pfx = Prefix_map.remove pfx acc in
+              let f acc pfx = 
+                let idx, _ = Prefix_map.find pfx acc in
+                dict_ref := Attr_dict.remove idx (!dict_ref);
+                dict_ref := Attr_dict.remove idx (!dict_ref);
+                Prefix_map.remove pfx acc 
+              in
               List.fold_left f t.db out_wd
             in
 
@@ -589,7 +734,7 @@ module Loc_rib = struct
             (* Send the updates: blocking *)
             let () =  
               let f (peer_id, peer) = 
-                Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
+                Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_change)
               in
               List.iter f ip_and_peer
             in
@@ -597,7 +742,7 @@ module Loc_rib = struct
             (* Pull routes *)
             let () =
               let f (peer_id, peer) =
-                Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
+                Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_change.wd)
               in
               List.iter f ip_and_peer
             in
@@ -626,13 +771,14 @@ module Loc_rib = struct
   let to_string t = 
     let count = ref 0 in
     let pfxs_str = 
-      let f pfx (pa, id) acc = 
+      let f pfx (idx, id) acc = 
+        let attr = Attr_dict.find idx (!dict_ref) in
         count := !count + 1;
         let pfx_str = Printf.sprintf "%d: %s | %s | %s" 
                                       (!count)
                                       (Ipaddr.V4.Prefix.to_string pfx) 
                                       (Ipaddr.V4.to_string id) 
-                                      (Bgp.path_attrs_to_string pa) 
+                                      (Bgp.path_attrs_to_string attr) 
         in
         pfx_str::acc
       in 
@@ -642,7 +788,6 @@ module Loc_rib = struct
   ;;
 
   let size t = Prefix_map.cardinal t.db
-
   let input t input = t.pf (Some input)
   let push_update t (id, u) = input t (Push (id, u)) 
   
