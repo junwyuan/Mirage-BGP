@@ -391,7 +391,7 @@ let handle_open_confirmed fsm = function
     in
     (new_fsm, actions)
   | Keepalive_msg ->
-    let actions = [Reset_hold_timer fsm.hold_time; Initiate_rib] in
+    let actions = [Send_msg Bgp.Keepalive; Reset_hold_timer fsm.hold_time; Initiate_rib] in
     let new_fsm = fsm |> set_state ESTABLISHED in
     (new_fsm, actions)
   | _ -> 
