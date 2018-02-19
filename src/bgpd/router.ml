@@ -259,7 +259,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_asn = t.local_asn;
       hold_time = t.fsm.hold_time;
       local_id = t.local_id;
-      options = [];
+      options = [ Capability [ Mp_ext (Afi.IP4, Safi.UNICAST)] ];
     } in
     send_msg t (Bgp.Open o) 
   ;;
@@ -392,9 +392,6 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         | None -> ()
         | Some rib ->
           t.input_rib <- None;
-
-          Bgp_log.app (fun m -> m "Check2");
-
           Rib.Adj_rib_in.stop rib
       in
 

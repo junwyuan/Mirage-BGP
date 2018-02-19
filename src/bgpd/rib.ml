@@ -230,11 +230,9 @@ module Adj_rib_in = struct
   
   let stop t = 
     let f _pfx idx =
-      Rib_log.app (fun m -> m "check");
       dict_ref := Attr_dict.remove idx (!dict_ref)
     in
     let () = Prefix_map.iter f t.db in
-    Rib_log.app (fun m -> m "check3 %d" (Prefix_map.cardinal t.db));
     input t Stop;
     t.running <- false
   ;;
