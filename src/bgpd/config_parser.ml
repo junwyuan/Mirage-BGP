@@ -49,9 +49,7 @@ let config_to_string { local_asn; local_id; local_port; peers } =
                  (Ipaddr.V4.to_string local_id) local_port str_peers
 ;;
 
-let parse_from_string data = 
-  let json_config = Basic.from_string data in
-  
+let parse json_config = 
   let local_asn = 
     Basic.Util.member "local_asn" json_config 
     |> Basic.Util.to_int 
@@ -106,6 +104,15 @@ let parse_from_string data =
   { local_asn; local_id; local_port; peers }
 ;;
 
+let parse_from_string data = 
+  let json_config = Basic.from_string data in
+  parse json_config
+;;
+
+let parse_from_file file_name = 
+  let json_config = Basic.from_file file_name in
+  parse json_config
+;;
 
 (* let () = 
   let config = parse_from_file "bgpd.json" in

@@ -16,7 +16,11 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
     C.read console >>= function
     | Error err -> 
       Ctl_log.warn (fun m -> m "Fail to read command: %a" C.pp_error err);
-      Lwt.return_unit
+      
+      OS.Time.sleep_ns (Duration.of_sec 60) 
+      >>= fun () ->
+      
+      command_loop console peers
     | Ok (`Eof) ->
       Ctl_log.warn (fun m -> m "Console closed?");
       Lwt.return_unit
@@ -85,7 +89,7 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
         command_loop console peers
   ;;
 
-  let parse_config kv =
+  let parse_config_kv kv =
     let key = Key_gen.config () in
     KV.size kv key >>= function
     | Error e -> 
@@ -108,8 +112,7 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
-    parse_config kv >>= fun config ->
-    (* let config = Config_parser.default_config in *)
+    let config = parse_from_file (Key_gen.config ()) in
 
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn in
