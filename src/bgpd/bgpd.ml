@@ -23,7 +23,11 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
       command_loop console peers
     | Ok (`Eof) ->
       Ctl_log.warn (fun m -> m "Console closed?");
-      Lwt.return_unit
+
+      OS.Time.sleep_ns (Duration.of_sec 60) 
+      >>= fun () ->
+      
+      command_loop console peers
     | Ok (`Data b) ->
       match String.trim @@ Cstruct.to_string b with
       | "start" -> 
