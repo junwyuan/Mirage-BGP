@@ -103,8 +103,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         in
         Lwt.return_unit
       | Ok Open opent -> begin
-        Logs.debug (fun m -> m "Receive incoming connection with open message %s" 
-                                    (Bgp.to_string (Open opent)));
+        let ip, _ = Bgp_flow.dst flow in
+        Logs.debug (fun m -> m "Receive incoming connection from %s(real) with open message %s " 
+                                    (Bgp.to_string (Open opent)) (Ipaddr.V4.to_string ip));
 
         let remote_id = opent.local_id in
         let remote_asn = opent.local_asn in
@@ -460,7 +461,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           | Fsm.Manual_stop -> handle_event_loop t
           | _ ->
             (* Automatic restart *)
-            Bgp_log.app (fun m -> m "BGP automatic restarts.");
+            Bgp_log.info (fun m -> m "BGP automatic restarts.");
             push_event t Fsm.Automatic_start_passive_tcp;
             handle_event_loop t
         end

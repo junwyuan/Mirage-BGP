@@ -23,6 +23,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "frr" -> Relay.frr_relay1
     | "xorp" -> Relay.xorp_relay1
     | "bird" -> Relay.bird_relay1
+    | "mac" -> Relay.mac_relay1
     | _ -> Relay.dev_relay1
   ;;
   
@@ -34,6 +35,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     | "frr" -> Relay.frr_relay2
     | "xorp" -> Relay.xorp_relay2
     | "bird" -> Relay.bird_relay2
+    | "mac" -> Relay.mac_relay2
     | _ -> Relay.dev_relay2
   ;;
 
@@ -941,8 +943,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      test_create_session s; 
-      test_maintain_session s;
+      (* test_create_session s; 
+      test_maintain_session s; *)
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
       test_propagate_update_to_new_peer s;

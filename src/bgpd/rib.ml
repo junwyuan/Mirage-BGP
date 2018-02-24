@@ -384,6 +384,7 @@ module Adj_rib_out = struct
 
           (* Compute the withdrawn and insert set *)
           let wd_set = Prefix_set.inter banned t.past_routes in
+          (* This step turns to be veryyyyyy expensive in terms of memory *)
           let insert_set = Prefix_set.of_list (List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings db)) in
           
           (* Transform the db into groups based on path_attrs *)
