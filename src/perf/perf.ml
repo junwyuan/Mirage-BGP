@@ -1,50 +1,27 @@
 open Lwt.Infix
-open Relay
+open Config_parser
 open Bgp
 
 
 let mon_log = Logs.Src.create "Monitor" ~doc:"Monitor log"
 module Mon_log = (val Logs.src_log mon_log : Logs.LOG)
 
-let speaker1 = Logs.Src.create "Speaker1" ~doc:"Speaker 1 log"
+let speaker1 = Logs.Src.create "Peer1" ~doc:"Speaker 1 log"
 module Sp1_log = (val Logs.src_log speaker1 : Logs.LOG)
 
-let speaker2 = Logs.Src.create "Speaker2" ~doc:"Speaker 2 log"
+let speaker2 = Logs.Src.create "Peer2" ~doc:"Speaker 2 log"
 module Sp2_log = (val Logs.src_log speaker2 : Logs.LOG)
 
 module Main (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
-
-  let relay1 () = 
-    match Key_gen.speaker () with
-    | "quagga" -> Relay.quagga_relay1
-    | "xen" -> Relay.xen_relay1
-    | "frr" -> Relay.frr_relay1
-    | "xorp" -> Relay.xorp_relay1
-    | "bird" -> Relay.bird_relay1
-    | _ -> Relay.dev_relay1
-  ;;
   
-
-  let relay2 () = 
-    match Key_gen.speaker () with
-    | "quagga" -> Relay.quagga_relay2
-    | "xen" -> Relay.xen_relay2
-    | "frr" -> Relay.frr_relay2
-    | "xorp" -> Relay.xorp_relay2
-    | "bird" -> Relay.bird_relay2
-    | _ -> Relay.dev_relay2
-  ;;
-
-  let default_hold_time = 180
-  
-  let default_open_msg (relay: Relay.t) = 
+  let default_open_msg (relay: Config_parser.relay) = 
     let o = {
       version = 4;
       local_id = relay.local_id;
       local_asn = relay.local_asn;
-      options = [];
-      hold_time = default_hold_time;
+      options = [ Capability [Mp_ext (Afi.IP4, Safi.UNICAST)] ];
+      hold_time = 180;
     } in
     Bgp.Open o
   ;;
@@ -54,15 +31,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.fail_with msg
   ;;
 
-  let create_session s relay (module Log : Logs.LOG) =
-    let open Relay in
-    Bgp_flow.create_connection s (relay.remote_id, relay.remote_port)
+  let create_session s config peer (module Log : Logs.LOG) =
+    Bgp_flow.create_connection s (peer.remote_id, peer.remote_port)
     >>= function
     | Error _ -> 
       Log.err (fun m -> m "Create_session: tcp connect fail");
       assert false
     | Ok flow ->
-      Bgp_flow.write flow (default_open_msg relay)
+      Bgp_flow.write flow (default_open_msg peer)
       >>= function
       | Error _ -> 
         Log.err (fun m -> m "Create_session: write open fail");
@@ -337,12 +313,16 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop 0 seed 0.
   ;;
   
-  let start_perf_test ?(cluster_size=500) ?(stage_size=50000) ~s ~total ~seed =
+  let start_perf_test ?(cluster_size=500) ?(stage_size=50000) ~s ~total ~seed ~(config:Config_parser.config) =
+    let open Config_parser in
+    let peer1 = List.nth config.relays 0 in
+    let peer2 = List.nth config.relays 1 in
+
     (* connect to speaker1 *)
-    create_session s (relay1 ()) (module Sp1_log)
+    create_session s config peer1 (module Sp1_log)
     >>= fun (flow1, _) ->
     (* connect to speaker2 *)
-    create_session s (relay2 ()) (module Sp2_log)
+    create_session s config peer2 (module Sp2_log)
     >>= fun (flow2, _) ->
 
     Mon_log.info (fun m -> m "Connection up.");
@@ -351,19 +331,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let _ = write_keepalive_loop flow2 (module Sp2_log) in
 
     (* Wait through the start up mechanism *)
-    let min_ad_intvl = 
-      match (Key_gen.speaker ()) with
-      | "quagga" -> 5
-      | _ -> 5
-    in
-    OS.Time.sleep_ns (Duration.of_sec min_ad_intvl)
+    OS.Time.sleep_ns (Duration.of_sec (Key_gen.start_time ()))
     >>= fun () ->
 
     (* Insert phase *)
     let path_attrs = 
       let origin = Origin EGP in
-      let next_hop = Next_hop (relay1 ()).local_id in
-      let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1000_l; 1001_l; 1002_l; 1003_l]] in
+      let next_hop = Next_hop peer1.local_id in
+      let as_path = As_path [Asn_seq [peer1.local_asn; 1000_l; 1001_l; 1002_l; 1003_l]] in
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~seed:(Pfx_gen.default_seed) ~total ~flow1 ~flow2 
@@ -375,8 +350,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       let rloop = read_loop_count_nlri flow1 1 (module Sp1_log : Logs.LOG) in
       let path_attrs = 
         let origin = Origin EGP in
-        let next_hop = Next_hop (relay2 ()).local_id in
-        let as_path = As_path [Asn_seq [(relay2 ()).local_asn; 1000_l; 1001_l; 1002_l; 1003_l; 1004_l]] in
+        let next_hop = Next_hop peer2.local_id in
+        let as_path = As_path [Asn_seq [peer2.local_asn; 1000_l; 1001_l; 1002_l; 1003_l; 1004_l]] in
         [origin; next_hop; as_path]
       in
       let start_time = Unix.gettimeofday () in
@@ -404,8 +379,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* Replace phase *)
     let path_attrs = 
       let origin = Origin EGP in
-      let next_hop = Next_hop (relay1 ()).local_id in
-      let as_path = As_path [Asn_seq [(relay1 ()).local_asn; 1004_l; 1005_l; 1006_l]] in
+      let next_hop = Next_hop peer1.local_id in
+      let as_path = As_path [Asn_seq [peer1.local_asn; 1004_l; 1005_l; 1006_l]] in
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~path_attrs
@@ -451,22 +426,14 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   
   let start s =
-    let test_sizes = [200000] in
-    let rec loop seed = function
-      | [] -> Lwt.return_unit
-      | hd::tl -> 
-        start_perf_test ~cluster_size:500 ~stage_size:50000 ~s ~total:hd ~seed 
-        >>= fun new_seed ->
-        (* Allow router to recover *)
-        let interval = 
-          match (Key_gen.speaker ()) with
-          | "quagga" -> 30
-          | _ -> 30
-        in
-        OS.Time.sleep_ns (Duration.of_sec interval)
-        >>= fun () ->
-        loop new_seed tl
-    in
-    loop (Pfx_gen.default_seed) test_sizes
+    let config = Config_parser.parse_from_file (Key_gen.config ()) in
+    let total = 200000 in
+    let seed = Pfx_gen.default_seed in
+    Mon_log.info (fun m -> m "Test starts.");
+    start_perf_test ~cluster_size:500 ~stage_size:50000 ~s ~total ~seed ~config
+    >>= fun new_seed ->
+    Mon_log.info (fun m -> m "Test finishes.");
+    Lwt.return_unit
   ;;
 end
+
