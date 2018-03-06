@@ -314,7 +314,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
   
   let start_perf_test ?(cluster_size=500) ?(stage_size=50000) ~s ~total ~seed ~(config:Config_parser.config) =
-    let open Config_parser in
     let peer1 = List.nth config.relays 0 in
     let peer2 = List.nth config.relays 1 in
 
@@ -338,7 +337,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let path_attrs = 
       let origin = Origin EGP in
       let next_hop = Next_hop peer1.local_id in
-      let as_path = As_path [Asn_seq [peer1.local_asn; 1000_l; 1001_l; 1002_l; 1003_l]] in
+      let as_path = As_path [Asn_seq [peer1.local_asn; 2000_l; 2001_l; 2002_l; 2003_l]] in
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~seed:(Pfx_gen.default_seed) ~total ~flow1 ~flow2 
@@ -351,7 +350,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       let path_attrs = 
         let origin = Origin EGP in
         let next_hop = Next_hop peer2.local_id in
-        let as_path = As_path [Asn_seq [peer2.local_asn; 1000_l; 1001_l; 1002_l; 1003_l; 1004_l]] in
+        let as_path = As_path [Asn_seq [peer2.local_asn; 2000_l; 2001_l; 2002_l; 2003_l; 2004_l]] in
         [origin; next_hop; as_path]
       in
       let start_time = Unix.gettimeofday () in
@@ -380,7 +379,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let path_attrs = 
       let origin = Origin EGP in
       let next_hop = Next_hop peer1.local_id in
-      let as_path = As_path [Asn_seq [peer1.local_asn; 1004_l; 1005_l; 1006_l]] in
+      let as_path = As_path [Asn_seq [peer1.local_asn; 2004_l; 2005_l; 2006_l]] in
       [origin; next_hop; as_path]
     in
     phased_insert ~stage_size ~cluster_size ~path_attrs
