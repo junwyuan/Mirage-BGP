@@ -97,8 +97,6 @@ let parse json_config =
     |> Basic.Util.to_list 
   in
 
-  Printf.printf "%d" (List.length json_peers);
-
   let peers = List.map f json_peers in
 
   { local_asn; local_id; local_port; peers }

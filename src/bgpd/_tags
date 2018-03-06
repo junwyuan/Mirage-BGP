@@ -2,7 +2,7 @@ true: package(ipaddr), package(logs)
 true: package(result)
 true: package(cstruct), package(cstruct.ppx)
 true: package(lwt), package(lwt.ppx)
-true: debug
+true: profile, debug
 true: package(mirage), package(mirage-unix), package(duration)
 
 <test/*.*>: package(alcotest)
