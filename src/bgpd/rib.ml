@@ -41,10 +41,10 @@ module Attr_dict = struct
   let add idx attrs t =
     match Idx_map.find_opt idx t with
     | None ->
-      Rib_log.debug (fun m -> m "Idx: %d, add" idx);
+      (* Rib_log.debug (fun m -> m "Idx: %d, add" idx); *)
       Idx_map.add idx (attrs, 1) t
     | Some (attrs, c) ->
-      Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c+1)); 
+      (* Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c+1));  *)
       Idx_map.add idx (attrs, c+1) t
   ;;
 
@@ -55,7 +55,7 @@ module Attr_dict = struct
         Rib_log.err (fun m -> m "Attr %d missing. #Binding %d" idx (Idx_map.cardinal t));
         assert false
       | Some (attrs, c) ->
-        Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c+1));
+        (* Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c+1)); *)
         Idx_map.add idx (attrs, c+1) t
     else t
   ;;
@@ -84,11 +84,11 @@ module Attr_dict = struct
       | None -> t
       | Some (attrs, c) ->
         if c > 1 then begin
-          Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c-1));
+          (* Rib_log.debug (fun m -> m "Idx: %d, Old: %d, New %d" idx c (c-1)); *)
           Idx_map.add idx (attrs, c-1) t
         end 
         else begin
-          Rib_log.debug (fun m -> m "Idx: %d, remove" idx);
+          (* Rib_log.debug (fun m -> m "Idx: %d, remove" idx); *)
           Idx_map.remove idx t
         end
     else t
@@ -603,6 +603,8 @@ module Loc_rib = struct
               let stored_attrs = Attr_dict.find stored_idx (!dict_ref) in
               if src_id = peer_id then begin
                 (* If from the same peer, replace without compare *)
+
+                (* This is wrong *)
                 dict_ref := Attr_dict.inc change.idx (!dict_ref);
                 (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
               end

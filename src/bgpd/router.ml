@@ -105,7 +105,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       | Ok Open opent -> begin
         let ip, _ = Bgp_flow.dst flow in
         Logs.debug (fun m -> m "Receive incoming connection from %s(real) with open message %s " 
-                                    (Bgp.to_string (Open opent)) (Ipaddr.V4.to_string ip));
+                                    (Ipaddr.V4.to_string ip) (Bgp.to_string (Open opent)));
 
         let remote_id = opent.local_id in
         let remote_asn = opent.local_asn in
