@@ -8,7 +8,7 @@ module Ctl_log = (val Logs.src_log ctl_src : Logs.LOG)
 
 module Id_map = Map.Make(Ipaddr.V4)
 
-module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_lwt.V4) = struct
+module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   module Router = Router.Make(S)
   open Router
 
@@ -16,18 +16,10 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
     C.read console >>= function
     | Error err -> 
       Ctl_log.warn (fun m -> m "Fail to read command: %a" C.pp_error err);
-      
-      OS.Time.sleep_ns (Duration.of_sec 60) 
-      >>= fun () ->
-      
-      command_loop console peers
+      Lwt.return_unit
     | Ok (`Eof) ->
       Ctl_log.warn (fun m -> m "Console closed?");
-
-      OS.Time.sleep_ns (Duration.of_sec 60) 
-      >>= fun () ->
-      
-      command_loop console peers
+      Lwt.return_unit
     | Ok (`Data b) ->
       match String.trim @@ Cstruct.to_string b with
       | "start" -> 
@@ -93,7 +85,7 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
         command_loop console peers
   ;;
 
-  let parse_config_kv kv =
+  (* let parse_config kv =
     let key = Key_gen.config () in
     KV.size kv key >>= function
     | Error e -> 
@@ -107,15 +99,16 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
       | Ok data ->
         let str = String.concat "" @@ List.map (fun b -> Cstruct.to_string b) data in     
         Lwt.return @@ Config_parser.parse_from_string str
-  ;;
+  ;; *)
 
-  let start console kv s =
+  let start console s =
     let open Config_parser in
 
     (* Record backtrace *)
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
+    (* parse_config kv >>= fun config -> *)
     let config = parse_from_file (Key_gen.config ()) in
 
     (* Init loc-rib *)
@@ -133,11 +126,16 @@ module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_l
     (* Automatic passive start *)
     let f _id (peer: Router.t) =
       Ctl_log.info (fun m -> m "BGP peer %s autostarts." (Ipaddr.V4.to_string peer.remote_id));
-      push_event peer Fsm.Automatic_start
+      push_event peer Fsm.Automatic_start_passive_tcp
     in
     let () = Id_map.iter f peers in
 
-    command_loop console peers
+
+    (if Key_gen.test () then 
+      OS.Time.sleep_ns (Duration.of_sec (Key_gen.runtime ()))
+    else 
+      command_loop console peers
+    )
     >>= fun () ->
 
     (* Clean up *)
