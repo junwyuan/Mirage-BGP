@@ -130,7 +130,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     in
     let () = Id_map.iter f peers in
 
-    command_loop console peers
+
+    (if Key_gen.test () then 
+      OS.Time.sleep_ns (Duration.of_sec (Key_gen.runtime ()))
+    else 
+      command_loop console peers
+    )
     >>= fun () ->
 
     (* Clean up *)
