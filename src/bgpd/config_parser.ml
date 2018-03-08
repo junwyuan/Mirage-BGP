@@ -5,6 +5,7 @@ type peer = {
   remote_id: Ipaddr.V4.t;
   remote_port: int;
   hold_time: int;
+  conn_retry_time: int;
 }
 
 type config = {
@@ -24,15 +25,18 @@ let default_config = {
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.3";
       remote_port = 179;
       hold_time = 90;
+      conn_retry_time = 0;
     };
     {
       remote_asn = 5_l;
       remote_id = Ipaddr.V4.of_string_exn "172.19.10.4";
       remote_port = 179;
       hold_time = 90;
+      conn_retry_time = 0;
     };
   ]
 }
+
 
 let peer_to_string { remote_asn; remote_id; remote_port; hold_time } =
   Printf.sprintf "{ remote_asn: %d, remote_id: %s, remote_port: %d, hold_time %d }" (Int32.to_int remote_asn) 
@@ -45,9 +49,7 @@ let config_to_string { local_asn; local_id; local_port; peers } =
                  (Ipaddr.V4.to_string local_id) local_port str_peers
 ;;
 
-let parse_from_string data = 
-  let json_config = Basic.from_string data in
-  
+let parse json_config = 
   let local_asn = 
     Basic.Util.member "local_asn" json_config 
     |> Basic.Util.to_int 
@@ -84,25 +86,33 @@ let parse_from_string data =
       Basic.Util.member "hold_time" json_peer
       |> Basic.Util.to_int
     in
-    { remote_asn; remote_id; remote_port; hold_time }
+    let conn_retry_time = 
+      Basic.Util.member "conn_retry_time" json_peer
+      |> Basic.Util.to_int
+    in
+    { remote_asn; remote_id; remote_port; hold_time; conn_retry_time }
   in
   let json_peers = 
     Basic.Util.member "peers" json_config 
     |> Basic.Util.to_list 
   in
 
-  Printf.printf "%d" (List.length json_peers);
-
   let peers = List.map f json_peers in
 
   { local_asn; local_id; local_port; peers }
 ;;
 
+let parse_from_string data = 
+  let json_config = Basic.from_string data in
+  parse json_config
+;;
+
+let parse_from_file file_name = 
+  let json_config = Basic.from_file file_name in
+  parse json_config
+;;
 
 (* let () = 
   let config = parse_from_file "bgpd.json" in
   Printf.printf "%s \n" (config_to_string config)
 ;; *)
-
-
-

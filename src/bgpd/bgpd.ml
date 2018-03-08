@@ -109,7 +109,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
     (* Parse config from file *)
     (* parse_config kv >>= fun config -> *)
-    let config = Config_parser.default_config in
+    let config = parse_from_file (Key_gen.config ()) in
 
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn in

@@ -51,7 +51,11 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     local_port: int;
     local_asn: int32;
     socket: S.t;
-    
+
+    (* Temporary flow storage *)
+    mutable in_flow: Bgp_flow.t option;
+    mutable out_flow: Bgp_flow.t option;
+
     mutable flow_handler: Flow_handler.t option;
     
     mutable fsm: Fsm.t;
@@ -99,8 +103,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         in
         Lwt.return_unit
       | Ok Open opent -> begin
-        Logs.debug (fun m -> m "Receive incoming connection with open message %s" 
-                                    (Bgp.to_string (Open opent)));
+        let ip, _ = Bgp_flow.dst flow in
+        Logs.debug (fun m -> m "Receive incoming connection from %s(real) with open message %s " 
+                                    (Ipaddr.V4.to_string ip) (Bgp.to_string (Open opent)));
 
         let remote_id = opent.local_id in
         let remote_asn = opent.local_asn in
@@ -124,12 +129,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
             let _ = Bgp_flow.write flow (Notification Cease) in
             Bgp_flow.close flow
           | CONNECT | ACTIVE ->
+            t.in_flow <- Some flow;
             push_event t Tcp_connection_confirmed;
+
             push_event t (BGP_open opent);
-
-            let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-            t.flow_handler <- Some flow_handler;
-
             Lwt.return_unit
           | OPEN_SENT | OPEN_CONFIRMED -> 
             if (Ipaddr.V4.compare t.local_id t.remote_id > 0) then begin
@@ -146,11 +149,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
               (* Recover *)
               push_event t Automatic_start_passive_tcp;
 
+              t.in_flow <- Some flow;
               push_event t Tcp_connection_confirmed;
-              push_event t (BGP_open opent);
 
-              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-              t.flow_handler <- Some flow_handler; 
+              push_event t (BGP_open opent);
               
               Lwt.return_unit
             end
@@ -205,11 +207,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
                                         (Ipaddr.V4.to_string t.remote_id));
             Bgp_flow.close flow
           | CONNECT | ACTIVE ->
+            t.out_flow <- Some flow;
             push_event t Tcp_CR_Acked;
-            
-            let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-            t.flow_handler <- Some flow_handler;
-            
             Lwt.return_unit
           | OPEN_SENT | OPEN_CONFIRMED -> 
             if (Ipaddr.V4.compare t.local_id t.remote_id < 0) then begin
@@ -225,10 +224,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
               (* Recover *)
               push_event t Automatic_start_passive_tcp;
 
+              t.out_flow <- Some flow;
               push_event t Tcp_CR_Acked;
-
-              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-              t.flow_handler <- Some flow_handler;
 
               Lwt.return_unit
             end
@@ -263,7 +260,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_asn = t.local_asn;
       hold_time = t.fsm.hold_time;
       local_id = t.local_id;
-      options = [];
+      options = [ Capability [ Mp_ext (Afi.IP4, Safi.UNICAST)] ];
     } in
     send_msg t (Bgp.Open o) 
   ;;
@@ -425,11 +422,32 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           | Fsm.Notif_msg _ -> t.stat.rec_notif <- t.stat.rec_notif + 1
           | _ -> ()
         in
-
+        
         let new_fsm, actions = Fsm.handle t.fsm event in
 
         (* Update finite state machine before performing any action. *)
         t.fsm <- new_fsm;
+
+        (* Initiate flow handler *)
+        let () = match event with
+          | Fsm.Tcp_CR_Acked -> begin
+            match t.out_flow with
+            | None -> Bgp_log.err (fun m -> m "In_flow missing.")
+            | Some flow ->
+              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
+              t.flow_handler <- Some flow_handler;
+              t.out_flow <- None
+          end
+          | Fsm.Tcp_connection_confirmed -> begin
+            match t.in_flow with
+            | None -> Bgp_log.err (fun m -> m "Out_flow missing.")
+            | Some flow ->
+              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
+              t.flow_handler <- Some flow_handler;
+              t.in_flow <- None
+          end
+          | _ -> ()
+        in
 
         (* Blocking perform all actions *)
         let () =
@@ -440,7 +458,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         match Fsm.state t.fsm with
         | Fsm.IDLE -> begin
           match event with
-          | Fsm.Manual_stop -> Lwt.return_unit
+          | Fsm.Manual_stop -> handle_event_loop t
           | _ ->
             (* Automatic restart *)
             Bgp_log.info (fun m -> m "BGP automatic restarts.");
@@ -475,7 +493,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
 
       socket; 
       conn_starter = None;
+      
       flow_handler = None;
+      in_flow = None;
+      out_flow = None;
 
       remote_id = peer_config.remote_id;
       remote_port = peer_config.remote_port;
@@ -484,7 +505,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_port = config.local_port;
       local_asn = config.local_asn;
 
-      fsm = Fsm.create 240 (peer_config.hold_time) (peer_config.hold_time / 3);
+      fsm = Fsm.create peer_config.conn_retry_time (peer_config.hold_time) (peer_config.hold_time / 3);
 
       conn_retry_timer = None; 
       hold_timer = None; 
