@@ -526,9 +526,6 @@ module Loc_rib = struct
   ;;
 
 
-  
-
-
 
   let find_origin path_attrs = 
     match Bgp.find_origin path_attrs with

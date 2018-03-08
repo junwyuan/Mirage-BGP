@@ -852,6 +852,68 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     pass test_name
   ;;
 
+  let test_replace2 s () =
+    let test_name = "not take worse route from source that gives the best route" in
+
+    create_session s (relay1 ()) test_name
+    >>= fun (flow1, _) ->
+    create_session s (relay2 ()) test_name
+    >>= fun (flow2, _) ->
+
+    let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
+
+    (* Write the first update *)
+    let update = 
+      let path_attrs = [
+        Origin EGP;
+        As_path [ Asn_seq [ (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l ] ];
+        Next_hop (relay1 ()).local_id;
+      ] in
+      { withdrawn = []; nlri; path_attrs } 
+    in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    (* Check that I receive the first update *)
+    read_update_loop flow2 (fun msg -> true) (module Sp2_log)
+    >>= fun () ->
+
+    (* Write the 2nd update *)
+    let path_attrs = [
+      Origin EGP;
+      As_path [ Asn_seq [ (relay2 ()).local_asn; 65001_l; 65002_l; 65003_l ] ];
+      Next_hop (relay2 ()).local_id;
+    ] in
+    let update = {withdrawn = []; nlri; path_attrs } in
+    send_msg flow2 (Update update) (module Sp2_log)
+    >>= fun () ->
+
+    (* Fail there is an update *)
+    Lwt.pick [ 
+      read_update_loop flow1 (fun u -> assert false) (module Sp2_log); 
+      OS.Time.sleep_ns (Duration.of_sec 5)
+    ]
+    >>= fun () ->
+
+    (* write the 3rd update *)
+    let path_attrs = [
+      Origin EGP;
+      As_path [ Asn_seq [ (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l; 65004_l ] ];
+      Next_hop (relay1 ()).local_id;
+    ] in
+    let update = { withdrawn = []; nlri; path_attrs } in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+    
+    (* This is the correct case, no update *)
+    (* Clean up *)
+    close_session flow1
+    >>= fun () ->
+    close_session flow2
+    >>= fun () ->
+    pass test_name
+  ;;
+
 
   (* TODO *)
   let test_msg_error_handle_base s () = Lwt.return_unit
@@ -944,7 +1006,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
       (* test_create_session s; 
-      test_maintain_session s; *)
+      test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
       test_propagate_update_to_new_peer s;
@@ -954,7 +1016,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_route_withdrawn_diff_src s;
       test_link_flap s;
       test_route_replace s;
-      test_route_unchanged s;
+      test_route_unchanged s; *)
+      test_replace2 s;
       test_header_error_handle s;
       test_update_attr_length_error_handle s;
       test_route_selection_after_wd s;
