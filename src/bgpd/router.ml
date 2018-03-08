@@ -385,7 +385,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         Rib.Adj_rib_out.create t.remote_id callback
       in
       t.output_rib <- Some out_rib;
-
+      
       Rib.Loc_rib.sub t.loc_rib (t.remote_id, in_rib, out_rib)
     | Release_rib ->
       let () =

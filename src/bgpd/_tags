@@ -11,5 +11,3 @@ true: debug
 
 true: package(yojson)
 true: package(lwt.unix)
-
-true: profile

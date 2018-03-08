@@ -461,7 +461,7 @@ module Loc_rib = struct
       in
 
       let db_after_insert, out_nlri = 
-        let f (db, out_nlri) pfx = 
+        let insert_one_pfx (db, out_nlri) pfx = 
           match List.mem pfx out_wd with
           | true -> 
             (* We do not install new attrs immediately after withdrawn *)
@@ -472,14 +472,14 @@ module Loc_rib = struct
               (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
             | Some (stored_pattrs, src_id) ->
               if src_id = peer_id then 
-                (* If from the same peer, replace without compare *)
-                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
+                (* If from the same peer, remove the current best path and reselects the path later. *)
+                (Prefix_map.remove pfx db, pfx::out_wd)
               else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then
                 (* Replace if the new route is more preferable *)
                 (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
               else db, out_nlri
         in
-        List.fold_left f (db_after_wd, []) update.nlri
+        List.fold_left insert_one_pfx (db_after_wd, []) update.nlri
       in
 
       let out_update = {
