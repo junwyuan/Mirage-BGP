@@ -755,20 +755,26 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun (flow2, _) ->
 
     (* Write the first update *)
-    let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
+    let nlri = [ 
+      Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0");
+      Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.25.0");
+      Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.26.0");
+    ] in
     let path_attrs = [
       Origin EGP;
-      As_path [ Asn_seq [ (relay1 ()).local_asn; 100_l; 65002_l; 65003_l ] ];
+      As_path [ Asn_seq [ (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l ] ];
       Next_hop (relay1 ()).local_id;
     ] in
     let update = { withdrawn = []; nlri; path_attrs } in
     send_msg flow1 (Update update) (module Sp1_log)
     >>= fun () ->
 
-    (* Verify 1st update *)
-    let cond u =
-      assert (List.length u.nlri = 1);
-      true
+    let count = ref 0 in
+    let cond ({ nlri; path_attrs; withdrawn } as u) =
+      Sp2_log.debug (fun m -> m "%s" (update_to_string u));
+      assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l; ]]);
+      count := !count + List.length nlri;
+      !count = 3
     in
     read_update_loop flow2 cond (module Sp2_log)
     >>= fun () ->
@@ -776,21 +782,22 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* Write the 2nd update *)
     let path_attrs = [
       Origin EGP;
-      As_path [ Asn_seq [ (relay2 ()).local_asn; 65001_l; 65002_l ] ];
-      Next_hop (relay2 ()).local_id;
+      As_path [ Asn_seq [ (relay1 ()).local_asn; 65001_l; 65002_l ] ];
+      Next_hop (relay1 ()).local_id;
     ] in
     let update = { withdrawn = []; nlri; path_attrs } in
-    send_msg flow2 (Update update) (module Sp2_log)
+    send_msg flow1 (Update update) (module Sp1_log)
     >>= fun () ->
 
     (* Verify the 2nd update *)
+    let count = ref 0 in
     let cond ({ nlri; path_attrs; withdrawn } as u) =
       Sp2_log.debug (fun m -> m "%s" (update_to_string u));
-      assert (nlri = [ Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0") ]);
-      assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay2 ()).local_asn; 65001_l; 65002_l]]);
-      true
+      assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay1 ()).local_asn; 65001_l; 65002_l]]);
+      count := !count + List.length nlri;
+      !count = 3
     in
-    read_update_loop flow1 cond (module Sp1_log)
+    read_update_loop flow2 cond (module Sp2_log)
     >>= fun () ->
 
     close_session flow1
@@ -1005,7 +1012,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      test_create_session s; 
+      (* test_create_session s; 
       test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
@@ -1014,13 +1021,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_simul_insert s;
       test_route_withdrawn s;
       test_route_withdrawn_diff_src s;
-      test_link_flap s;
+      test_link_flap s; *)
       test_route_replace s;
-      test_route_unchanged s;
+      (* test_route_unchanged s;
       test_replace2 s;
       test_header_error_handle s;
       test_update_attr_length_error_handle s;
-      test_route_selection_after_wd s;
+      test_route_selection_after_wd s; *)
     ] in
     run tests
     >>= fun () ->
