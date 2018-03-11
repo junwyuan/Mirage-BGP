@@ -45,7 +45,7 @@ module Attr_dict = struct
       Idx_map.add idx (attrs, c+1) t
   ;;
 
-  let inc idx t =
+  let inc idx t =  
     if idx <> null then
       match Idx_map.find_opt idx t with
       | None ->
@@ -609,9 +609,9 @@ module Loc_rib = struct
       in
 
       let out_change = {
-        wd = out_wd;
+        wd = wd;
         idx = change.idx;
-        ins = ins
+        ins = ins;
       } in 
 
       (db, out_change)
