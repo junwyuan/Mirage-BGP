@@ -38,29 +38,38 @@ let test_find_aspath () =
   assert (Loc_rib.find_aspath path_attrs = [Bgp.Asn_seq [1_l]]);
 ;;
 
-let test_append_aspath () = 
-  let segments = [
-    Asn_seq [2_l; 3_l];
-    Asn_set [1_l];
+let test_update_aspath () =
+  let attrs = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65002_l]; Asn_set [65003_l]; ];
+    Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.2");
   ] in
-  let n_segments = Loc_rib.append_aspath 5_l segments in
-  assert (List.length n_segments = 2);
-
-  (match n_segments with
-  | (Asn_seq l)::tl -> assert (List.length l = 3)
-  | _ -> assert false);
-
-
-  let segments = [
-    Asn_set [1_l];
-    Asn_seq [2_l; 3_l];
+  let open Loc_rib in
+  let updated = update_aspath 65000_l attrs in
+  let expected = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65000_l; 65001_l; 65002_l]; Asn_set [65003_l]; ];
+    Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.2");
   ] in
-  let n_segments = Loc_rib.append_aspath 5_l segments in
-  assert (List.length n_segments = 3);
+  assert (updated = expected);
+;;
 
-  (match n_segments with
-  | (Asn_seq l)::tl -> assert (List.length l = 1)
-  | _ -> assert false);
+let test_update_nexthop () =
+  let id1 = Ipaddr.V4.of_string_exn "172.19.10.1" in
+  let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
+  let attrs = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65002_l]; Asn_set [65003_l]; ];
+    Bgp.Next_hop id1;
+  ] in
+  let open Loc_rib in
+  let updated = update_nexthop id2 attrs in
+  let expected = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65002_l]; Asn_set [65003_l]; ];
+    Bgp.Next_hop id2;
+  ] in
+  assert (updated = expected);
 ;;
 
 let test_tie_break () =
@@ -175,36 +184,51 @@ let test_adj_rib_update_db () =
 ;;
 
 let test_loc_rib_update_db () = 
-  let local_asn = 1_l in
+  let local_asn = 65000_l in
   let local_id = Ipaddr.V4.of_string_exn "172.19.0.3" in
 
-  
-  (* Test insertion *)
-  let id1 = Ipaddr.V4.of_string_exn "172.19.10.1" in
-
-  let path_attrs = [
-    (Bgp.Origin Bgp.EGP);
-    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (Bgp.Next_hop id1);
-  ] in
-  let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); ] in
-  let update = { withdrawn = []; path_attrs; nlri } in
-  
   let db = Prefix_map.empty in
 
+  let pfx1 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.19.1.0") in
+  let pfx2 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.19.2.0") in
+  let pfx3 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.19.3.0") in
+
+  (* Test insertion *)
+  let id1 = Ipaddr.V4.of_string_exn "172.19.10.1" in
+  let path_attrs = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65002_l]];
+    Bgp.Next_hop id1;
+  ] in
+  let nlri = [ pfx1 ] in
+  let update = { withdrawn = []; path_attrs; nlri } in
+  
   let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
-  assert (Prefix_map.cardinal db = 1);
+  
   assert (List.length out_update.nlri = 1);
+  let updated_attrs = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [ local_asn; 65001_l; 65002_l ]];
+    Bgp.Next_hop local_id;
+  ] in
+  Printf.printf "%s" (path_attrs_to_string out_update.path_attrs);
+  assert (out_update.path_attrs = updated_attrs);
   assert (List.length out_update.withdrawn = 0);
+  assert (Prefix_map.cardinal db = 1);
+  assert (Prefix_map.mem pfx1 db);
+  let stored_attrs, stored_id = Prefix_map.find pfx1 db in
+  assert (stored_attrs = updated_attrs);
+  assert (stored_id = id1);
+
 
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let path_attrs = [
-    (Bgp.Origin Bgp.IGP);
-    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (Bgp.Next_hop id2);
+    Bgp.Origin Bgp.IGP;
+    Bgp.As_path [Bgp.Asn_seq [65003_l; 65004_l]];
+    Bgp.Next_hop id2;
   ] in
-  let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
-  let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
+  let nlri = [ pfx2 ] in
+  let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
   let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 2);
@@ -212,14 +236,12 @@ let test_loc_rib_update_db () =
   assert (List.length out_update.withdrawn = 0);
 
   (* Test loop detection *)
-
-  let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
   let path_attrs = [
-    (Bgp.Origin Bgp.IGP);
-    (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
-    (Bgp.Next_hop id2);
+    Bgp.Origin Bgp.IGP;
+    Bgp.As_path [Bgp.Asn_seq [65003_l; local_asn; 65004_l]];
+    Bgp.Next_hop id2;
   ] in
-  let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0")); ] in
+  let nlri = [ pfx3 ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
   let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
@@ -227,77 +249,97 @@ let test_loc_rib_update_db () =
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
 
-
   (* Test same src replace *)
   let path_attrs = [
     (Bgp.Origin Bgp.EGP);
     (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l]]);
     (Bgp.Next_hop id1);
   ] in
-  let nlri = [ 
-    (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
-  ] in
+  let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
   let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
-  assert (Prefix_map.cardinal db = 2);
-  assert (List.length out_update.nlri = 1);
-  assert (List.length out_update.withdrawn = 0);
+  assert (Prefix_map.cardinal db = 1);
+  assert (not (Prefix_map.mem pfx1 db));
+  assert (List.length out_update.nlri = 0);
+  assert (out_update.withdrawn = [ pfx1 ]);
 
   (* This advertised route would be taken because its as_path is shorter *)
   let path_attrs = [
-    (Bgp.Origin Bgp.EGP);
-    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (Bgp.Next_hop id2);
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65005_l]];
+    Bgp.Next_hop id2;
   ] in
-  let nlri = [ 
-    (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
-  ] in
+  let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
   let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
-  assert (Prefix_map.cardinal db = 2);
-  assert (List.length out_update.nlri = 1);
+  assert (out_update.nlri = [ pfx1 ]);
+  let expected = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [ local_asn; 65005_l; ]];
+    Bgp.Next_hop local_id;
+  ] in
+  assert (expected = out_update.path_attrs);
   assert (List.length out_update.withdrawn = 0);
-
-  (* Test path attrs modification *)
-  assert (find_aspath out_update.path_attrs <> Some [Asn_seq [5_l; 2_l]]);
+  assert (Prefix_map.cardinal db = 2);
+  assert (Prefix_map.mem pfx1 db);
+  let stored_attrs, stored_id = Prefix_map.find pfx1 db in
+  assert (stored_attrs = expected);
+  assert (stored_id = id2);
 
   (* This advertised route would not be chosen as its as_path is longer than the current one *)
   let path_attrs = [
-    (Bgp.Origin Bgp.EGP);
-    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l; 3_l; 4_l]]);
-    (Bgp.Next_hop id1);
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [65007_l; 65008_l; 65009_l; 65010_l]];
+    Bgp.Next_hop id1;
   ] in
-  let nlri = [ 
-    (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.19.0.0")); 
-  ] in
+  let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
 
   let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
-  assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
+  assert (Prefix_map.cardinal db = 2);
+  assert (Prefix_map.mem pfx1 db);
+  let stored_attrs, stored_id = Prefix_map.find pfx1 db in
+  let expected = [
+    Bgp.Origin Bgp.EGP;
+    Bgp.As_path [Bgp.Asn_seq [ local_asn; 65005_l; ]];
+    Bgp.Next_hop local_id;
+  ] in
+  assert (stored_attrs = expected);
+  assert (stored_id = id2);
 
   (* Test withdrawn *)
   let update = {
-    withdrawn = [
-      (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.20.0.0"));
-    ];
+    withdrawn = [ pfx1 ];
     path_attrs = [];
     nlri = [];
   } in
   let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 1);
+  assert (not (Prefix_map.mem pfx1 db));
   assert (List.length out_update.nlri = 0);
-  assert (List.length out_update.withdrawn = 1);
+  assert (out_update.withdrawn = [ pfx1 ]);
+
+  (* Test withdrawn that should not affect Loc RIB. *)
+  let update = {
+    withdrawn = [ pfx2 ];
+    path_attrs = [];
+    nlri = [];
+  } in
+  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
+  assert (Prefix_map.cardinal db = 1);
+  assert (Prefix_map.mem pfx2 db);
+  assert (List.length out_update.nlri = 0);
+  assert (List.length out_update.withdrawn = 0);
 ;;
 
 let test_loc_rib_get_assoc_pfxs () = 
   let local_asn = 1_l in
   let local_id = Ipaddr.V4.of_string_exn "172.19.0.3" in
 
-  
   (* speaker1 inserts two pfxs *)
   let id1 = Ipaddr.V4.of_string_exn "172.19.10.1" in
   let path_attrs = [
@@ -345,48 +387,97 @@ let pfxs_gen seed n =
   (!pfxs, !r)
 ;;
 
-let test_util_take () =
+let test_take () =
   let pfxs = [
     Ipaddr.V4.Prefix.make 8 (Ipaddr.V4.of_string_exn "10.0.0.0");
     Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "66.173.0.0");
     Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "172.168.13.0");
   ] in
-  let taken, rest = Adj_rib_out.take_n pfxs 1 in
+  let taken, rest = Adj_rib_out.take pfxs 1 in
   assert (List.length taken = 1);
   assert (List.length rest = 2);
 ;;
 
-let test_util_split () =
+let test_split () =
   let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
-  let split = Adj_rib_out.split pfxs 400 in
-  assert (List.length split = 3);
+  let split, rest = Adj_rib_out.split pfxs 400 in
+  assert (List.length split = 2);
+  assert (List.length rest = 200);
 
   let pfxs, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
-  let split = Adj_rib_out.split pfxs 400 in
+  let split, rest = Adj_rib_out.split pfxs 400 in
   assert (List.length split = 5);
+  assert (List.length rest = 0);
 ;;
 
-(* let test_split_update () =
-  let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 1000 in
-  let update = { withdrawn; path_attrs = []; nlri = [] } in
-  let split = Util.split_update update in
-  assert (List.length split = 1);
+let test_out_rib_build_db () =
+  let pfx1 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.10.13.0") in
+  let pfx2 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.10.14.0") in
+  let pfx3 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.10.15.0") in
+  let pfx4 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.10.16.0") in
+  let pfx5 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.10.17.0") in
+  let pfx6 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "10.10.18.0") in
+  
+  (* pfx1: withdrawn-after-advertisement *)
+  (* pfx2: advertisement-after-advertisement *)
+  (* pfx3: advertisement-after-withdrawn *)
+  (* pfx4: only get withdrawn *)
+  (* pfx5: only get advertised *)
+  (* pfx6: withdrawn after withdrawn *)
 
-  let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
-  let update = { withdrawn; path_attrs = []; nlri = [] } in
-  let split = Util.split_update update in
-  assert (List.length split = 2);
-
-  let path_attrs = [
-    (Bgp.Origin Bgp.EGP); 
-    (Bgp.As_path [Bgp.Asn_seq [5_l; 2_l]]);
-    (Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1")); 
+  let attrs1 = [
+    Bgp.Origin Bgp.EGP; 
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65002_l; 65003_l]];
+    Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"); 
   ] in
-  let withdrawn, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
-  let nlri, _ = pfxs_gen (Int32.shift_left 128_l 24) 2000 in
-  let update = { withdrawn; path_attrs; nlri } in
-  assert (List.length (Util.split_update update) = 4);
-;; *)
+  let wd1 = [ pfx1; pfx6 ] in
+  let nlri1 = [ pfx2; pfx3; ] in
+  let u1 = { withdrawn = wd1; path_attrs = attrs1; nlri = nlri1 } in
+
+  let attrs2 = [
+    Bgp.Origin Bgp.EGP; 
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65002_l; 65003_l; 65004_l]];
+    Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"); 
+  ] in
+  let wd2 = [ pfx3; pfx4 ] in
+  let nlri2 = [ pfx1; pfx2; ] in
+  let u2 = { withdrawn = wd2; path_attrs = attrs2; nlri = nlri2 } in
+
+  let attrs3 = [
+    Bgp.Origin Bgp.IGP; 
+    Bgp.As_path [Bgp.Asn_seq [65001_l; 65007_l; 65004_l]];
+    Bgp.Next_hop (Ipaddr.V4.of_string_exn "172.19.10.1"); 
+  ] in
+  let wd3 = [ pfx6 ] in
+  let nlri3 = [ pfx5 ] in
+  let u3 = { withdrawn = wd3; path_attrs = attrs3; nlri = nlri3 } in
+
+  let rev_updates = [u1; u2; u3] in
+  let open Adj_rib_out in
+  let wd, ins, db = build_db rev_updates in
+
+  assert (Prefix_set.cardinal wd = 3);
+  assert (Prefix_set.mem pfx1 wd);
+  assert (Prefix_set.mem pfx4 wd);
+  assert (Prefix_set.mem pfx6 wd);
+
+  assert (Prefix_set.cardinal ins = 3);
+  assert (Prefix_set.mem pfx2 ins);
+  assert (Prefix_set.mem pfx3 ins);
+  assert (Prefix_set.mem pfx5 ins);
+
+  assert (ID_map.cardinal db = 2);
+  assert (ID_map.mem (ID.create attrs1) db);
+  assert (ID_map.mem (ID.create attrs3) db);
+  let _attrs, ins = ID_map.find (ID.create attrs1) db in
+  assert (List.length ins = 2);
+  assert (List.mem pfx2 ins);
+  assert (List.mem pfx3 ins);
+  let _attrs, ins2 = ID_map.find (ID.create attrs3) db in
+  assert (List.length ins2 = 1);
+  assert (List.mem pfx5 ins2);
+;;
+
 
 let test_util_update_nexthop () =
   let path_attrs = [
@@ -422,16 +513,18 @@ let () =
       test_case "test get_aspath_len" `Slow test_get_aspath_len;
       test_case "test find_origin" `Slow test_find_origin;
       test_case "test find_aspath" `Slow test_find_aspath;
+      test_case "test update aspath" `Slow test_update_aspath;
+      test_case "test update nexthop" `Slow test_update_nexthop;
       test_case "test tie_break" `Slow test_tie_break;
       test_case "test update_db" `Slow test_loc_rib_update_db;
       test_case "test remove_assoc_pfxs" `Slow test_loc_rib_get_assoc_pfxs;
     ];
+    "Out RIB", [
+      test_case "test take" `Slow test_take;
+      test_case "test split" `Slow test_split;
+      test_case "test build db" `Slow test_out_rib_build_db;
+    ];
     "util", [
-      test_case "test util.take" `Slow test_util_take;
-      test_case "test util.split" `Slow test_util_split;
-      test_case "test Util.append_aspath" `Slow test_append_aspath;
-      test_case "test Util.update_nexthop" `Slow test_util_update_nexthop;
-      test_case "test Util.update_aspath" `Slow test_util_update_aspath;
     ];
   ]
 ;;

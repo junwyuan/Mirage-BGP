@@ -197,34 +197,20 @@ module Adj_rib_out = struct
       in
 
       let new_db = 
-        let attr_id = ID.create u.path_attrs in
-        match ID_map.find_opt attr_id db with
-        | None ->
-          ID_map.add attr_id (u.path_attrs, delta_ins) db
-        | Some (attrs, pfxs) ->
-          ID_map.add attr_id (attrs, delta_ins @ pfxs) db
+        if delta_ins <> [] then
+          let attr_id = ID.create u.path_attrs in
+          match ID_map.find_opt attr_id db with
+          | None ->
+            ID_map.add attr_id (u.path_attrs, delta_ins) db
+          | Some (attrs, pfxs) ->
+            ID_map.add attr_id (attrs, delta_ins @ pfxs) db
+        else db
       in
 
       (new_wd, new_ins, new_db)
     in
     
     List.fold_left process_update (Prefix_set.empty, Prefix_set.empty, ID_map.empty) rev_updates 
-  ;;
-
-  let group db =
-    let f (attr_map, pfx_map) (pfx, attrs) =
-      (* Generate an id for the attrs *)
-      let attr_id = ID.create attrs in
-      
-      match ID_map.mem attr_id pfx_map with
-      | true -> 
-        let l = ID_map.find attr_id pfx_map in
-        attr_map, ID_map.add attr_id (pfx::l) pfx_map
-      | false ->
-        ID_map.add attr_id attrs attr_map, ID_map.add attr_id [pfx] pfx_map 
-    in
-    let attr_map, pfx_map = List.fold_left f (ID_map.empty, ID_map.empty) (Prefix_map.bindings db) in
-    List.map (fun (id, pfx_list) -> (ID_map.find id attr_map, pfx_list)) (ID_map.bindings pfx_map)
   ;;
 
   (* This is not a standard List take operation. The result comes out in reverse order as in the standard implementation. *)
@@ -322,8 +308,8 @@ module Adj_rib_out = struct
           let new_t = set_past_routes new_routes t in
 
           (* Minimal advertisement time interval *)
-          OS.Time.sleep_ns (Duration.of_ms 0)
-          >>= fun () ->
+          (* OS.Time.sleep_ns (Duration.of_ms 0)
+          >>= fun () -> *)
 
           handle_loop new_t
     end
@@ -422,29 +408,33 @@ module Loc_rib = struct
     loop 0 segment_list
   ;;
 
-
-  let append_aspath asn segments = 
-    match segments with
-    | [] -> [ Asn_seq [asn] ]
-    | hd::tl -> match hd with
-      | Asn_set _ -> (Asn_seq [asn])::segments
-      | Asn_seq l -> (Asn_seq (asn::l))::tl
+  let update_aspath asn attrs =
+    let append_aspath asn segments = 
+      match segments with
+      | [] -> [ Asn_seq [asn] ]
+      | hd::tl -> match hd with
+        | Asn_set _ -> (Asn_seq [asn])::segments
+        | Asn_seq l -> (Asn_seq (asn::l))::tl
+    in
+    let f_update_aspath attr acc =
+      match attr with
+      | As_path segments -> 
+        let new_attr = As_path (append_aspath asn segments) in
+        new_attr::acc
+      | _ -> attr::acc
+    in
+    List.fold_right f_update_aspath attrs []
   ;;
 
-  let update_aspath asn path_attrs = 
-    match find_aspath path_attrs with
-    | None ->
-      Rib_log.warn (fun m -> m "MISSING AS PATH");
-      As_path [Asn_seq [asn]]::path_attrs
-    | Some aspath ->
-      let appended = append_aspath asn aspath in
-      let tmp = path_attrs_remove AS_PATH path_attrs in
-      As_path appended::tmp
-  ;;
-
-  let update_nexthop ip path_attrs =
-    let tmp = path_attrs_remove NEXT_HOP path_attrs in
-    (Next_hop ip)::tmp
+  let update_nexthop ip attrs =
+    let f_update_nexthop attr acc =
+      match attr with
+      | Next_hop _ -> 
+        let new_attr = Next_hop ip in
+        new_attr::acc
+      | _ -> attr::acc
+    in
+    List.fold_right f_update_nexthop attrs []
   ;;
 
   let find_origin path_attrs = 
@@ -484,58 +474,59 @@ module Loc_rib = struct
   (* This function is pure *)
   let update_db local_id local_asn (peer_id, update) db =
     (* Withdrawn from Loc-RIB *)
-    let (db_after_wd, out_wd) =
-      let f (db, out_wd) pfx = 
+    let db, wd =
+      let loc_wd_pfx (db, out_wd) pfx = 
         match Prefix_map.find_opt pfx db with
         | None -> db, out_wd
-        | Some (_, stored) -> 
-          if (stored = peer_id) then 
+        | Some (_, stored_id) -> 
+          if (stored_id = peer_id) then 
             (Prefix_map.remove pfx db, List.cons pfx out_wd) 
           else db, out_wd
       in
-      List.fold_left f (db, []) update.withdrawn
+      List.fold_left loc_wd_pfx (db, []) update.withdrawn
     in
 
     (* If the advertised path is looping, don't install any new routes OR no advertised route *)
     if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
-      let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
-      (db_after_wd, out_update)
+      let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
+      (db, out_update)
     end else
-      let updated_path_attrs = 
+      let updated_attrs = 
         update.path_attrs 
         |> update_nexthop local_id 
         |> update_aspath local_asn
       in
 
-      let db_after_insert, out_nlri = 
-        let insert_one_pfx (db, out_nlri) pfx = 
-          match List.mem pfx out_wd with
+      let wd, ins, db = 
+        let loc_ins_pfx (wd, ins, db) pfx = 
+          match List.mem pfx wd with
           | true -> 
             (* We do not install new attrs immediately after withdrawn *)
-            (db, out_nlri)
+            (wd, ins, db)
           | false ->
             match Prefix_map.find_opt pfx db with
             | None -> 
-              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-            | Some (stored_pattrs, src_id) ->
-              if src_id = peer_id then 
+              (* If this is a new destination *)
+              (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+            | Some (stored_attrs, stored_id) ->
+              if stored_id = peer_id then 
                 (* If from the same peer, remove the current best path and reselects the path later. *)
-                (Prefix_map.remove pfx db, pfx::out_wd)
-              else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then
+                (pfx::wd, ins, Prefix_map.remove pfx db)
+              else if tie_break (updated_attrs, peer_id) (stored_attrs, stored_id) then
                 (* Replace if the new route is more preferable *)
-                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-              else db, out_nlri
+                (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+              else wd, ins, db
         in
-        List.fold_left insert_one_pfx (db_after_wd, []) update.nlri
+        List.fold_left loc_ins_pfx (wd, [], db) update.nlri
       in
 
       let out_update = {
-        withdrawn = out_wd;
-        path_attrs = updated_path_attrs;
-        nlri = out_nlri
+        withdrawn = wd;
+        path_attrs = updated_attrs;
+        nlri = ins
       } in 
 
-      (db_after_insert, out_update)
+      (db, out_update)
   ;;
 
   let get_assoc_pfxes db remote_id = 
