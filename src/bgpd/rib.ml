@@ -19,7 +19,7 @@ module Attr_dict = struct
   module Index = struct
     type t = int
     let compare (a: t) (b: t) : int = a - b
-    let create str : t = Hashtbl.hash str 
+    let create attrs : t = Hashtbl.hash attrs
   end
 
   module Idx_map = Map.Make(Index)
@@ -29,10 +29,7 @@ module Attr_dict = struct
 
   let empty : (path_attrs * int) Idx_map.t = Idx_map.empty
 
-  let gen_index attrs = 
-    let str = path_attrs_to_string attrs in
-    Index.create str
-  ;;
+  let gen_index attrs = Index.create attrs
 
   let null = gen_index []
 
@@ -525,11 +522,6 @@ module Loc_rib = struct
     loop 0 segment_list
   ;;
 
-
-  
-
-
-
   let find_origin path_attrs = 
     match Bgp.find_origin path_attrs with
     | None ->
@@ -588,43 +580,41 @@ module Loc_rib = struct
       (db_after_wd, out_change)
     end 
     else
-      let db_after_insert, out_ins = 
-        let f (db, out_ins) pfx = 
+      let wd, ins, db = 
+        let f (wd, ins, db) pfx = 
           match List.mem pfx out_wd with
           | true -> 
             (* We do not install new attrs immediately after withdrawn *)
-            (db, out_ins)
+            (wd, ins, db)
           | false ->
             match Prefix_map.find_opt pfx db with
             | None -> 
               dict_ref := Attr_dict.inc change.idx (!dict_ref);
-              (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
+              (wd, pfx::ins, Prefix_map.add pfx (change.idx, peer_id) db)
             | Some (stored_idx, src_id) ->
               let stored_attrs = Attr_dict.find stored_idx (!dict_ref) in
               if src_id = peer_id then begin
-                (* If from the same peer, replace without compare *)
-
-                (* This is wrong *)
-                dict_ref := Attr_dict.inc change.idx (!dict_ref);
-                (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
+                (* If from the same peer, withdrawn the path then reselects the best path. *)
+                dict_ref := Attr_dict.remove stored_idx (!dict_ref);
+                (pfx::wd, ins, Prefix_map.remove pfx db)
               end
               else if tie_break (attrs, peer_id) (stored_attrs, src_id) then begin
                 (* Replace if the new route is more preferable *)
                 dict_ref := Attr_dict.inc change.idx (!dict_ref);
-                (Prefix_map.add pfx (change.idx, peer_id) db, pfx::out_ins)
+                (wd, pfx::ins, Prefix_map.add pfx (change.idx, peer_id) db)
               end 
-              else db, out_ins
+              else wd, ins, db
         in
-        List.fold_left f (db_after_wd, []) change.ins
+        List.fold_left f (out_wd, [], db_after_wd) change.ins
       in
 
       let out_change = {
         wd = out_wd;
         idx = change.idx;
-        ins = out_ins
+        ins = ins
       } in 
 
-      (db_after_insert, out_change)
+      (db, out_change)
   ;;
 
   let get_assoc_pfxes db remote_id = 
