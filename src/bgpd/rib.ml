@@ -15,10 +15,15 @@ module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
 
+module ID = struct
+  type t = int
+  let compare (a: t) (b: t) = a - b
+  let create attrs = Hashtbl.hash attrs
+end
+module ID_map = Map.Make(ID)
 
 type update = Bgp.update
 let is_empty_update u = u.withdrawn = [] && u.nlri = [] 
-
 
 module Adj_rib_in = struct
   type input = 
@@ -134,14 +139,6 @@ end
 module Adj_rib_out = struct
   module Prefix_set = Set.Make(Prefix)
 
-  module ID = struct
-    type t = int
-    let compare (a: t) (b: t) = a - b
-    let create attrs = Hashtbl.hash attrs
-  end
-
-  module ID_map = Map.Make(ID)
-
   type input = 
     | Push of update
     | Stop
@@ -173,7 +170,7 @@ module Adj_rib_out = struct
 
   let build_db rev_updates =
     (* rev_updates are updates in reverse time order. The latest come first. *)
-    
+
     let aux_build_db (wd, ins, db) u =
       let delta_ins = 
         (* remove prefixes that will be withdrawn later in time *)
@@ -371,7 +368,8 @@ module Loc_rib = struct
     local_asn: int32;
     local_id: Ipaddr.V4.t;
     subs: peer Ip_map.t;
-    db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
+    db: (ID.t * Ipaddr.V4.t) Prefix_map.t;
+    dict: (Bgp.path_attrs * int) ID_map.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -381,17 +379,17 @@ module Loc_rib = struct
     local_asn = t.local_asn;
     local_id = t.local_id;
     subs;
-    db = t.db;
+    db = t.db; dict = t.dict;
     stream = t.stream;
     pf = t.pf;
   }
 
-  let set_db db t = {
+  let set_store db dict t = {
     running = t.running;
     local_asn = t.local_asn;
     local_id = t.local_id;
     subs = t.subs;
-    db;
+    db; dict;
     stream = t.stream;
     pf = t.pf;
   }
@@ -490,7 +488,7 @@ module Loc_rib = struct
 
 
   (* This function is pure *)
-  let update_loc_db local_id local_asn (peer_id, update) db =
+  let update_loc_db local_id local_asn (peer_id, update) db dict =
     (* Withdrawn from Loc-RIB *)
     let wd, db =
       let loc_wd_pfx (wd, db) pfx = 
@@ -589,7 +587,7 @@ module Loc_rib = struct
               else ()
             in
 
-            let new_t = set_db new_db t in
+            let new_t = set_store new_db t in
             handle_loop new_t
           end
         | Sub (remote_id, in_rib, out_rib) -> begin
@@ -636,7 +634,7 @@ module Loc_rib = struct
               List.fold_left f t.db out_wd
             in
 
-            let new_t = t |> set_subs new_subs |> set_db new_db in
+            let new_t = t |> set_subs new_subs |> set_store new_db in
             let ip_and_peer = Ip_map.bindings new_t.subs in
 
             (* Send the updates: blocking *)
