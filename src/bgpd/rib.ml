@@ -174,7 +174,7 @@ module Adj_rib_out = struct
   let build_db rev_updates =
     (* rev_updates are updates in reverse time order. The latest come first. *)
 
-    let process_update (wd, ins, db) u =
+    let aux_build_db (wd, ins, db) u =
       let delta_ins = 
         (* remove prefixes that will be withdrawn later in time *)
         let is_not_wd pfx = not (Prefix_set.mem pfx wd) in
@@ -213,7 +213,7 @@ module Adj_rib_out = struct
       (new_wd, new_ins, new_db)
     in
     
-    List.fold_left process_update (Prefix_set.empty, Prefix_set.empty, ID_map.empty) rev_updates 
+    List.fold_left aux_build_db (Prefix_set.empty, Prefix_set.empty, ID_map.empty) rev_updates 
   ;;
 
   (* This is not a standard List take operation. The result comes out in reverse order as in the standard implementation. *)
@@ -371,7 +371,7 @@ module Loc_rib = struct
     local_asn: int32;
     local_id: Ipaddr.V4.t;
     subs: peer Ip_map.t;
-    db: (Bgp.path_attrs * Ipaddr.V4.t) Prefix_map.t;
+    db: (Prefix.t, Bgp.path_attrs * Ipaddr.V4.t) Hashtbl.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -489,16 +489,17 @@ module Loc_rib = struct
   ;;
 
 
-  (* This function is pure *)
+  (* This function is not pure *)
   let update_loc_db local_id local_asn (peer_id, update) db =
     (* Withdrawn from Loc-RIB *)
     let wd, db =
       let loc_wd_pfx (wd, db) pfx = 
-        match Prefix_map.find_opt pfx db with
+        match Hashtbl.find_opt db pfx with
         | None -> wd, db
         | Some (_, stored_id) -> 
           if (stored_id = peer_id) then 
-            (pfx::wd, Prefix_map.remove pfx db) 
+            let () = Hashtbl.remove db pfx in
+            (pfx::wd, db) 
           else wd, db
       in
       List.fold_left loc_wd_pfx ([], db) update.withdrawn
@@ -522,18 +523,21 @@ module Loc_rib = struct
             (* We do not install new attrs immediately after withdrawn *)
             (wd, ins, db)
           | false ->
-            match Prefix_map.find_opt pfx db with
+            match Hashtbl.find_opt db pfx with
             | None -> 
               (* If this is a new destination *)
-              (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+              Hashtbl.add db pfx (updated_attrs, peer_id);
+              (wd, pfx::ins, db)
             | Some (stored_attrs, stored_id) ->
               if tie_break updated_attrs stored_attrs then
                 (* Replace if the new route is more preferable *)
-                (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+                let () = Hashtbl.replace db pfx (updated_attrs, peer_id) in
+                (wd, pfx::ins, db)
               else if stored_id = peer_id then 
                 (* If from the same peer then the current best path is no longer valid. *) 
                 (* Remove the current best path and reselects the path later. *)
-                (pfx::wd, ins, Prefix_map.remove pfx db)
+                let () = Hashtbl.remove db pfx in
+                (pfx::wd, ins, db)
               else wd, ins, db
         in
         List.fold_left loc_ins_pfx (wd, [], db) update.nlri
@@ -549,10 +553,14 @@ module Loc_rib = struct
   ;;
 
   let get_assoc_pfxes db remote_id = 
-    let f acc (pfx, (_, stored_id)) =
-      if remote_id = stored_id then pfx::acc else acc
+    let l_ref = ref [] in
+    let f pfx (_, stored_id) =
+      if remote_id = stored_id then 
+        l_ref := pfx::(!l_ref) 
+      else ()
     in
-    List.fold_left f [] (Prefix_map.bindings db)
+    Hashtbl.iter f db;
+    !l_ref
   ;;
 
   let rec handle_loop t = 
@@ -564,7 +572,7 @@ module Loc_rib = struct
         | Push (remote_id, update) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
-            let new_db, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db in
+            let _db, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db in
             
             let ip_and_peer = Ip_map.bindings t.subs in
 
@@ -589,8 +597,7 @@ module Loc_rib = struct
               else ()
             in
 
-            let new_t = set_db new_db t in
-            handle_loop new_t
+            handle_loop t
           end
         | Sub (remote_id, in_rib, out_rib) -> begin
           if Ip_map.mem remote_id t.subs then
@@ -602,11 +609,11 @@ module Loc_rib = struct
             
           (* Synchronize with peer: blocking *)
           let () =
-            let f (pfx, (attr, _)) = 
+            let f pfx (attr, _) = 
               let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
               Adj_rib_out.input out_rib (Adj_rib_out.Push update)
             in
-            List.iter f (Prefix_map.bindings t.db)
+            Hashtbl.iter f t.db
           in
 
           handle_loop new_t
@@ -631,12 +638,12 @@ module Loc_rib = struct
             let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
 
             (* Update db *)
-            let new_db = 
-              let f acc pfx = Prefix_map.remove pfx acc in
-              List.fold_left f t.db out_wd
+            let () = 
+              let f pfx = Hashtbl.remove t.db pfx in
+              List.iter f out_wd 
             in
 
-            let new_t = t |> set_subs new_subs |> set_db new_db in
+            let new_t = t |> set_subs new_subs in
             let ip_and_peer = Ip_map.bindings new_t.subs in
 
             (* Send the updates: blocking *)
@@ -674,7 +681,7 @@ module Loc_rib = struct
       running = true;
       local_id; local_asn;
       subs = Ip_map.empty;
-      db = Prefix_map.empty;
+      db = Hashtbl.create 200000;
       stream; pf
     } in
 
@@ -697,12 +704,16 @@ module Loc_rib = struct
         in
         pfx_str::acc
       in 
-      String.concat "\n" (List.rev (Prefix_map.fold f t.db []))
+      String.concat "\n" (List.rev (Hashtbl.fold f t.db []))
     in  
     Printf.sprintf "Routes: \n %s" pfxs_str
   ;;
 
-  let size t = Prefix_map.cardinal t.db
+  let size t = 
+    let open Hashtbl in
+    let stats = stats t.db in
+    stats.num_bindings
+  ;;
 
   let input t input = t.pf (Some input)
   let push_update t (id, u) = input t (Push (id, u)) 
