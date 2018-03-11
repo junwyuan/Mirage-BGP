@@ -1009,7 +1009,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      (* test_create_session s; 
+      test_create_session s; 
       test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
@@ -1018,7 +1018,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_simul_insert s;
       test_route_withdrawn s;
       test_route_withdrawn_diff_src s;
-      test_link_flap s; *)
+      test_link_flap s;
       test_route_replace s;
       test_route_unchanged s;
       test_replace2 s;
