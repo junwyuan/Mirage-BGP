@@ -771,7 +771,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     let count = ref 0 in
     let cond ({ nlri; path_attrs; withdrawn } as u) =
-      Sp2_log.debug (fun m -> m "%s" (update_to_string u));
       assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l; ]]);
       count := !count + List.length nlri;
       !count = 3
@@ -792,8 +791,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     (* Verify the 2nd update *)
     let count = ref 0 in
     let cond ({ nlri; path_attrs; withdrawn } as u) =
-      Sp2_log.debug (fun m -> m "%s" (update_to_string u));
-      assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay1 ()).local_asn; 65001_l; 65002_l]]);
       count := !count + List.length nlri;
       !count = 3
     in
@@ -1012,7 +1009,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      (* test_create_session s; 
+      test_create_session s; 
       test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
@@ -1021,13 +1018,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_simul_insert s;
       test_route_withdrawn s;
       test_route_withdrawn_diff_src s;
-      test_link_flap s; *)
+      test_link_flap s;
       test_route_replace s;
-      (* test_route_unchanged s;
+      test_route_unchanged s;
       test_replace2 s;
       test_header_error_handle s;
       test_update_attr_length_error_handle s;
-      test_route_selection_after_wd s; *)
+      test_route_selection_after_wd s;
     ] in
     run tests
     >>= fun () ->
