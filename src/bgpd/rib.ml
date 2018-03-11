@@ -437,58 +437,59 @@ module Loc_rib = struct
   (* This function is pure *)
   let update_db local_id local_asn (peer_id, update) db =
     (* Withdrawn from Loc-RIB *)
-    let (db_after_wd, out_wd) =
-      let f (db, out_wd) pfx = 
+    let db, wd =
+      let loc_wd_pfx (db, out_wd) pfx = 
         match Prefix_map.find_opt pfx db with
         | None -> db, out_wd
-        | Some (_, stored) -> 
-          if (stored = peer_id) then 
+        | Some (_, stored_id) -> 
+          if (stored_id = peer_id) then 
             (Prefix_map.remove pfx db, List.cons pfx out_wd) 
           else db, out_wd
       in
-      List.fold_left f (db, []) update.withdrawn
+      List.fold_left loc_wd_pfx (db, []) update.withdrawn
     in
 
     (* If the advertised path is looping, don't install any new routes OR no advertised route *)
     if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
-      let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
-      (db_after_wd, out_update)
+      let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
+      (db, out_update)
     end else
-      let updated_path_attrs = 
+      let updated_attrs = 
         update.path_attrs 
         |> update_nexthop local_id 
         |> update_aspath local_asn
       in
 
-      let db_after_insert, out_nlri = 
-        let insert_one_pfx (db, out_nlri) pfx = 
-          match List.mem pfx out_wd with
+      let wd, ins, db = 
+        let loc_ins_pfx (wd, ins, db) pfx = 
+          match List.mem pfx wd with
           | true -> 
             (* We do not install new attrs immediately after withdrawn *)
-            (db, out_nlri)
+            (wd, ins, db)
           | false ->
             match Prefix_map.find_opt pfx db with
             | None -> 
-              (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-            | Some (stored_pattrs, src_id) ->
-              if src_id = peer_id then 
+              (* If this is a new destination *)
+              (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+            | Some (stored_attrs, stored_id) ->
+              if stored_id = peer_id then 
                 (* If from the same peer, remove the current best path and reselects the path later. *)
-                (Prefix_map.remove pfx db, pfx::out_wd)
-              else if tie_break (updated_path_attrs, peer_id) (stored_pattrs, src_id) then
+                (pfx::wd, ins, Prefix_map.remove pfx db)
+              else if tie_break (updated_attrs, peer_id) (stored_attrs, stored_id) then
                 (* Replace if the new route is more preferable *)
-                (Prefix_map.add pfx (updated_path_attrs, peer_id) db, pfx::out_nlri)
-              else db, out_nlri
+                (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+              else wd, ins, db
         in
-        List.fold_left insert_one_pfx (db_after_wd, []) update.nlri
+        List.fold_left loc_ins_pfx (wd, [], db) update.nlri
       in
 
       let out_update = {
-        withdrawn = out_wd;
-        path_attrs = updated_path_attrs;
-        nlri = out_nlri
+        withdrawn = wd;
+        path_attrs = updated_attrs;
+        nlri = ins
       } in 
 
-      (db_after_insert, out_update)
+      (db, out_update)
   ;;
 
   let get_assoc_pfxes db remote_id = 
