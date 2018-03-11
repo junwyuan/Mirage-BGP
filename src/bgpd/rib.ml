@@ -26,7 +26,6 @@ module Adj_rib_in = struct
     | Pull of Prefix.t list
     | Stop
   
-  
   type t = {
     mutable running: bool;
     remote_id: Ipaddr.V4.t;

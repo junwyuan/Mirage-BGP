@@ -409,64 +409,65 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
   
   let rec handle_event_loop t =
     if not t.running then Lwt.return_unit
-    else begin
-      Lwt_stream.get t.stream
-      >>= function
-      | None -> Lwt.return_unit
-      | Some event ->
-        let module Bgp_log = (val t.log : Logs.LOG) in 
-        let () = match event with
-          | Fsm.BGP_open _ -> t.stat.rec_open <- t.stat.rec_open + 1
-          | Fsm.Update_msg _ -> t.stat.rec_update <- t.stat.rec_update + 1
-          | Fsm.Keepalive_msg -> t.stat.rec_keepalive <- t.stat.rec_keepalive + 1
-          | Fsm.Notif_msg _ -> t.stat.rec_notif <- t.stat.rec_notif + 1
-          | _ -> ()
-        in
-        
-        let new_fsm, actions = Fsm.handle t.fsm event in
-
-        (* Update finite state machine before performing any action. *)
-        t.fsm <- new_fsm;
-
-        (* Initiate flow handler *)
-        let () = match event with
-          | Fsm.Tcp_CR_Acked -> begin
-            match t.out_flow with
-            | None -> Bgp_log.err (fun m -> m "In_flow missing.")
-            | Some flow ->
-              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-              t.flow_handler <- Some flow_handler;
-              t.out_flow <- None
-          end
-          | Fsm.Tcp_connection_confirmed -> begin
-            match t.in_flow with
-            | None -> Bgp_log.err (fun m -> m "Out_flow missing.")
-            | Some flow ->
-              let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
-              t.flow_handler <- Some flow_handler;
-              t.in_flow <- None
-          end
-          | _ -> ()
-        in
-
-        (* Blocking perform all actions *)
-        let () =
-          let f t act = perform_action t act in
-          List.iter (f t) actions
-        in
+    else
+      let router_handle = function
+        | None -> Lwt.return_unit
+        | Some event ->
+          let module Bgp_log = (val t.log : Logs.LOG) in 
+          let () = match event with
+            | Fsm.BGP_open _ -> t.stat.rec_open <- t.stat.rec_open + 1
+            | Fsm.Update_msg _ -> t.stat.rec_update <- t.stat.rec_update + 1
+            | Fsm.Keepalive_msg -> t.stat.rec_keepalive <- t.stat.rec_keepalive + 1
+            | Fsm.Notif_msg _ -> t.stat.rec_notif <- t.stat.rec_notif + 1
+            | _ -> ()
+          in
           
-        match Fsm.state t.fsm with
-        | Fsm.IDLE -> begin
-          match event with
-          | Fsm.Manual_stop -> handle_event_loop t
-          | _ ->
-            (* Automatic restart *)
-            Bgp_log.info (fun m -> m "BGP automatic restarts.");
-            push_event t Fsm.Automatic_start_passive_tcp;
-            handle_event_loop t
-        end
-        | _ -> handle_event_loop t
-    end
+          let new_fsm, actions = Fsm.handle t.fsm event in
+
+          (* Update finite state machine before performing any action. *)
+          t.fsm <- new_fsm;
+
+          (* Initiate flow handler *)
+          let () = match event with
+            | Fsm.Tcp_CR_Acked -> begin
+              match t.out_flow with
+              | None -> Bgp_log.err (fun m -> m "In_flow missing.")
+              | Some flow ->
+                let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
+                t.flow_handler <- Some flow_handler;
+                t.out_flow <- None
+            end
+            | Fsm.Tcp_connection_confirmed -> begin
+              match t.in_flow with
+              | None -> Bgp_log.err (fun m -> m "Out_flow missing.")
+              | Some flow ->
+                let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
+                t.flow_handler <- Some flow_handler;
+                t.in_flow <- None
+            end
+            | _ -> ()
+          in
+
+          (* Blocking perform all actions *)
+          let () =
+            let f t act = perform_action t act in
+            List.iter (f t) actions
+          in
+            
+          match Fsm.state t.fsm with
+          | Fsm.IDLE -> begin
+            match event with
+            | Fsm.Manual_stop -> handle_event_loop t
+            | _ ->
+              (* Automatic restart *)
+              Bgp_log.info (fun m -> m "BGP automatic restarts.");
+              push_event t Fsm.Automatic_start_passive_tcp;
+              handle_event_loop t
+          end
+          | _ -> handle_event_loop t
+      in
+      Lwt_stream.get t.stream >>= fun res ->
+      router_handle res
   ;;
 
   let create socket loc_rib config peer_config =

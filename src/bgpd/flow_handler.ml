@@ -16,38 +16,39 @@ module Make (S: Mirage_stack_lwt.V4) = struct
   }
 
   let rec flow_writer t = 
-    Lwt_stream.get t.stream >>= function
-    | None -> 
-      Bgp_flow.close t.flow
-    | Some msg -> 
-      let module Log = (val t.log : Logs.LOG) in
+    let flow_writer_handle = function
+      | None -> 
+        Bgp_flow.close t.flow
+      | Some msg -> 
+        let module Log = (val t.log : Logs.LOG) in
 
-      Bgp_flow.write t.flow msg
-      >>= function
-      | Error err ->
-        let () = match err with
-          | `Timeout -> Log.debug (fun m -> m "Timeout when write %s" 
-                                      (Bgp.to_string msg))
-          | `Refused -> Log.debug (fun m -> m "Refused when Write %s" 
-                                      (Bgp.to_string msg))
-          | `Closed -> Log.debug (fun m -> m "Connection closed when write %s." 
-                                      (Bgp.to_string msg)) 
-          | _ -> ()
-        in
+        Bgp_flow.write t.flow msg
+        >>= function
+        | Error err ->
+          let () = match err with
+            | `Timeout -> Log.debug (fun m -> m "Timeout when write %s" 
+                                        (Bgp.to_string msg))
+            | `Refused -> Log.debug (fun m -> m "Refused when Write %s" 
+                                        (Bgp.to_string msg))
+            | `Closed -> Log.debug (fun m -> m "Connection closed when write %s." 
+                                        (Bgp.to_string msg)) 
+            | _ -> ()
+          in
 
-        if t.running then t.callback Fsm.Tcp_connection_fail;
-        Lwt.return_unit
-      | Ok () -> 
-        Log.debug (fun m -> m "send message %s" (Bgp.to_string msg));
-        flow_writer t
+          if t.running then t.callback Fsm.Tcp_connection_fail;
+          Lwt.return_unit
+        | Ok () -> 
+          Log.debug (fun m -> m "send message %s" (Bgp.to_string msg));
+          flow_writer t
+      in
+      Lwt_stream.get t.stream >>= fun input ->
+      flow_writer_handle input
   ;;
 
   let rec flow_reader t =
     let module Log = (val t.log : Logs.LOG) in
-    
-    if not t.running then Lwt.return_unit
-    else 
-      Bgp_flow.read t.flow >>= fun res -> 
+      
+    let flow_reader_handle res =  
       if not t.running then Lwt.return_unit
       else 
         match res with
@@ -126,6 +127,13 @@ module Make (S: Mirage_stack_lwt.V4) = struct
               Log.debug (fun m -> m "Unknown read error in flow reader");
           in
           Lwt.return_unit
+    in
+
+    if not t.running then 
+      Lwt.return_unit
+    else 
+      Bgp_flow.read t.flow >>= fun res ->
+      flow_reader_handle res
   ;;
 
   let create remote_id remote_asn callback flow log =
