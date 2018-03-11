@@ -173,8 +173,8 @@ module Adj_rib_out = struct
 
   let build_db rev_updates =
     (* rev_updates are updates in reverse time order. The latest come first. *)
-
-    let process_update (wd, ins, db) u =
+    
+    let aux_build_db (wd, ins, db) u =
       let delta_ins = 
         (* remove prefixes that will be withdrawn later in time *)
         let is_not_wd pfx = not (Prefix_set.mem pfx wd) in
@@ -213,7 +213,7 @@ module Adj_rib_out = struct
       (new_wd, new_ins, new_db)
     in
     
-    List.fold_left process_update (Prefix_set.empty, Prefix_set.empty, ID_map.empty) rev_updates 
+    List.fold_left aux_build_db (Prefix_set.empty, Prefix_set.empty, ID_map.empty) rev_updates 
   ;;
 
   (* This is not a standard List take operation. The result comes out in reverse order as in the standard implementation. *)
