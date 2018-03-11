@@ -9,7 +9,5 @@ true: debug
 "common/lib": include
 "test": include
 
-
-
 true: package(yojson)
 true: package(lwt.unix)

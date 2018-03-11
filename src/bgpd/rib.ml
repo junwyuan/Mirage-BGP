@@ -68,9 +68,7 @@ module Adj_rib_in = struct
   ;;
 
   let rec handle_loop t = 
-    if not t.running then Lwt.return_unit
-    else
-      Lwt_stream.get t.stream >>= function
+    let in_rib_handle = function
       | None -> Lwt.return_unit
       | Some input -> begin
         match input with
@@ -99,6 +97,12 @@ module Adj_rib_in = struct
         end
       | Stop -> Lwt.return_unit
       end
+    in
+    if not t.running then 
+      Lwt.return_unit
+    else
+      Lwt_stream.get t.stream >>= fun input ->
+      in_rib_handle input
   ;;
 
   let create remote_id callback : t = 
@@ -215,14 +219,15 @@ module Adj_rib_out = struct
 
   (* This is not a standard List take operation. The result comes out in reverse order as in the standard implementation. *)
   let take l n =
-    let rec aux_take l n acc =
-      if n = 0 then acc, l
-      else if List.length l <= n then (l, [])
-      else match l with
-        | [] -> acc, []
-        | hd::tl -> aux_take tl (n-1) (hd::acc)
-    in
-    aux_take l n []
+    if List.length l <= n then (l, [])
+    else
+      let rec aux_take l n acc =
+        if n = 0 then acc, l
+        else match l with
+          | [] -> acc, []
+          | hd::tl -> aux_take tl (n-1) (hd::acc)
+      in
+      aux_take l n []
   ;;
 
   let rec split l len =
@@ -275,9 +280,7 @@ module Adj_rib_out = struct
   ;;
     
   let rec handle_loop t = 
-    if not t.running then Lwt.return_unit
-    else begin
-      Lwt_stream.peek t.stream >>= function
+    let out_rib_handle = function
       | None -> Lwt.return_unit
       | Some _ -> 
         let inputs = Lwt_stream.get_available t.stream in
@@ -312,7 +315,13 @@ module Adj_rib_out = struct
           >>= fun () -> *)
 
           handle_loop new_t
-    end
+    in
+
+    if not t.running then 
+      Lwt.return_unit
+    else 
+      Lwt_stream.peek t.stream >>= fun input ->
+      out_rib_handle input
   ;;
 
 
@@ -398,16 +407,16 @@ module Loc_rib = struct
     List.exists f segment_list
   ;;
 
-  let get_aspath_len segment_list =
-    let rec loop len = function
-      | [] -> len
-      | segment::tl -> match segment with
-        | Bgp.Asn_seq l -> loop (len + List.length l) tl
-        | Bgp.Asn_set l -> loop (len + 1) tl
+  let get_aspath_len segments =
+    let f_segment_len = function
+      | Bgp.Asn_seq l -> List.length l
+      | Bgp.Asn_set _ -> 1
     in
-    loop 0 segment_list
+    let aux = List.map f_segment_len segments in
+    let f_sum acc x = acc + x in
+    List.fold_left f_sum 0 aux
   ;;
-
+  
   let update_aspath asn attrs =
     let append_aspath asn segments = 
       match segments with
@@ -453,37 +462,47 @@ module Loc_rib = struct
     | Some v -> v
   ;;
 
+  let find_next_hop attrs = 
+    match Bgp.find_next_hop attrs with
+    | None -> 
+      Rib_log.err (fun m -> m "MISSING NEXTHOP");
+      failwith "MISSING NEXTHOP"
+    | Some v -> v
+  ;;
+
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
-  let tie_break (path_attrs_1, peer_id_1) (path_attrs_2, peer_id_2) = 
-    let as_path_1 = find_aspath path_attrs_1 in
-    let as_path_2 = find_aspath path_attrs_2 in
+  let tie_break attrs1 attrs2 = 
+    let as_path_1 = find_aspath attrs1 in
+    let as_path_2 = find_aspath attrs2 in
     if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then true
     else if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then false
     else begin
-      let origin_1 = find_origin path_attrs_1 in
-      let origin_2 = find_origin path_attrs_2 in
+      let origin_1 = find_origin attrs1 in
+      let origin_2 = find_origin attrs2 in
       if origin_1 = Bgp.EGP && origin_2 = Bgp.IGP then true
       else if origin_1 = Bgp.IGP && origin_2 = Bgp.EGP then false
       else begin
-        if Ipaddr.V4.compare peer_id_1 peer_id_2 = -1 then true else false
+        let nexthop1 = find_next_hop attrs1 in
+        let nexthop2 = find_next_hop attrs2 in
+        if Ipaddr.V4.compare nexthop1 nexthop2 < 0 then true else false
       end
     end
   ;;
 
 
   (* This function is pure *)
-  let update_db local_id local_asn (peer_id, update) db =
+  let update_loc_db local_id local_asn (peer_id, update) db =
     (* Withdrawn from Loc-RIB *)
-    let db, wd =
-      let loc_wd_pfx (db, out_wd) pfx = 
+    let wd, db =
+      let loc_wd_pfx (wd, db) pfx = 
         match Prefix_map.find_opt pfx db with
-        | None -> db, out_wd
+        | None -> wd, db
         | Some (_, stored_id) -> 
           if (stored_id = peer_id) then 
-            (Prefix_map.remove pfx db, List.cons pfx out_wd) 
-          else db, out_wd
+            (pfx::wd, Prefix_map.remove pfx db) 
+          else wd, db
       in
-      List.fold_left loc_wd_pfx (db, []) update.withdrawn
+      List.fold_left loc_wd_pfx ([], db) update.withdrawn
     in
 
     (* If the advertised path is looping, don't install any new routes OR no advertised route *)
@@ -509,12 +528,13 @@ module Loc_rib = struct
               (* If this is a new destination *)
               (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
             | Some (stored_attrs, stored_id) ->
-              if stored_id = peer_id then 
-                (* If from the same peer, remove the current best path and reselects the path later. *)
-                (pfx::wd, ins, Prefix_map.remove pfx db)
-              else if tie_break (updated_attrs, peer_id) (stored_attrs, stored_id) then
+              if tie_break updated_attrs stored_attrs then
                 (* Replace if the new route is more preferable *)
                 (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
+              else if stored_id = peer_id then 
+                (* If from the same peer then the current best path is no longer valid. *) 
+                (* Remove the current best path and reselects the path later. *)
+                (pfx::wd, ins, Prefix_map.remove pfx db)
               else wd, ins, db
         in
         List.fold_left loc_ins_pfx (wd, [], db) update.nlri
@@ -537,11 +557,7 @@ module Loc_rib = struct
   ;;
 
   let rec handle_loop t = 
-    t_ref := Some t;
-
-    if not t.running then Lwt.return_unit
-    else
-      Lwt_stream.get t.stream >>= function
+    let loc_rib_handle = function
       | None -> Lwt.return_unit
       | Some input ->
         match input with
@@ -549,7 +565,7 @@ module Loc_rib = struct
         | Push (remote_id, update) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
-            let new_db, out_update = update_db t.local_id t.local_asn (remote_id, update) t.db in
+            let new_db, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db in
             
             let ip_and_peer = Ip_map.bindings t.subs in
 
@@ -641,6 +657,14 @@ module Loc_rib = struct
             in
 
             handle_loop new_t
+    in
+
+    t_ref := Some t;
+    if not t.running then 
+      Lwt.return_unit
+    else
+      Lwt_stream.get t.stream >>= fun input ->
+      loc_rib_handle input
   ;;
 
 

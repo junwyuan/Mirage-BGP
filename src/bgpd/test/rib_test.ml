@@ -87,7 +87,7 @@ let test_tie_break () =
     (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l; 3_l]]);
     (Bgp.Next_hop id2);
   ] in
-  assert (Loc_rib.tie_break (pa1, id1) (pa2, id2));
+  assert (Loc_rib.tie_break pa1 pa2);
 
   (* Depends on origin *)
   let id3 = Ipaddr.V4.of_string_exn "172.19.10.2" in
@@ -102,7 +102,7 @@ let test_tie_break () =
     (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
     (Bgp.Next_hop id4);
   ] in
-  assert (Loc_rib.tie_break (pa3, id3) (pa4, id4) = false);
+  assert (Loc_rib.tie_break pa3 pa4 = false);
 
   (* Depends on peer id *)
   let id5 = Ipaddr.V4.of_string_exn "172.19.10.2" in
@@ -117,7 +117,7 @@ let test_tie_break () =
     (Bgp.As_path [Bgp.Asn_seq [1_l; 2_l]]);
     (Bgp.Next_hop id6);
   ] in
-  assert (Loc_rib.tie_break (pa5, id5) (pa6, id6) = false);
+  assert (Loc_rib.tie_break pa5 pa6 = false);
 ;;
 
 let test_adj_rib_update_db () = 
@@ -203,7 +203,7 @@ let test_loc_rib_update_db () =
   let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs; nlri } in
   
-  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id1, update) db in
   
   assert (List.length out_update.nlri = 1);
   let updated_attrs = [
@@ -230,7 +230,7 @@ let test_loc_rib_update_db () =
   let nlri = [ pfx2 ] in
   let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 1);
   assert (List.length out_update.withdrawn = 0);
@@ -244,7 +244,7 @@ let test_loc_rib_update_db () =
   let nlri = [ pfx3 ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 2);
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
@@ -258,7 +258,7 @@ let test_loc_rib_update_db () =
   let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id1, update) db in
   assert (Prefix_map.cardinal db = 1);
   assert (not (Prefix_map.mem pfx1 db));
   assert (List.length out_update.nlri = 0);
@@ -273,7 +273,7 @@ let test_loc_rib_update_db () =
   let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs; nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id2, update) db in
   assert (out_update.nlri = [ pfx1 ]);
   let expected = [
     Bgp.Origin Bgp.EGP;
@@ -297,7 +297,7 @@ let test_loc_rib_update_db () =
   let nlri = [ pfx1 ] in
   let update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
 
-  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id1, update) db in
   assert (List.length out_update.nlri = 0);
   assert (List.length out_update.withdrawn = 0);
   assert (Prefix_map.cardinal db = 2);
@@ -317,7 +317,7 @@ let test_loc_rib_update_db () =
     path_attrs = [];
     nlri = [];
   } in
-  let db, out_update = Loc_rib.update_db local_id local_asn (id2, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id2, update) db in
   assert (Prefix_map.cardinal db = 1);
   assert (not (Prefix_map.mem pfx1 db));
   assert (List.length out_update.nlri = 0);
@@ -329,7 +329,7 @@ let test_loc_rib_update_db () =
     path_attrs = [];
     nlri = [];
   } in
-  let db, out_update = Loc_rib.update_db local_id local_asn (id1, update) db in
+  let db, out_update = Loc_rib.update_loc_db local_id local_asn (id1, update) db in
   assert (Prefix_map.cardinal db = 1);
   assert (Prefix_map.mem pfx2 db);
   assert (List.length out_update.nlri = 0);
@@ -354,7 +354,7 @@ let test_loc_rib_get_assoc_pfxs () =
   let update = { withdrawn = []; path_attrs; nlri } in
   
   let db = Prefix_map.empty in
-  let db, _ = Loc_rib.update_db local_id local_asn (id1, update) db in
+  let db, _ = Loc_rib.update_loc_db local_id local_asn (id1, update) db in
 
   (* speaker2 inserts one pfx *)
   let id2 = Ipaddr.V4.of_string_exn "172.19.10.2" in
@@ -366,7 +366,7 @@ let test_loc_rib_get_assoc_pfxs () =
   let nlri = [ (Ipaddr.V4.Prefix.make 16 (Ipaddr.V4.of_string_exn "172.21.0.0")); ] in
   let update : Rib.update = { withdrawn = []; path_attrs = path_attrs; nlri = nlri } in
   
-  let db, _ = Loc_rib.update_db local_id local_asn (id2, update) db in
+  let db, _ = Loc_rib.update_loc_db local_id local_asn (id2, update) db in
 
   (* remove speaker1 *)
   let wd = Loc_rib.get_assoc_pfxes db id1 in
