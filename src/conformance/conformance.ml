@@ -173,13 +173,12 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   ;;
 
 
-  let create_session s relay test_name =
-    let open Relay in
+  let create_session s relay test_name (module Log : Logs.LOG) =
     Bgp_flow.create_connection s (relay.remote_id, relay.remote_port)
     >>= function
     | Error _ -> assert false
     | Ok flow ->
-      send_msg flow (default_open_msg relay) (module Conf_log)
+      send_msg flow (default_open_msg relay) (module Log)
       >>= fun () ->
 
       Bgp_flow.read flow
@@ -188,19 +187,20 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       | Ok msg ->
         match msg with
         | Keepalive | Notification _ | Update _ -> 
-          Conf_log.err (fun m -> m "Expect OPEN but rec: %s" (to_string msg));
+          Log.err (fun m -> m "Expect OPEN but rec: %s" (to_string msg));
           assert false
         | Open o ->
-          send_msg flow Bgp.Keepalive (module Conf_log)
+          Log.debug (fun m -> m "Rec: %s" (to_string msg)); 
+          send_msg flow Bgp.Keepalive (module Log)
           >>= fun () ->
 
           let cond = function
             | Keepalive -> true
             | msg -> 
-              Conf_log.err (fun m -> m "Expect Keepalive but rec: %s" (to_string msg));
+              Log.err (fun m -> m "Expect Keepalive but rec: %s" (to_string msg));
               assert false
           in
-          read_loop flow cond (module Conf_log)
+          read_loop flow cond (module Log)
           >>= fun () ->
 
           Lwt.return (flow, o)
@@ -262,7 +262,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_create_session s () = 
     let test_name = "create session" in
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow, _) ->
     close_session flow
     >>= fun () ->
@@ -272,7 +272,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_maintain_session s () =
     let test_name = "maintain session" in
 
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow, o) ->
     
     let negotiated_ht = min o.hold_time default_hold_time in
@@ -296,13 +296,13 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_propagate_update_to_new_peer s () =
     let test_name = "propagate update to new peer" in
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
     
     send_msg flow1 (default_update ()) (module Sp1_log)
     >>= fun () ->
 
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     let cond u = 
@@ -329,10 +329,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_propagate_update_to_old_peer s () =
     let test_name = "propagate update to old peer" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     send_msg flow1 (default_update ()) (module Sp1_log)
@@ -357,7 +356,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
   let test_no_propagate_update_to_src s () =
     let test_name = "don't propagate update to src" in
-    create_session s (relay1 ()) test_name
+    
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
     
     send_msg flow1 (default_update ()) (module Sp1_log)
@@ -378,7 +378,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let test_name = "group propagate update to new peer" in
     let group_size = 500 in
     (* connect to first speaker *)
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
 
     let rec plain_feed test_name flow count seed =
@@ -409,7 +409,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
 
     (* connect to speaker2 *)
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
     let rec read_loop (set: Prefix_set.t) =
       Bgp_flow.read flow2
@@ -441,9 +441,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let cluster_size = 500 in
     
     (* connect to speakers *)
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     let t1 () =
@@ -494,9 +494,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_link_flap s () =
     let test_name = "link flap" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     (* Write 1st update *)
@@ -541,9 +541,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_route_withdrawn s () =
     let test_name = "route withdrawn" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     (* Write 1st update *)
@@ -594,9 +594,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_route_selection_after_wd s () =
     let test_name = "route route selection after withdrawn" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name 
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     (* update from speaker 1 *)
@@ -679,9 +679,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_route_withdrawn_diff_src s () =
     let test_name = "route withdrawn diff src" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     (* update from speaker 1 *)
@@ -749,9 +749,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_route_replace s () =
     let test_name = "route replace" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     (* Write the first update *)
@@ -807,9 +807,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_route_unchanged s () =
     let test_name = "route unchange case" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
@@ -859,9 +859,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_replace2 s () =
     let test_name = "not take worse route from source that gives the best route" in
 
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow1, _) ->
-    create_session s (relay2 ()) test_name
+    create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
 
     let nlri = [Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0")] in
@@ -925,7 +925,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_header_error_handle s () = 
     let test_name = "header error handle" in
     
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow, _) ->
     let tcp_flow = Bgp_flow.tcp_flow flow in
     
@@ -956,7 +956,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   let test_update_attr_length_error_handle s () = 
     let test_name = "attr length error handle" in
 
-    create_session s (relay1 ()) test_name
+    create_session s (relay1 ()) test_name (module Sp1_log)
     >>= fun (flow, _) ->
     let tcp_flow = Bgp_flow.tcp_flow flow in
 
@@ -1009,7 +1009,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      test_create_session s; 
+      (* test_create_session s; 
       test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
@@ -1018,7 +1018,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       test_simul_insert s;
       test_route_withdrawn s;
       test_route_withdrawn_diff_src s;
-      test_link_flap s;
+      test_link_flap s; *)
       test_route_replace s;
       test_route_unchanged s;
       test_replace2 s;
