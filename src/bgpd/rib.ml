@@ -20,7 +20,39 @@ module ID = struct
   let compare (a: t) (b: t) = a - b
   let create attrs = Hashtbl.hash attrs
 end
+
 module ID_map = Map.Make(ID)
+
+module Dict = struct
+  type t = (Bgp.path_attrs * int) ID_map.t
+
+  let add id attrs t = 
+    match ID_map.find_opt id t with
+    | None -> ID_map.add id (attrs, 1) t
+    | Some (stored_attrs, c) -> ID_map.add id (stored_attrs, c + 1) t
+  ;;
+
+  let remove id t = 
+    match ID_map.find_opt id t with
+    | None -> t
+    | Some (stored_attrs, c) ->
+      if (c = 1) then 
+        ID_map.remove id t 
+      else
+        ID_map.add id (stored_attrs, c - 1) t
+  ;;
+
+  let find_opt id t = 
+    match ID_map.find_opt id t with
+    | None -> None
+    | Some (attrs, _c) -> Some attrs
+  ;;
+
+  let find id t = 
+    let attrs, _ = ID_map.find id t in
+    attrs
+  ;;
+end
 
 type update = Bgp.update
 let is_empty_update u = u.withdrawn = [] && u.nlri = [] 
@@ -369,7 +401,7 @@ module Loc_rib = struct
     local_id: Ipaddr.V4.t;
     subs: peer Ip_map.t;
     db: (ID.t * Ipaddr.V4.t) Prefix_map.t;
-    dict: (Bgp.path_attrs * int) ID_map.t;
+    dict: Dict.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -490,51 +522,53 @@ module Loc_rib = struct
   (* This function is pure *)
   let update_loc_db local_id local_asn (peer_id, update) db dict =
     (* Withdrawn from Loc-RIB *)
-    let wd, db =
-      let loc_wd_pfx (wd, db) pfx = 
+    let wd, db, dict =
+      let loc_wd_pfx (wd, db, dict) pfx = 
         match Prefix_map.find_opt pfx db with
-        | None -> wd, db
-        | Some (_, stored_id) -> 
-          if (stored_id = peer_id) then 
-            (pfx::wd, Prefix_map.remove pfx db) 
-          else wd, db
+        | None -> wd, db, dict
+        | Some (attr_id, src_id) -> 
+          if (src_id = peer_id) then 
+            (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict) 
+          else wd, db, dict
       in
-      List.fold_left loc_wd_pfx ([], db) update.withdrawn
+      List.fold_left loc_wd_pfx ([], db, dict) update.withdrawn
     in
 
     (* If the advertised path is looping, don't install any new routes OR no advertised route *)
     if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
       let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
-      (db, out_update)
+      (db, dict, out_update)
     end else
       let updated_attrs = 
         update.path_attrs 
         |> update_nexthop local_id 
         |> update_aspath local_asn
       in
+      let u_attr_id = ID.create updated_attrs in
 
-      let wd, ins, db = 
-        let loc_ins_pfx (wd, ins, db) pfx = 
+      let wd, ins, db, dict =   
+        let loc_ins_pfx (wd, ins, db, dict) pfx = 
           match List.mem pfx wd with
           | true -> 
             (* We do not install new attrs immediately after withdrawn *)
-            (wd, ins, db)
+            (wd, ins, db, dict)
           | false ->
             match Prefix_map.find_opt pfx db with
             | None -> 
               (* If this is a new destination *)
-              (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
-            | Some (stored_attrs, stored_id) ->
+              (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id updated_attrs dict)
+            | Some (attr_id, src_id) ->
+              let stored_attrs = Dict.find attr_id dict in
               if tie_break updated_attrs stored_attrs then
                 (* Replace if the new route is more preferable *)
-                (wd, pfx::ins, Prefix_map.add pfx (updated_attrs, peer_id) db)
-              else if stored_id = peer_id then 
+                (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id updated_attrs dict)
+              else if src_id = peer_id then 
                 (* If from the same peer then the current best path is no longer valid. *) 
                 (* Remove the current best path and reselects the path later. *)
-                (pfx::wd, ins, Prefix_map.remove pfx db)
-              else wd, ins, db
+                (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove attr_id dict)
+              else wd, ins, db, dict
         in
-        List.fold_left loc_ins_pfx (wd, [], db) update.nlri
+        List.fold_left loc_ins_pfx (wd, [], db, dict) update.nlri
       in
 
       let out_update = {
@@ -543,12 +577,13 @@ module Loc_rib = struct
         nlri = ins
       } in 
 
-      (db, out_update)
+      (db, dict, out_update)
   ;;
 
   let get_assoc_pfxes db remote_id = 
     let f acc (pfx, (_, stored_id)) =
-      if remote_id = stored_id then pfx::acc else acc
+      if remote_id = stored_id then pfx::acc 
+      else acc
     in
     List.fold_left f [] (Prefix_map.bindings db)
   ;;
@@ -562,7 +597,7 @@ module Loc_rib = struct
         | Push (remote_id, update) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
-            let new_db, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db in
+            let new_db, new_dict, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db t.dict in
             
             let ip_and_peer = Ip_map.bindings t.subs in
 
@@ -587,7 +622,7 @@ module Loc_rib = struct
               else ()
             in
 
-            let new_t = set_store new_db t in
+            let new_t = set_store new_db new_dict t in
             handle_loop new_t
           end
         | Sub (remote_id, in_rib, out_rib) -> begin
@@ -600,8 +635,9 @@ module Loc_rib = struct
             
           (* Synchronize with peer: blocking *)
           let () =
-            let f (pfx, (attr, _)) = 
-              let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
+            let f (pfx, (attr_id, _)) = 
+              let attrs = Dict.find attr_id new_t.dict in
+              let update = { withdrawn = []; path_attrs = attrs; nlri = [ pfx ] } in
               Adj_rib_out.input out_rib (Adj_rib_out.Push update)
             in
             List.iter f (Prefix_map.bindings t.db)
@@ -629,7 +665,8 @@ module Loc_rib = struct
             let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
 
             (* Update db *)
-            let new_db = 
+            let new_db, new_dict = 
+              let 
               let f acc pfx = Prefix_map.remove pfx acc in
               List.fold_left f t.db out_wd
             in
