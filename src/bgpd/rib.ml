@@ -350,6 +350,16 @@ module Adj_rib_out = struct
 end
 
 
+module Pfx = struct
+  type t = Prefix.t
+  let equal (t1: t) (t2: t) = Ipaddr.V4.Prefix.compare t1 t2 = 0
+
+  let hash t = Hashtbl.hash (Prefix.network t, Prefix.bits t)
+end
+
+module Hash = Hashtbl.Make(Pfx)
+
+
 module Loc_rib = struct
   
   module Ip_map = Map.Make(Ipaddr.V4)
@@ -371,7 +381,7 @@ module Loc_rib = struct
     local_asn: int32;
     local_id: Ipaddr.V4.t;
     subs: peer Ip_map.t;
-    db: (Prefix.t, Bgp.path_attrs * Ipaddr.V4.t) Hashtbl.t;
+    db: (Bgp.path_attrs * Ipaddr.V4.t) Hash.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -494,11 +504,11 @@ module Loc_rib = struct
     (* Withdrawn from Loc-RIB *)
     let wd, db =
       let loc_wd_pfx (wd, db) pfx = 
-        match Hashtbl.find_opt db pfx with
+        match Hash.find_opt db pfx with
         | None -> wd, db
         | Some (_, stored_id) -> 
           if (stored_id = peer_id) then 
-            let () = Hashtbl.remove db pfx in
+            let () = Hash.remove db pfx in
             (pfx::wd, db) 
           else wd, db
       in
@@ -523,20 +533,20 @@ module Loc_rib = struct
             (* We do not install new attrs immediately after withdrawn *)
             (wd, ins, db)
           | false ->
-            match Hashtbl.find_opt db pfx with
+            match Hash.find_opt db pfx with
             | None -> 
               (* If this is a new destination *)
-              Hashtbl.add db pfx (updated_attrs, peer_id);
+              Hash.add db pfx (updated_attrs, peer_id);
               (wd, pfx::ins, db)
             | Some (stored_attrs, stored_id) ->
               if tie_break updated_attrs stored_attrs then
                 (* Replace if the new route is more preferable *)
-                let () = Hashtbl.replace db pfx (updated_attrs, peer_id) in
+                let () = Hash.replace db pfx (updated_attrs, peer_id) in
                 (wd, pfx::ins, db)
               else if stored_id = peer_id then 
                 (* If from the same peer then the current best path is no longer valid. *) 
                 (* Remove the current best path and reselects the path later. *)
-                let () = Hashtbl.remove db pfx in
+                let () = Hash.remove db pfx in
                 (pfx::wd, ins, db)
               else wd, ins, db
         in
@@ -559,7 +569,7 @@ module Loc_rib = struct
         l_ref := pfx::(!l_ref) 
       else ()
     in
-    Hashtbl.iter f db;
+    Hash.iter f db;
     !l_ref
   ;;
 
@@ -613,7 +623,7 @@ module Loc_rib = struct
               let update = { withdrawn = []; path_attrs = attr; nlri = [pfx] } in
               Adj_rib_out.input out_rib (Adj_rib_out.Push update)
             in
-            Hashtbl.iter f t.db
+            Hash.iter f t.db
           in
 
           handle_loop new_t
@@ -639,7 +649,7 @@ module Loc_rib = struct
 
             (* Update db *)
             let () = 
-              let f pfx = Hashtbl.remove t.db pfx in
+              let f pfx = Hash.remove t.db pfx in
               List.iter f out_wd 
             in
 
@@ -681,7 +691,7 @@ module Loc_rib = struct
       running = true;
       local_id; local_asn;
       subs = Ip_map.empty;
-      db = Hashtbl.create 200000;
+      db = Hash.create 200000;
       stream; pf
     } in
 
@@ -704,15 +714,16 @@ module Loc_rib = struct
         in
         pfx_str::acc
       in 
-      String.concat "\n" (List.rev (Hashtbl.fold f t.db []))
+      String.concat "\n" (List.rev (Hash.fold f t.db []))
     in  
     Printf.sprintf "Routes: \n %s" pfxs_str
   ;;
 
   let size t = 
+    let open Hash in
+    let aux = stats t.db in
     let open Hashtbl in
-    let stats = stats t.db in
-    stats.num_bindings
+    aux.num_bindings
   ;;
 
   let input t input = t.pf (Some input)
