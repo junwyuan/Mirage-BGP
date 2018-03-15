@@ -354,7 +354,10 @@ module Pfx = struct
   type t = Prefix.t
   let equal (t1: t) (t2: t) = Ipaddr.V4.Prefix.compare t1 t2 = 0
 
-  let hash t = Hashtbl.hash (Prefix.network t, Prefix.bits t)
+  let hash t = 
+    let ip = Prefix.network t |> Ipaddr.V4.to_int32 |> Int32.to_int in
+    let mask = Prefix.bits t in
+    Hashtbl.hash ( (ip lsl 6) + mask )
 end
 
 module Hash = Hashtbl.Make(Pfx)
@@ -583,6 +586,12 @@ module Loc_rib = struct
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
             let _db, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db in
+
+            (* let () =
+              let aux = Hash.stats t.db in
+              let open Hashtbl in
+              Rib_log.info (fun m -> m "#bindings: %d, #buckets %d, max bucket length: %d" aux.num_bindings aux.num_buckets aux.max_bucket_length)
+            in *)
             
             let ip_and_peer = Ip_map.bindings t.subs in
 
