@@ -53,6 +53,16 @@ module Dict = struct
     attrs
   ;;
 
+  let cardinal t = ID_map.cardinal t
+
+  let mem id t = ID_map.mem id t
+
+  let count id t = 
+    match ID_map.find_opt id t with
+    | None -> 0
+    | Some (_, c) -> c
+  ;;
+
   let empty = ID_map.empty
 end
 
@@ -69,40 +79,51 @@ module Adj_rib_in = struct
     mutable running: bool;
     remote_id: Ipaddr.V4.t;
     callback: update -> unit;
-    db: Bgp.path_attrs Prefix_map.t;
+    db: ID.t Prefix_map.t;
+    dict: Dict.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
 
-  let set_db new_db t = {
+  let set_store new_db new_dict t = {
     running = t.running;
     remote_id = t.remote_id;
     callback = t.callback;
-    db = new_db;
+    db = new_db; dict = new_dict;
     stream = t.stream;
     pf = t.pf;
   }
     
-  let update_db { withdrawn; path_attrs; nlri } db  = 
-    let to_be_wd = List.filter (fun pfx -> Prefix_map.mem pfx db) withdrawn in
-
-    let db_after_wd =
-      let f rib pfx = Prefix_map.remove pfx rib in
-      List.fold_left f db to_be_wd
+  let update_in_db { withdrawn; path_attrs; nlri } db dict = 
+    let out_wd, db_aft_wd, dict_aft_wd =
+      let f (wd, db, dict) pfx = 
+        match Prefix_map.find_opt pfx db with
+        | None -> (wd, db, dict)
+        | Some attr_id -> (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict)
+      in
+      List.fold_left f ([], db, dict) withdrawn
     in
-    
-    let db_after_insert = 
-      let f rib pfx = Prefix_map.add pfx path_attrs rib in
-      List.fold_left f db_after_wd nlri
+
+    let attr_id = ID.create path_attrs in
+    let db_aft_ins, dict_aft_ins = 
+      let f (db, dict) pfx = 
+        match Prefix_map.find_opt pfx db with
+        | None ->
+          (Prefix_map.add pfx attr_id db, Dict.add attr_id path_attrs dict)
+        | Some stored ->
+          let new_dict = Dict.add attr_id path_attrs dict |> Dict.remove stored in
+          (Prefix_map.add pfx attr_id db, new_dict)
+      in
+      List.fold_left f (db_aft_wd, dict_aft_wd) nlri
     in
 
     let out_update = {
-      withdrawn = to_be_wd;
+      withdrawn = out_wd;
       path_attrs;
-      nlri
+      nlri;
     } in
 
-    (db_after_insert, out_update)
+    (db_aft_ins, dict_aft_ins, out_update)
   ;;
 
   let rec handle_loop t = 
@@ -111,9 +132,10 @@ module Adj_rib_in = struct
       | Some input -> begin
         match input with
         | Push update -> 
-          let new_db, out_update = update_db update t.db in
-          let new_t = set_db new_db t in
-          if is_empty_update out_update then handle_loop new_t
+          let new_db, new_dict, out_update = update_in_db update t.db t.dict in
+          let new_t = set_store new_db new_dict t in
+          if is_empty_update out_update then 
+            handle_loop new_t
           else 
             (* Handle the callback before handling next input request. This guarantees update message ordering *)
             let () = t.callback out_update in
@@ -122,7 +144,8 @@ module Adj_rib_in = struct
           let f pfx =
             match Prefix_map.find_opt pfx t.db with
             | None -> ()
-            | Some path_attrs ->
+            | Some attr_id ->
+              let path_attrs = Dict.find attr_id t.dict in
               let update = {
                 withdrawn = [];
                 path_attrs;
@@ -147,9 +170,11 @@ module Adj_rib_in = struct
     (* Construct the data structure *)
     let stream, pf = Lwt_stream.create () in
     let db = Prefix_map.empty in
+    let dict = Dict.empty in
     let t = {
       running = true;
-      remote_id; callback; db;
+      remote_id; callback; 
+      db; dict;
       stream; pf;
     } in
     
@@ -582,14 +607,6 @@ module Loc_rib = struct
       (db, dict, out_update)
   ;;
 
-  let get_assoc_pfxes db remote_id = 
-    let f acc (pfx, (_, stored_id)) =
-      if remote_id = stored_id then pfx::acc 
-      else acc
-    in
-    List.fold_left f [] (Prefix_map.bindings db)
-  ;;
-
   let rec handle_loop t = 
     let loc_rib_handle = function
       | None -> Lwt.return_unit
@@ -655,7 +672,6 @@ module Loc_rib = struct
           (* Update subscribed ribs *)
           let new_subs = Ip_map.remove remote_id t.subs in
 
-          (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
           (* Update db *)
           let out_wd, new_db, new_dict = 
             let f (wd, db, dict) (pfx, (attr_id, src_id)) = 
@@ -669,6 +685,7 @@ module Loc_rib = struct
           let new_t = t |> set_subs new_subs |> set_store new_db new_dict in
           let ip_and_peer = Ip_map.bindings new_t.subs in
 
+          (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
           (* Send the updates: blocking *)
           let () =  
             (* Generate update *)
