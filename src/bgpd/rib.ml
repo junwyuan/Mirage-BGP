@@ -52,6 +52,8 @@ module Dict = struct
     let attrs, _ = ID_map.find id t in
     attrs
   ;;
+
+  let empty = ID_map.empty
 end
 
 type update = Bgp.update
@@ -653,44 +655,40 @@ module Loc_rib = struct
           (* Update subscribed ribs *)
           let new_subs = Ip_map.remove remote_id t.subs in
 
-          let out_wd = get_assoc_pfxes t.db remote_id in
-
           (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
-          match out_wd = [] with
-          | true -> 
-            let new_t = set_subs new_subs t in
-            handle_loop new_t
-          | false ->
+          (* Update db *)
+          let out_wd, new_db, new_dict = 
+            let f (wd, db, dict) (pfx, (attr_id, src_id)) = 
+              if src_id = remote_id then 
+                (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict)
+              else (wd, db, dict) 
+            in
+            List.fold_left f ([], t.db, t.dict) (Prefix_map.bindings t.db)
+          in
+
+          let new_t = t |> set_subs new_subs |> set_store new_db new_dict in
+          let ip_and_peer = Ip_map.bindings new_t.subs in
+
+          (* Send the updates: blocking *)
+          let () =  
             (* Generate update *)
             let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
 
-            (* Update db *)
-            let new_db, new_dict = 
-              let 
-              let f acc pfx = Prefix_map.remove pfx acc in
-              List.fold_left f t.db out_wd
+            let f (peer_id, peer) = 
+              Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
             in
+            List.iter f ip_and_peer
+          in
 
-            let new_t = t |> set_subs new_subs |> set_store new_db in
-            let ip_and_peer = Ip_map.bindings new_t.subs in
-
-            (* Send the updates: blocking *)
-            let () =  
-              let f (peer_id, peer) = 
-                Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
-              in
-              List.iter f ip_and_peer
+          (* Pull routes *)
+          let () =
+            let f (peer_id, peer) =
+              Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_wd)
             in
+            List.iter f ip_and_peer
+          in
 
-            (* Pull routes *)
-            let () =
-              let f (peer_id, peer) =
-                Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_update.withdrawn)
-              in
-              List.iter f ip_and_peer
-            in
-
-            handle_loop new_t
+          handle_loop new_t
     in
 
     t_ref := Some t;
@@ -710,6 +708,7 @@ module Loc_rib = struct
       local_id; local_asn;
       subs = Ip_map.empty;
       db = Prefix_map.empty;
+      dict = Dict.empty;
       stream; pf
     } in
 
@@ -722,13 +721,14 @@ module Loc_rib = struct
   let to_string t = 
     let count = ref 0 in
     let pfxs_str = 
-      let f pfx (pa, id) acc = 
+      let f pfx (attr_id, id) acc = 
+        let attrs = Dict.find attr_id t.dict in
         count := !count + 1;
         let pfx_str = Printf.sprintf "%d: %s | %s | %s" 
                                       (!count)
                                       (Ipaddr.V4.Prefix.to_string pfx) 
                                       (Ipaddr.V4.to_string id) 
-                                      (path_attrs_to_string pa) 
+                                      (path_attrs_to_string attrs) 
         in
         pfx_str::acc
       in 
