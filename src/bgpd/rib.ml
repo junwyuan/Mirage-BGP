@@ -76,9 +76,9 @@ module Adj_rib_in = struct
     | Stop
   
   type t = {
-    mutable running: bool;
     remote_id: Ipaddr.V4.t;
     callback: update -> unit;
+    signal: unit -> unit;
     db: ID.t Prefix_map.t;
     dict: Dict.t;
     stream: input Lwt_stream.t;
@@ -86,9 +86,9 @@ module Adj_rib_in = struct
   }
 
   let set_store new_db new_dict t = {
-    running = t.running;
     remote_id = t.remote_id;
     callback = t.callback;
+    signal = t.signal;
     db = new_db; dict = new_dict;
     stream = t.stream;
     pf = t.pf;
@@ -129,8 +129,7 @@ module Adj_rib_in = struct
   let rec handle_loop t = 
     let in_rib_handle = function
       | None -> Lwt.return_unit
-      | Some input -> begin
-        match input with
+      | Some input -> match input with
         | Push update -> 
           let new_db, new_dict, out_update = update_in_db update t.db t.dict in
           let new_t = set_store new_db new_dict t in
@@ -140,7 +139,7 @@ module Adj_rib_in = struct
             (* Handle the callback before handling next input request. This guarantees update message ordering *)
             let () = t.callback out_update in
             handle_loop new_t
-        | Pull pfx_list -> begin
+        | Pull pfx_list -> 
           let f pfx =
             match Prefix_map.find_opt pfx t.db with
             | None -> ()
@@ -155,25 +154,28 @@ module Adj_rib_in = struct
           in
           let () = List.iter f pfx_list in
           handle_loop t
-        end
-      | Stop -> Lwt.return_unit
-      end
+        | Stop -> 
+          (* Withdraw all previously advertised messages *)
+          let wd = List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings t.db) in
+          let () = t.callback { withdrawn = wd; path_attrs = []; nlri = []; } in
+          
+          (* Free the Router thread *)
+          let () = t.signal () in
+          
+          Lwt.return_unit
     in
-    if not t.running then 
-      Lwt.return_unit
-    else
-      Lwt_stream.get t.stream >>= fun input ->
-      in_rib_handle input
+    Lwt_stream.get t.stream >>= fun input ->
+    in_rib_handle input
   ;;
 
-  let create remote_id callback : t = 
+  let create remote_id callback signal : t = 
     (* Construct the data structure *)
     let stream, pf = Lwt_stream.create () in
     let db = Prefix_map.empty in
     let dict = Dict.empty in
     let t = {
-      running = true;
-      remote_id; callback; 
+      remote_id; 
+      callback; signal;
       db; dict;
       stream; pf;
     } in
@@ -188,10 +190,7 @@ module Adj_rib_in = struct
   
   let push_update t update = input t (Push update)
   
-  let stop t = 
-    input t Stop;
-    t.running <- false
-  ;;
+  let stop t = input t Stop
 end
 
 
@@ -203,8 +202,6 @@ module Adj_rib_out = struct
     | Stop
 
   type t = {
-    (* thread control *)
-    mutable running: bool;
     (* States *)
     remote_id: Ipaddr.V4.t;
     local_id: Ipaddr.V4.t;
@@ -217,7 +214,6 @@ module Adj_rib_out = struct
   }
 
   let set_past_routes pr t = {
-    running = t.running;
     remote_id = t.remote_id;
     local_id = t.local_id;
     local_asn = t.local_asn;
@@ -372,11 +368,8 @@ module Adj_rib_out = struct
           handle_loop new_t
     in
 
-    if not t.running then 
-      Lwt.return_unit
-    else 
-      Lwt_stream.peek t.stream >>= fun input ->
-      out_rib_handle input
+    Lwt_stream.peek t.stream >>= fun input ->
+    out_rib_handle input
   ;;
 
 
@@ -385,7 +378,6 @@ module Adj_rib_out = struct
     let stream, pf = Lwt_stream.create () in
     let past_routes = Prefix_set.empty in
     let t = {
-      running = true;
       remote_id; local_id; local_asn;
       callback; past_routes;
       stream; pf;
@@ -396,13 +388,12 @@ module Adj_rib_out = struct
 
     t
   ;;
+  
   let input t input = t.pf (Some input)
 
   let push_update t u = input t (Push u) 
-  let stop t = 
-    input t Stop;
-    t.running <- false
-  ;;
+  
+  let stop t = input t Stop
 end
 
 
@@ -615,7 +606,7 @@ module Loc_rib = struct
         | Stop -> Lwt.return_unit
         | Push (remote_id, update) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
-          else begin
+          else 
             let new_db, new_dict, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db t.dict in
             
             let ip_and_peer = Ip_map.bindings t.subs in
@@ -643,7 +634,6 @@ module Loc_rib = struct
 
             let new_t = set_store new_db new_dict t in
             handle_loop new_t
-          end
         | Sub (remote_id, in_rib, out_rib) -> begin
           if Ip_map.mem remote_id t.subs then
             Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
@@ -672,39 +662,7 @@ module Loc_rib = struct
           (* Update subscribed ribs *)
           let new_subs = Ip_map.remove remote_id t.subs in
 
-          (* Update db *)
-          let out_wd, new_db, new_dict = 
-            let f (wd, db, dict) (pfx, (attr_id, src_id)) = 
-              if src_id = remote_id then 
-                (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict)
-              else (wd, db, dict) 
-            in
-            List.fold_left f ([], t.db, t.dict) (Prefix_map.bindings t.db)
-          in
-
-          let new_t = t |> set_subs new_subs |> set_store new_db new_dict in
-          let ip_and_peer = Ip_map.bindings new_t.subs in
-
-          (* Design choices: It is okay to use blocking operations as these operations should return almost immediately. *)
-          (* Send the updates: blocking *)
-          let () =  
-            (* Generate update *)
-            let out_update = { withdrawn = out_wd; path_attrs = []; nlri = [] } in
-
-            let f (peer_id, peer) = 
-              Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
-            in
-            List.iter f ip_and_peer
-          in
-
-          (* Pull routes *)
-          let () =
-            let f (peer_id, peer) =
-              Adj_rib_in.input peer.in_rib (Adj_rib_in.Pull out_wd)
-            in
-            List.iter f ip_and_peer
-          in
-
+          let new_t = set_subs new_subs t in
           handle_loop new_t
     in
 

@@ -75,6 +75,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
 
     stream: Fsm.event Lwt_stream.t;
     pf: Fsm.event option -> unit;
+
+    (* Synchronisation *)
+    cond_var: unit Lwt_condition.t;
   }
 
   let push_event t event = t.pf (Some event)
@@ -371,10 +374,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     end
     | Initiate_rib ->
       let in_rib = 
-        let callback u = 
-          Rib.Loc_rib.push_update t.loc_rib (t.remote_id, u);
-        in
-        Rib.Adj_rib_in.create t.remote_id callback
+        let callback u = Rib.Loc_rib.push_update t.loc_rib (t.remote_id, u) in
+        let signal () = Lwt_condition.signal t.cond_var () in
+        Rib.Adj_rib_in.create t.remote_id callback signal
       in
       t.input_rib <- Some in_rib;
 
@@ -404,7 +406,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           Rib.Adj_rib_out.stop rib
       in
 
-      Rib.Loc_rib.unsub t.loc_rib t.remote_id
+      ()
   ;;    
   
   let rec handle_event_loop t =
@@ -452,6 +454,21 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           let () =
             let f t act = perform_action t act in
             List.iter (f t) actions
+          in
+
+          (* Wait for In RIB if IN RIB is released *)
+          let wthread = 
+            if List.mem Fsm.Release_rib actions then
+              Lwt_condition.wait t.cond_var
+            else Lwt.return_unit
+          in
+          wthread >>= fun () ->
+
+          (* Unsub from Loc RIB *)
+          let () = 
+            if List.mem Fsm.Release_rib actions then
+              Rib.Loc_rib.unsub t.loc_rib t.remote_id
+            else () 
           in
             
           match Fsm.state t.fsm with
@@ -520,6 +537,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       log = Logs.src_log bgpd_src;
 
       stream; pf;
+
+      cond_var = Lwt_condition.create ();
     } in
 
     let _ = handle_event_loop t in
