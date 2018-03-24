@@ -7,8 +7,8 @@ let config =
 ;;
 
 let test = 
-  let doc = Key.Arg.info ~doc:"Whether it is running as test mode." ["test"] in
-  Key.(create "test" Arg.(opt bool false doc))
+  let doc = Key.Arg.info ~doc:"Flag indicating whether running as test mode." ["test"] in
+  Key.(create "test" Arg.(flag doc))
 ;;
 
 let runtime = 
@@ -18,12 +18,12 @@ let runtime =
 
 let kernel = 
   let doc = Key.Arg.info ~doc:"Flag indicating whether install the learned routes into kernel's routing table" ["kernel"] in
-  Key.(create "kernel" Arg.(opt bool false doc))
+  Key.(create "kernel" Arg.(flag doc))
 ;;
 
 let remove = 
   let doc = Key.Arg.info ~doc:"Flag indicating whether remove the learned routes from kernel's routing table when exit" ["remove"] in
-  Key.(create "remove" Arg.(opt bool false doc))
+  Key.(create "remove" Arg.(flag doc))
 ;;
 
 let main = foreign 
