@@ -667,32 +667,31 @@ module Loc_rib = struct
                     match Unix.del_route { net = pfx; gw = None; iface = None } with
                     | Result.Ok () -> ()
                     | Result.Error _ -> 
-                       (* No real action is performed to handle the error *)
-                        Rib_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
+                      (* No real action is performed to handle the error *)
+                      Rib_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
                   in
                   List.iter f out_update.withdrawn
                 in
 
-                let next_hop = 
-                  match Bgp.find_next_hop out_update.path_attrs with
-                  | None -> assert false
-                  | Some v -> v
-                in
+                if out_update.nlri <> [] then
+                  let next_hop = 
+                    match Bgp.find_next_hop out_update.path_attrs with
+                    | None -> assert false
+                    | Some v -> v
+                  in
 
-                let () =
                   let f pfx = 
                     match Unix.add_route { net = pfx; gw = Some next_hop; iface = None } with
                     | Result.Ok () -> ()
                     | Result.Error _ -> 
-                       (* No real action is performed to handle the error *)
-                        Rib_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
+                      (* No real action is performed to handle the error *)
+                      Rib_log.debug (fun m -> m " Error occurs when adding route to kernel. ")
                   in
                   List.iter f out_update.nlri
-                in
-
-                ()
+                else ()
               else ()
             in
+
             let new_t = set_store new_db new_dict t in
             handle_loop new_t
         | Sub (remote_id, in_rib, out_rib) -> begin
@@ -770,7 +769,7 @@ module Loc_rib = struct
       in 
       String.concat "\n" (List.rev (Prefix_map.fold f t.db []))
     in  
-    Printf.sprintf "Routes: \n %s" pfxs_str
+    Printf.sprintf "%s" pfxs_str
   ;;
 
   let size t = Prefix_map.cardinal t.db
