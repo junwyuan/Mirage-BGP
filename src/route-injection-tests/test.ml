@@ -289,9 +289,9 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     let config = Config_parser.parse_from_file (Key_gen.config ()) in
 
-    Test_log.info (fun m -> m "Tests start.");
+    Test_log.info (fun m -> m "Tests starts.");
     start_test s config >>= fun () ->
-    Test_log.info (fun m -> m "All pass.");
+    Test_log.info (fun m -> m "Test finishes.");
     
     Lwt.return_unit
   ;;
