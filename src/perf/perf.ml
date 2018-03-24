@@ -31,7 +31,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     Lwt.fail_with msg
   ;;
 
-  let create_session s config peer (module Log : Logs.LOG) =
+  let create_session s peer (module Log : Logs.LOG) =
     Bgp_flow.create_connection s (peer.remote_id, peer.remote_port)
     >>= function
     | Error _ -> 
@@ -318,10 +318,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let peer2 = List.nth config.relays 1 in
 
     (* connect to speaker1 *)
-    create_session s config peer1 (module Sp1_log)
+    create_session s peer1 (module Sp1_log)
     >>= fun (flow1, _) ->
     (* connect to speaker2 *)
-    create_session s config peer2 (module Sp2_log)
+    create_session s peer2 (module Sp2_log)
     >>= fun (flow2, _) ->
 
     Mon_log.info (fun m -> m "Connection up.");

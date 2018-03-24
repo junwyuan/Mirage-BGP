@@ -1,0 +1,4 @@
+true: package(result), package(cstruct), package(cstruct.ppx), package(lwt.ppx), debug
+true: package(yojson)
+"common": include
+"common/lib": include
