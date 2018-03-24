@@ -1,4 +1,4 @@
-true: package(ipaddr), package(logs)
+true: package(ipaddr)
 true: package(result)
 true: package(cstruct), package(cstruct.ppx)
 true: package(lwt), package(lwt.ppx)
@@ -9,5 +9,5 @@ true: debug
 "common/lib": include
 "test": include
 
-true: package(yojson)
+true: package(yojson), package(bos)
 true: package(lwt.unix)

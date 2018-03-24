@@ -149,7 +149,8 @@ module Unix = struct
       | Some v -> Ipaddr.V4.to_string v 
     in
 
-    let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask % "gw" % gw) in
+    (* let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask % "gw" % gw) in *)
+    let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask) in
     let output = Bos.OS.Cmd.(run_out cmd |> out_lines) in
     match output with
     | Result.Ok (_, (_, status)) -> begin

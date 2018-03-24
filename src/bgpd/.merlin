@@ -5,7 +5,7 @@ PKG magic-mime mirage-types-lwt duration
 PKG cstruct cstruct.ppx
 PKG alcotest lwt-pipe 
 PKG lwt.ppx
-PKG yojson
+PKG yojson bos
 
 S **
 B _build/**

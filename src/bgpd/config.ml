@@ -16,12 +16,23 @@ let runtime =
   Key.(create "runtime" Arg.(opt int 60 doc))
 ;;
 
+let kernel = 
+  let doc = Key.Arg.info ~doc:"Flag indicating whether install the learned routes into kernel's routing table" ["kernel"] in
+  Key.(create "kernel" Arg.(opt bool false doc))
+;;
+
+let remove = 
+  let doc = Key.Arg.info ~doc:"Flag indicating whether remove the learned routes from kernel's routing table when exit" ["remove"] in
+  Key.(create "remove" Arg.(opt bool false doc))
+;;
 
 let main = foreign 
   ~keys:[ 
     Key.abstract config;
     Key.abstract test;
     Key.abstract runtime;
+    Key.abstract kernel;
+    Key.abstract remove;
   ] 
   "Bgpd.Main" 
   (console @-> stackv4 @-> job)
