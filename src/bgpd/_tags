@@ -7,7 +7,8 @@ true: debug
 <test/*.*>: package(alcotest)
 "common": include
 "common/lib": include
+"trie": include
 "test": include
 
-true: package(yojson), package(bos)
 true: package(lwt.unix)
+true: package(yojson), package(bos)
