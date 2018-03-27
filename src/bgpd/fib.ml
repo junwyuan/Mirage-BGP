@@ -1,3 +1,5 @@
+open Tree
+
 type bit = bool
 
 (* Convert a prefix to its bit representation *)
@@ -44,25 +46,34 @@ let rec list_remove v = function
 ;;
 
 
+
 (* Use mutable field to reduce the need for garbage collection *)
 type route = {
+  static: bool;
   net: Ipaddr.V4.Prefix.t;
-  inter_gw: Ipaddr.V4.t option;
+  gw: Ipaddr.V4.t option;
   iface: string option;
-  direct_gw: Ipaddr.V4.t option;
-  (* What routes depend on this route *)
-  mutable dependents: Ipaddr.V4.Prefix.t list;
-  (* What routes this route depends on *)
-  depended: Ipaddr.V4.Prefix.t list;
 }
 
+type krt_change = {
+  subnet: Ipaddr.V4.Prefix.t;
+  direct_gw: Ipaddr.V4.t;
+}
+
+type krt_update = {
+  add: krt_change list;
+  remove: krt_change list;
+}
+
+let depended node = Tree.ancestors node
+
+let dependents node = Tree.offspring node
+
 let route_to_string route = 
-  Printf.sprintf "(net: %s, gw: %s, iface: %s, dependents: %s, depended: %s)"
+  Printf.sprintf "(net: %s, gw: %s, iface: %s)"
   (Ipaddr.V4.Prefix.to_string route.net)
-  (match route.inter_gw with None -> "*" | Some ip -> Ipaddr.V4.to_string ip)
+  (match route.gw with None -> "*" | Some ip -> Ipaddr.V4.to_string ip)
   (match route.iface with None -> "*" | Some s -> s)
-  (String.concat "; " (List.map (fun p -> Ipaddr.V4.Prefix.to_string p) route.dependents))
-  (String.concat "; " (List.map (fun p -> Ipaddr.V4.Prefix.to_string p) route.depended))
 ;;
 
 
@@ -72,11 +83,19 @@ module Prefix_map = Map.Make(Ipaddr.V4.Prefix)
 (* there could be a lot of empty nodes within the trie *)
 type t = {
   trie: (bool, Ipaddr.V4.Prefix.t) Prefix_trie.t;
-  map: route Prefix_map.t;
+  map: route Tree.t Prefix_map.t;
 }
 
 let print t = 
-  Prefix_map.iter (fun _ route -> Printf.printf "%s\n" (route_to_string route)) t.map
+  let f _ node = 
+    Printf.printf "%s | dependents: %s | depended %s \n" 
+                    (route_to_string (Tree.value node))
+                    (String.concat "; " (List.map (fun r -> Ipaddr.V4.Prefix.to_string r.net) (dependents node)))
+                    (String.concat "; " (List.map (fun r -> Ipaddr.V4.Prefix.to_string r.net) (depended node)))
+  in
+  Prefix_map.iter f t.map;
+  Printf.printf "-------\n"
+;;
 
 let empty = 
   {
@@ -84,47 +103,111 @@ let empty =
     map = Prefix_map.empty;
   }
 
-let resolve_opt t net inter_gw =
-  let rec aux_resolve ip used = 
+(* This function returns the parent node and the direct gateway *)
+let resolve_opt t target_net gw =
+  match Prefix_trie.find_opt t.trie (ip_to_bits gw) with
+  | None -> 
+    (* This route is not resolvable because its gw is not reachable. *)
+    None
+  | Some matched_pfx ->
+    let node = Prefix_map.find matched_pfx t.map in
+    let depended_routes = (Tree.value node)::(depended node) in
+    let mutual route = 
+      match route.gw with
+      | None -> begin
+        match route.iface with
+        | None -> 
+          Logs.err (fun m -> m "Some route has neither gw nor iface");
+          assert false
+        | Some _ -> false
+      end
+      | Some ip ->
+        if not (Ipaddr.V4.Prefix.mem ip target_net) then false
+        else
+          let p = Prefix_trie.find t.trie (ip_to_bits ip) in
+          Ipaddr.V4.Prefix.subset target_net p
+    in
+    match List.exists mutual depended_routes with
+    | true -> 
+      (* Mutual resolved *)
+      None
+    | false ->
+      (* Can be resolved *)
+      let direct_gw =
+        let first = List.hd depended_routes in
+        match first.gw with
+        | Some v -> v
+        | None ->
+          if List.length depended_routes > 1 then
+            let second = List.hd (List.tl depended_routes) in
+            option_get second.gw
+          else gw
+      in
+      Some (node, direct_gw)
+;;
+
+(* resolve without using cached data *)
+let resolve_no_cache t target_net gw =
+  let rec aux_resolve ip = 
     match Prefix_trie.find_opt t.trie (ip_to_bits ip) with
     | None -> 
       (* There is no route matching this ip. *)
       None
-    | Some pfx ->
-      if Ipaddr.V4.Prefix.subset net pfx && Ipaddr.V4.Prefix.mem ip net then
-        (* Mutual resolved. *)
-        None
-      else
-        let route = Prefix_map.find pfx t.map in
-        match route.iface with
-        | None -> aux_resolve (option_get route.inter_gw) (pfx::used)
-        | Some v -> 
-          (* Terminate case *)
-          match route.inter_gw with
-          | None -> Some (ip, v, (pfx::used))
-          | Some w -> Some (w, v, (pfx::used))
+    | Some matched_pfx ->
+      let node = Prefix_map.find matched_pfx t.map in
+      match node.value.gw with
+      | Some next_ip -> begin
+        if not (Ipaddr.V4.Prefix.mem next_ip target_net) then 
+          match node.value.iface with
+          | None -> aux_resolve next_ip
+          | Some _ -> Some next_ip
+        else
+          let p = Prefix_trie.find t.trie (ip_to_bits ip) in
+          if Ipaddr.V4.Prefix.subset target_net p then
+            (* Mutual resolved *)
+            None
+          else 
+            match node.value.iface with
+            | None -> aux_resolve next_ip
+            | Some _ -> Some next_ip
+      end
+      | None -> begin
+        match node.value.iface with
+        | Some v -> Some ip
+        | None -> 
+          (* Error case: One route has neither iface nor gw. *)
+          Logs.err (fun m -> m "One route has neither iface nor gw.");
+          assert false
+      end
   in
-  aux_resolve inter_gw []
+  match aux_resolve gw with
+  | None -> None
+  | Some direct_gw ->
+    let parent_node = 
+      let first_matched = Prefix_trie.find t.trie (ip_to_bits gw) in
+      Prefix_map.find first_matched t.map
+    in
+    Some (parent_node, direct_gw)
 ;;
 
-let resolve t net inter_gw = 
-  match resolve_opt t net inter_gw with
+let resolve t net gw = 
+  match resolve_opt t net gw with
   | None -> 
     Logs.err (fun m -> m "Resolve fails.");
     raise Not_found
   | Some v -> v
 ;;
 
-let resolvable t net inter_gw = resolve_opt t net inter_gw <> None    
+let resolvable t net gw = resolve_opt t net gw <> None    
 
-let add_static t net inter_gw iface = 
+let add_static t net gw iface = 
   let route = { 
-    net; inter_gw; iface; direct_gw = None; 
-    dependents = []; 
-    depended = [];
+    static = true;
+    net; gw; iface; 
   } in
+  let node = Tree.create None [] route in
   let trie = Prefix_trie.set t.trie (prefix_to_bits net) net in
-  let map = Prefix_map.add net route t.map in
+  let map = Prefix_map.add net node t.map in
   { trie; map }
 ;;
 
@@ -133,178 +216,154 @@ let is_static t net =
   | None -> 
     Logs.err (fun m -> m "Route not found");
     assert false
-  | Some route -> route.iface <> None
+  | Some node -> (Tree.value node).static
 ;;
 
+(* Warning: do not use this on static routes. *)
+let direct_gw node =
+  let depended_routes = depended node in
+  let first = List.hd depended_routes in
+  match first.gw with
+  | Some v -> v
+  | None ->
+    if List.length depended_routes > 1 then
+      let second = List.hd (List.tl depended_routes) in
+      option_get second.gw
+    else option_get node.value.gw
+;;
 
 (* Warning: would not add the route if it is not resolvable. *)
-let add t net inter_gw = 
-  match resolve_opt t net inter_gw with
+let add t target_net gw = 
+  match resolve_opt t target_net gw with
   | None -> 
     (* This route is not resolvable. *)
     t
-  | Some (direct_gw, iface, new_used) -> 
-    match Prefix_map.find_opt net t.map with
-    | Some old_route ->
+  | Some (new_parent_node, new_direct_gw) -> 
+    match Prefix_map.find_opt target_net t.map with
+    | Some node ->
       (* This prefix exists already, this is a replace operation. *)
       
-      if old_route.iface <> None then 
+      if node.value.static then 
         (* The existing route is a route from kernel talbe. Prefer that for now. *)
         t
       else
-        (* Update what this route depends on. This part is impure. *)
-        let () = 
-          let rm_old_dep pfx = 
-            match Prefix_map.find_opt pfx t.map with
-            | None ->
-              Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-              assert false
-            | Some route ->
-              let f acc pfx = list_remove pfx acc in
-              route.dependents <- List.fold_left f route.dependents (net::old_route.dependents)
-          in
-          let () = List.iter rm_old_dep old_route.depended in
+        let old_direct_gw = direct_gw node in
 
-          let add_new_dep pfx = 
-            match Prefix_map.find_opt pfx t.map with
-            | None ->
-              Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-              assert false
-            | Some route ->
-              route.dependents <- (net::old_route.dependents) @ route.dependents
-          in
-          List.iter add_new_dep new_used
-        in
+        (* Remove link from old parent *)
+        Tree.rm_child_v (option_get node.parent) node.value;
 
+        (* Update link to new parent *)
+        node.parent <- Some new_parent_node;
+
+        (* Add link from new parent *)
+        Tree.add_child new_parent_node node;
+
+        (* Update value *)
         let new_route = { 
-          net; 
-          inter_gw = Some inter_gw;
-          direct_gw = Some direct_gw; 
+          static = false;
+          net = target_net; 
+          gw = Some gw;
           iface = None;
-          dependents = old_route.dependents;
-          depended = new_used;
         } in
-        let new_map = Prefix_map.add net new_route t.map in
+        node.value <- new_route;
 
-        { trie = t.trie; map = new_map }
+        t
     | None ->
       (* This prefix does not exist before, this is an insertion. *)
-      let tmp = Ipaddr.V4.Prefix.network net in
+      let tmp = Ipaddr.V4.Prefix.network target_net in
       match Prefix_trie.find_opt t.trie (ip_to_bits tmp) with
       | None ->
         (* This route brand new route. *)
         let route = { 
-          net; 
-          inter_gw = Some inter_gw;
-          direct_gw = Some direct_gw; 
+          static = false;
+          net = target_net; 
+          gw = Some gw;
           iface = None;
-          dependents = [];
-          depended = new_used;
         } in
-        let new_map = Prefix_map.add net route t.map in
-
-        let add_new_dep pfx = 
-          match Prefix_map.find_opt pfx new_map with
-          | None ->
-            Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-            assert false
-          | Some route ->
-            route.dependents <- net::route.dependents
-        in
-        let () = List.iter add_new_dep new_used in
-
-        let new_trie = Prefix_trie.set t.trie (prefix_to_bits net) net in
+        let node = Tree.add_child_v new_parent_node route in
+        let new_map = Prefix_map.add target_net node t.map in
+        let new_trie = Prefix_trie.set t.trie (prefix_to_bits target_net) target_net in
 
         { trie = new_trie; map = new_map; }
-      | Some sup_net ->
+      | Some supnet ->
         (* This 'net' is a subnet of some existing net. *)
-        let sup_route = Prefix_map.find sup_net t.map in
+        let supnet_node = Prefix_map.find supnet t.map in
 
         let route = { 
-          net; 
-          inter_gw = Some inter_gw;
-          direct_gw = Some direct_gw; 
+          static = false;
+          net = target_net; 
+          gw = Some gw;
           iface = None;
-          dependents = [];
-          depended = new_used;
         } in
-        let new_map = Prefix_map.add net route t.map in
-
-        let add_new_dep pfx = 
-          match Prefix_map.find_opt pfx new_map with
-          | None ->
-            Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-            assert false
-          | Some route ->
-            route.dependents <- net::route.dependents
-        in
-        let () = List.iter add_new_dep new_used in
-
-        let new_trie = Prefix_trie.set t.trie (prefix_to_bits net) net in
-        
+        let node = Tree.add_child_v new_parent_node route in
+        let new_map = Prefix_map.add target_net node t.map in
+        let new_trie = Prefix_trie.set t.trie (prefix_to_bits target_net) target_net in
         let new_t = { trie = new_trie; map = new_map; } in
 
-        let depend pfx =  
-          let r = Prefix_map.find pfx new_t.map in
-          if Ipaddr.V4.Prefix.mem (option_get r.inter_gw) net then true
-          else
-            let used = r.depended in
-            let p pfx =
-              let r = Prefix_map.find pfx new_t.map in
-              match r.inter_gw with
-              | None -> false
-              | Some ip -> Ipaddr.V4.Prefix.mem ip net
-            in
-            List.exists p used
+        let depend child_node =  
+          let r = child_node.value in
+          Ipaddr.V4.Prefix.mem (option_get r.gw) target_net
         in
-
+        
         (* l1 is the set of prefixes that depend on the new route *)
         (* l2 is the set of prefixes that depend on the old route *)
-        let l1, l2 = List.partition depend sup_route.dependents in
-        let () = sup_route.dependents <- l2 in
-        let () = route.dependents <- l1 in
+        let l1, l2 = List.partition depend supnet_node.children in
+        node.children <- l1;
+        List.iter (fun n -> n.parent <- Some node) l1;
+
+        supnet_node.children <- l2;
         
         new_t
 ;;
 
-let remove t net = 
-  match Prefix_map.find_opt net t.map with
+let remove t target_net = 
+  match Prefix_map.find_opt target_net t.map with
   | None -> 
     (* The prefix does not exist yet *)
     t, []
-  | Some route ->     
-    let new_map = Prefix_map.remove net t.map in
-    let new_trie = Prefix_trie.unset t.trie (prefix_to_bits net) in
-    
-    (* remove deps *)
-    let _, _, used = resolve t net (option_get (route.inter_gw)) in
-    let rm_old_dep pfx = 
-      match Prefix_map.find_opt pfx new_map with
-      | None ->
-        Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-        assert false
-      | Some route ->
-        let f acc pfx = list_remove pfx acc in
-        route.dependents <- List.fold_left f route.dependents (net::route.dependents)
-    in
-    let () = List.iter rm_old_dep used in
+  | Some node ->     
+    let new_map = Prefix_map.remove target_net t.map in
+    let new_trie = Prefix_trie.unset t.trie (prefix_to_bits target_net) in
     let new_t = { trie = new_trie; map = new_map; } in
+    
+    (* remove links *)
+    Tree.rm_child_v (option_get node.parent) node.value;
+    List.iter (fun c -> c.parent <- None) node.children;
+
+    let dependent_routes = dependents node in
+
+    (* let f t route =
+      let new_map = Prefix_map.remove route.net t.map in
+      let new_trie = Prefix_trie.unset t.trie (prefix_to_bits route.net) in
+      { trie = new_trie; map = new_map }
+    in
+    let new_t = List.fold_left f new_t dependent_routes in *)
 
     (* find those that are invalid after this route is removed *)
-    let f (t, wd) pfx = 
-      let route = Prefix_map.find pfx t.map in
-      let new_map = Prefix_map.remove pfx t.map in
-      let new_trie = Prefix_trie.unset t.trie (prefix_to_bits pfx) in
-      let new_t = { trie = new_trie; map = new_map; } in
-      match route.inter_gw with
-      | None -> (t, wd)
-      | Some gw -> begin
-        match resolve_opt new_t pfx gw with
-        | None -> (new_t, pfx::wd)
-        | Some _ -> (add new_t pfx gw, wd)
-      end
+    let f (t, wd) route = 
+      match resolve_no_cache t route.net (option_get route.gw) with
+      | None -> 
+        let new_map = Prefix_map.remove route.net t.map in
+        let new_trie = Prefix_trie.unset t.trie (prefix_to_bits route.net) in
+        let new_t = { trie = new_trie; map = new_map; } in
+
+        Tree.rm_child_v (option_get node.parent) node.value;
+        List.iter (fun c -> c.parent <- None) node.children;
+
+        (new_t, route.net::wd)
+      | Some (new_parent_node, new_direct_gw) ->
+        let node = Prefix_map.find route.net t.map in
+        
+        let () = 
+          match node.parent with
+          | None -> ()
+          | Some p -> Tree.rm_child_v p node.value
+        in
+        node.parent <- Some new_parent_node;
+
+        (t, wd)
     in
-    List.fold_left f (new_t, [ net ]) route.dependents
+    List.fold_left f (new_t, [ target_net ]) dependent_routes
 ;;
 
 
@@ -370,10 +429,8 @@ let () =
   
   match resolve_opt t pfx4 ip5 with
   | None -> assert false
-  | Some (gw, iface, used) ->
+  | Some (parent_node, gw) ->
     assert (gw = ip4);
-    assert (iface = iface1);
-    assert (used = [pfx1; pfx3]);
 
   (* Mutual resolved *)
   let pfx5 = Ipaddr.V4.(Prefix.make 24 (of_string_exn "10.10.20.0")) in
@@ -394,32 +451,40 @@ let () =
   let t = empty in
   let t = add_static t pfx1 None (Some iface1) in
 
+  let depended_v node = 
+    List.map (fun r -> r.net) (depended node)
+  in
+
+  let dependents_v node =
+    List.map (fun r -> r.net) (dependents node)
+  in
+
   (* normal insert *)
   let t = add t pfx3 ip1 in
   assert (cardinal t = 2);
   assert (Prefix_map.mem pfx3 t.map);
   assert (Prefix_trie.mem t.trie (prefix_to_bits pfx3));
-  let route = Prefix_map.find pfx3 t.map in
-  assert (route.net = pfx3);
-  assert (route.inter_gw = Some ip1);
-  assert (route.iface = None);
-  assert (route.direct_gw = Some ip1);
-  assert (route.dependents = []);
-  assert (route.depended = [ pfx1 ]);
-  let route = Prefix_map.find pfx1 t.map in
-  assert (route.dependents = [ pfx3 ]);
+  let node = Prefix_map.find pfx3 t.map in
+  assert (node.value.net = pfx3);
+  assert (node.value.gw = Some ip1);
+  assert (node.value.iface = None);
+
+  assert (dependents_v node = []);
+  assert (depended_v node = [ pfx1 ]);
+  let node = Prefix_map.find pfx1 t.map in
+  assert (dependents_v node = [ pfx3 ]);
 
   let t = add t pfx4 ip3 in
   let ip7 = Ipaddr.V4.of_string_exn "20.20.1.1" in
   let t = add t pfx6 ip7 in
-  let route = Prefix_map.find pfx3 t.map in
-  assert (List.length route.dependents = 2);
-  assert (List.mem pfx4 route.dependents);
-  assert (List.mem pfx6 route.dependents);
-  let route = Prefix_map.find pfx1 t.map in
-  assert (List.length route.dependents = 3);
-  assert (List.mem pfx4 route.dependents);
-  assert (List.mem pfx6 route.dependents);
+  let node = Prefix_map.find pfx3 t.map in
+  assert (List.length (dependents_v node) = 2);
+  assert (List.mem pfx4 (dependents_v node));
+  assert (List.mem pfx6 (dependents_v node));
+  let node = Prefix_map.find pfx1 t.map in
+  assert (List.length (dependents node) = 3);
+  assert (List.mem pfx4 (dependents_v node));
+  assert (List.mem pfx6 (dependents_v node));
   
   (* insert a sub route *)
   let pfx7 = Ipaddr.V4.(Prefix.make 24 (of_string_exn "20.20.1.0")) in  
@@ -427,29 +492,29 @@ let () =
   assert (cardinal t = 5);
   assert (Prefix_map.mem pfx7 t.map);
   assert (Prefix_trie.mem t.trie (prefix_to_bits pfx7));
-  let route = Prefix_map.find pfx3 t.map in
-  assert (List.length route.dependents = 1);
-  assert (List.mem pfx4 route.dependents);
-  let route = Prefix_map.find pfx7 t.map in
-  assert (List.length route.dependents = 1);
-  assert (List.mem pfx6 route.dependents);
-  let route = Prefix_map.find pfx1 t.map in
-  assert (List.length route.dependents = 4);
+  let node = Prefix_map.find pfx3 t.map in
+  assert (List.length (dependents_v node) = 1);
+  assert (List.mem pfx4 (dependents_v node));
+  let node = Prefix_map.find pfx7 t.map in
+  assert (List.length (dependents node) = 1);
+  assert (List.mem pfx6 (dependents_v node));
+  let node = Prefix_map.find pfx1 t.map in
+  assert (List.length (dependents node) = 4);
 
   (* Replace a non-depended route *)
   let t = add t pfx4 ip7 in
-  let route = Prefix_map.find pfx4 t.map in
-  assert (route.inter_gw = Some ip7);
-  assert (route.dependents = []);
-  assert (route.depended = [ pfx1; pfx7; ]);
-  let route = Prefix_map.find pfx3 t.map in
-  assert (List.length route.dependents = 0);
-  let route = Prefix_map.find pfx7 t.map in
-  assert (List.length route.dependents = 2);
-  assert (List.mem pfx4 route.dependents);
-  assert (List.mem pfx6 route.dependents);
-  let route = Prefix_map.find pfx1 t.map in
-  assert (List.length route.dependents = 4);
+  let node = Prefix_map.find pfx4 t.map in
+  assert (node.value.gw = Some ip7);
+  assert ((dependents_v node) = []);
+  assert (depended_v node = [ pfx1; pfx7; ]);
+  let node = Prefix_map.find pfx3 t.map in
+  assert (List.length (dependents node) = 0);
+  let node = Prefix_map.find pfx7 t.map in
+  assert (List.length (dependents node) = 2);
+  assert (List.mem pfx4 (dependents_v node));
+  assert (List.mem pfx6 (dependents_v node));
+  let node = Prefix_map.find pfx1 t.map in
+  assert (List.length (dependents node) = 4);
 
   (* Replace a depended route *)
   let pfx8 = Ipaddr.V4.(Prefix.make 24 (of_string_exn "60.60.0.0")) in  
@@ -458,33 +523,39 @@ let () =
   let t = add_static t pfx8 None (Some iface2) in
   let t = add t pfx7 ip8 in
   assert (cardinal t = 6);
-  let route = Prefix_map.find pfx7 t.map in
-  assert (route.inter_gw = Some ip8);
-  assert (List.length route.dependents = 2);
-  assert (List.mem pfx4 route.dependents);
-  assert (List.mem pfx6 route.dependents);
-  let route = Prefix_map.find pfx1 t.map in
-  assert (List.length route.dependents = 1);
-  assert (List.mem pfx3 route.dependents);
-  let route = Prefix_map.find pfx8 t.map in
-  assert (List.length route.dependents = 3);
-  assert (List.mem pfx4 route.dependents);
-  assert (List.mem pfx6 route.dependents);
-  assert (List.mem pfx7 route.dependents);
+  let node = Prefix_map.find pfx7 t.map in
+  assert (node.value.gw = Some ip8);
+  assert (List.length (dependents node) = 2);
+  assert (List.mem pfx4 (dependents_v node));
+  assert (List.mem pfx6 (dependents_v node));
+  let node = Prefix_map.find pfx4 t.map in
+  assert (depended_v node = [pfx8; pfx7]);
+  let node = Prefix_map.find pfx1 t.map in
+  assert (List.length (dependents_v node) = 1);
+  assert (List.mem pfx3 (dependents_v node));
+  let node = Prefix_map.find pfx8 t.map in
+  assert (List.length (dependents node) = 3);
+  assert (List.mem pfx4 (dependents_v node));
+  assert (List.mem pfx6 (dependents_v node));
+  assert (List.mem pfx7 (dependents_v node));
 
   (* Insert a route colliding with kernel route *)
   let t = add t pfx8 ip1 in
-  let route = Prefix_map.find pfx8 t.map in
-  assert (route.inter_gw = None);
+  let node = Prefix_map.find pfx8 t.map in
+  assert (node.value.gw = None);
+
+  print t;
 
   (* Withdraw a non-depended route *)
   let t, wd = remove t pfx3 in
   assert (wd = [ pfx3 ]);
   assert (cardinal t = 5);
-  let route = Prefix_map.find pfx1 t.map in
-  assert (route.dependents = []);
+  let node = Prefix_map.find pfx1 t.map in
+  assert ((dependents_v node) = []);
   assert (not (Prefix_map.mem pfx3 t.map));
   assert (not (Prefix_trie.mem t.trie (prefix_to_bits pfx3)));
+
+  print t;
 
   (* Withdraw a depended route *)
   let t, wd = remove t pfx7 in
@@ -495,6 +566,8 @@ let () =
   assert (cardinal t = 2);
   assert (not (Prefix_map.mem pfx7 t.map));
   assert (not (Prefix_trie.mem t.trie (prefix_to_bits pfx7)));
-  let route = Prefix_map.find pfx8 t.map in
-  assert (route.dependents = []);
+  let node = Prefix_map.find pfx8 t.map in
+  assert ((dependents_v node) = []);
+
+  print t;
 ;;
