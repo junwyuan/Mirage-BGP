@@ -50,15 +50,19 @@ type route = {
   inter_gw: Ipaddr.V4.t option;
   iface: string option;
   direct_gw: Ipaddr.V4.t option;
+  (* What routes depend on this route *)
   mutable dependents: Ipaddr.V4.Prefix.t list;
+  (* What routes this route depends on *)
+  depended: Ipaddr.V4.Prefix.t list;
 }
 
 let route_to_string route = 
-  Printf.sprintf "(net: %s, gw: %s, iface: %s, dependents: %s)"
+  Printf.sprintf "(net: %s, gw: %s, iface: %s, dependents: %s, depended: %s)"
   (Ipaddr.V4.Prefix.to_string route.net)
   (match route.inter_gw with None -> "*" | Some ip -> Ipaddr.V4.to_string ip)
   (match route.iface with None -> "*" | Some s -> s)
   (String.concat "; " (List.map (fun p -> Ipaddr.V4.Prefix.to_string p) route.dependents))
+  (String.concat "; " (List.map (fun p -> Ipaddr.V4.Prefix.to_string p) route.depended))
 ;;
 
 
@@ -80,7 +84,6 @@ let empty =
     map = Prefix_map.empty;
   }
 
-
 let resolve_opt t net inter_gw =
   let rec aux_resolve ip used = 
     match Prefix_trie.find_opt t.trie (ip_to_bits ip) with
@@ -88,25 +91,18 @@ let resolve_opt t net inter_gw =
       (* There is no route matching this ip. *)
       None
     | Some pfx ->
-      let route = Prefix_map.find pfx t.map in
-      match route.inter_gw with
-      | Some next_ip -> begin
-        if Ipaddr.V4.Prefix.mem next_ip net then 
-          (* Mutual resolved. *)
-          None
-        else 
-          match route.iface with
-          | None -> aux_resolve next_ip (pfx::used)
-          | Some v -> Some (next_ip, v, (pfx::used))
-      end
-      | None -> begin
+      if Ipaddr.V4.Prefix.subset net pfx && Ipaddr.V4.Prefix.mem ip net then
+        (* Mutual resolved. *)
+        None
+      else
+        let route = Prefix_map.find pfx t.map in
         match route.iface with
-        | Some v -> Some (ip, v, (pfx::used))
-        | None -> 
-          (* Error case: One route has neither iface nor gw. *)
-          Logs.err (fun m -> m "One route has neither iface nor gw.");
-          assert false
-      end
+        | None -> aux_resolve (option_get route.inter_gw) (pfx::used)
+        | Some v -> 
+          (* Terminate case *)
+          match route.inter_gw with
+          | None -> Some (ip, v, (pfx::used))
+          | Some w -> Some (w, v, (pfx::used))
   in
   aux_resolve inter_gw []
 ;;
@@ -121,8 +117,28 @@ let resolve t net inter_gw =
 
 let resolvable t net inter_gw = resolve_opt t net inter_gw <> None    
 
+let add_static t net inter_gw iface = 
+  let route = { 
+    net; inter_gw; iface; direct_gw = None; 
+    dependents = []; 
+    depended = [];
+  } in
+  let trie = Prefix_trie.set t.trie (prefix_to_bits net) net in
+  let map = Prefix_map.add net route t.map in
+  { trie; map }
+;;
+
+let is_static t net =
+  match Prefix_map.find_opt net t.map with
+  | None -> 
+    Logs.err (fun m -> m "Route not found");
+    assert false
+  | Some route -> route.iface <> None
+;;
+
+
 (* Warning: would not add the route if it is not resolvable. *)
-let add t net inter_gw =
+let add t net inter_gw = 
   match resolve_opt t net inter_gw with
   | None -> 
     (* This route is not resolvable. *)
@@ -132,42 +148,45 @@ let add t net inter_gw =
     | Some old_route ->
       (* This prefix exists already, this is a replace operation. *)
       
-      (* Update what this route depends on. This part is impure. *)
-      let () = 
-        let _, _, old_used = resolve t net (option_get old_route.inter_gw) in 
+      if old_route.iface <> None then 
+        (* The existing route is a route from kernel talbe. Prefer that for now. *)
+        t
+      else
+        (* Update what this route depends on. This part is impure. *)
+        let () = 
+          let rm_old_dep pfx = 
+            match Prefix_map.find_opt pfx t.map with
+            | None ->
+              Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
+              assert false
+            | Some route ->
+              let f acc pfx = list_remove pfx acc in
+              route.dependents <- List.fold_left f route.dependents (net::old_route.dependents)
+          in
+          let () = List.iter rm_old_dep old_route.depended in
 
-        let rm_old_dep pfx = 
-          match Prefix_map.find_opt pfx t.map with
-          | None ->
-            Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-            assert false
-          | Some route ->
-            let f acc pfx = list_remove pfx acc in
-            route.dependents <- List.fold_left f route.dependents (net::old_route.dependents)
+          let add_new_dep pfx = 
+            match Prefix_map.find_opt pfx t.map with
+            | None ->
+              Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
+              assert false
+            | Some route ->
+              route.dependents <- (net::old_route.dependents) @ route.dependents
+          in
+          List.iter add_new_dep new_used
         in
-        let () = List.iter rm_old_dep old_used in
 
-        let add_new_dep pfx = 
-          match Prefix_map.find_opt pfx t.map with
-          | None ->
-            Logs.err (fun m -> m "A route in trie does not have a corresponding record in map.");
-            assert false
-          | Some route ->
-            route.dependents <- (net::old_route.dependents) @ route.dependents
-        in
-        List.iter add_new_dep new_used
-      in
+        let new_route = { 
+          net; 
+          inter_gw = Some inter_gw;
+          direct_gw = Some direct_gw; 
+          iface = None;
+          dependents = old_route.dependents;
+          depended = new_used;
+        } in
+        let new_map = Prefix_map.add net new_route t.map in
 
-      let new_route = { 
-        net; 
-        inter_gw = Some inter_gw;
-        direct_gw = Some direct_gw; 
-        iface = None;
-        dependents = old_route.dependents;
-      } in
-      let new_map = Prefix_map.add net new_route t.map in
-
-      { trie = t.trie; map = new_map }
+        { trie = t.trie; map = new_map }
     | None ->
       (* This prefix does not exist before, this is an insertion. *)
       let tmp = Ipaddr.V4.Prefix.network net in
@@ -180,6 +199,7 @@ let add t net inter_gw =
           direct_gw = Some direct_gw; 
           iface = None;
           dependents = [];
+          depended = new_used;
         } in
         let new_map = Prefix_map.add net route t.map in
 
@@ -206,6 +226,7 @@ let add t net inter_gw =
           direct_gw = Some direct_gw; 
           iface = None;
           dependents = [];
+          depended = new_used;
         } in
         let new_map = Prefix_map.add net route t.map in
 
@@ -227,7 +248,7 @@ let add t net inter_gw =
           let r = Prefix_map.find pfx new_t.map in
           if Ipaddr.V4.Prefix.mem (option_get r.inter_gw) net then true
           else
-            let _, _, used = resolve new_t pfx (option_get r.inter_gw) in
+            let used = r.depended in
             let p pfx =
               let r = Prefix_map.find pfx new_t.map in
               match r.inter_gw with
@@ -287,12 +308,7 @@ let remove t net =
 ;;
 
 
-let add_static t net inter_gw iface = 
-  let route = { net; inter_gw; iface; direct_gw = None; dependents = []; } in
-  let trie = Prefix_trie.set t.trie (prefix_to_bits net) net in
-  let map = Prefix_map.add net route t.map in
-  { trie; map }
-;;
+
 
 let cardinal t = Prefix_map.cardinal t.map
 
@@ -368,6 +384,12 @@ let () =
   let ip6 = Ipaddr.V4.of_string_exn "10.0.0.253" in
   assert (resolve_opt t pfx6 ip6 = None);
 
+  (* False mutual resolved *)
+  let t = add_static t pfx4 (Some ip5) None in
+  let pfx9 = Ipaddr.V4.(Prefix.make 8 (of_string_exn "20.0.0.0")) in
+  let ip9 = Ipaddr.V4.of_string_exn "40.40.0.1" in
+  assert (resolvable t pfx9 ip9);
+
   (* Test add/replace/remove *)
   let t = empty in
   let t = add_static t pfx1 None (Some iface1) in
@@ -383,6 +405,7 @@ let () =
   assert (route.iface = None);
   assert (route.direct_gw = Some ip1);
   assert (route.dependents = []);
+  assert (route.depended = [ pfx1 ]);
   let route = Prefix_map.find pfx1 t.map in
   assert (route.dependents = [ pfx3 ]);
 
@@ -413,13 +436,12 @@ let () =
   let route = Prefix_map.find pfx1 t.map in
   assert (List.length route.dependents = 4);
 
-
-
   (* Replace a non-depended route *)
   let t = add t pfx4 ip7 in
   let route = Prefix_map.find pfx4 t.map in
   assert (route.inter_gw = Some ip7);
   assert (route.dependents = []);
+  assert (route.depended = [ pfx1; pfx7; ]);
   let route = Prefix_map.find pfx3 t.map in
   assert (List.length route.dependents = 0);
   let route = Prefix_map.find pfx7 t.map in
@@ -449,6 +471,11 @@ let () =
   assert (List.mem pfx4 route.dependents);
   assert (List.mem pfx6 route.dependents);
   assert (List.mem pfx7 route.dependents);
+
+  (* Insert a route colliding with kernel route *)
+  let t = add t pfx8 ip1 in
+  let route = Prefix_map.find pfx8 t.map in
+  assert (route.inter_gw = None);
 
   (* Withdraw a non-depended route *)
   let t, wd = remove t pfx3 in
