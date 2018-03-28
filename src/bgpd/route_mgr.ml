@@ -30,6 +30,7 @@ type t = {
 let rec handle_loop t =
   let route_mgr_handle = function
     | Resolve (pfxs, nh, cb) ->
+      Logs.info (fun m -> m "Resolve checkpoint in mgr");
       let f target_net =
         (target_net, Route_table.resolve_opt t.table target_net nh)
       in
@@ -83,9 +84,11 @@ let create () =
     in
     let table = List.fold_left f Route_table.empty routes in
     let stream, pf = Lwt_stream.create () in
-    { table; stream; pf; }
+    let t = { table; stream; pf; } in
+    let _ = handle_loop t in
+    t
   | Result.Error _ ->
-    Logs.err (fun m -> m "fail to start route_mgr");
+    Logs.err (fun m -> m "Fail to start route_mgr");
     assert false
 ;;
 

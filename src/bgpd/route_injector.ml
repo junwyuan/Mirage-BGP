@@ -109,12 +109,21 @@ module Unix = struct
 
             let iface = Some (List.nth cols 7) in
 
-            { net; gw; iface; metric; }
+            (* Get rid of default *)
+            if List.nth cols 0 = "default" then None
+            else 
+              Some { net; gw; iface; metric; }
           in
           
-          try Result.Ok (List.map f (List.tl (List.tl output))) with
-          | Err error -> Result.Error error
-          | _ -> Result.Error Unknown
+          let g acc row = 
+            try
+              match f row with
+              | None -> acc
+              | Some v -> v::acc
+            with
+            | _ -> acc
+          in
+          Result.Ok (List.fold_left g [] (List.tl (List.tl output)))
         else Result.Error (Exited code)
       | `Signaled code -> Result.Error (Signaled code)
     end

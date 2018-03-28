@@ -61,7 +61,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         let () = 
           match !Rib.Loc_rib.t_ref with
           | None -> Ctl_log.info (fun m -> m "Empty")
-          | Some rib -> Ctl_log.info (fun m -> m "%s" (Rib.Loc_rib.to_string rib))
+          | Some rib -> Ctl_log.info (fun m -> m "Routes:\n%s" (Rib.Loc_rib.to_string rib))
         in
         command_loop console peers
       | "show gc" ->
