@@ -144,11 +144,6 @@ module Unix = struct
     
     let mask = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.netmask net) in
 
-    let gw = match gw with
-      | None -> "*" 
-      | Some v -> Ipaddr.V4.to_string v 
-    in
-
     (* let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask % "gw" % gw) in *)
     let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask) in
     let output = Bos.OS.Cmd.(run_out cmd |> out_lines) in
