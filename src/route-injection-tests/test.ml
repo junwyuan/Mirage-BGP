@@ -232,6 +232,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     let pfx1 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.24.0") in
     let pfx2 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.25.0") in
     let pfx3 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.26.0") in
+    let pfx4 = Ipaddr.V4.Prefix.make 24 (Ipaddr.V4.of_string_exn "55.19.27.0") in
     
 
     (* insert 1 prefix *)
@@ -270,6 +271,19 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun () ->
 
     Test_log.info (fun m -> m "1 prefix withdrawn");
+    OS.Time.sleep_ns (Duration.of_sec (Key_gen.wtime ())) >>= fun () ->
+
+    (* Invalid prefix *)
+    let path_attrs = [
+      Origin EGP;
+      As_path [ Asn_seq [ relay1.local_asn; 65001_l; 65002_l; 65003_l ] ];
+      Next_hop (Ipaddr.V4.of_string_exn "170.0.3.5");
+    ] in
+    let update = { withdrawn = []; nlri = [pfx4]; path_attrs } in
+    send_msg flow1 (Update update) (module Sp1_log)
+    >>= fun () ->
+
+    Test_log.info (fun m -> m "1 invalid prefix insert");
     OS.Time.sleep_ns (Duration.of_sec (Key_gen.wtime ())) >>= fun () ->
 
     close_session flow1
