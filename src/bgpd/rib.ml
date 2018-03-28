@@ -618,7 +618,6 @@ module Loc_rib = struct
   let rec handle_loop t = 
     let loc_rib_handle = function
       | None -> 
-        Rib_log.err (fun m -> m " `None` is pushed into Loc RIB's queue. ");
         Lwt.return_unit
       | Some input ->
         match input with
@@ -637,7 +636,6 @@ module Loc_rib = struct
           else begin
             let pf = t.pf in
             let callback result = 
-              Logs.info (fun m -> m "callback checkpoint");
               pf (Some (Resolved result)) 
             in
 
@@ -651,13 +649,10 @@ module Loc_rib = struct
             else begin
               let next_hop = option_get (Bgp.find_next_hop update.path_attrs) in
               Route_mgr.input t.route_mgr (Route_mgr.Resolve (update.nlri, next_hop, callback));
-              Logs.info (fun m -> m "Push checkpoint");
               handle_loop t
             end
           end
         | Resolved results ->
-          Logs.info (fun m -> m "Resolved checkpoint");
-
           let (remote_id, update) = Queue.pop t.hold_queue in 
           if (not (Ip_map.mem remote_id t.subs)) && update.nlri <> [] then handle_loop t
           else begin

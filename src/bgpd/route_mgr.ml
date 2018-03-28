@@ -30,7 +30,6 @@ type t = {
 let rec handle_loop t =
   let route_mgr_handle = function
     | Resolve (pfxs, nh, cb) ->
-      Logs.info (fun m -> m "Resolve checkpoint in mgr");
       let f target_net =
         (target_net, Route_table.resolve_opt t.table target_net nh)
       in
