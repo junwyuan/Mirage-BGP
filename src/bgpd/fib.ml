@@ -162,7 +162,7 @@ let resolve_no_cache t target_net gw =
           | None -> aux_resolve next_ip
           | Some _ -> Some next_ip
         else
-          let p = Prefix_trie.find t.trie (ip_to_bits ip) in
+          let p = Prefix_trie.find t.trie (ip_to_bits next_ip) in
           if Ipaddr.V4.Prefix.subset target_net p then
             (* Mutual resolved *)
             None
@@ -331,13 +331,6 @@ let remove t target_net =
     List.iter (fun c -> c.parent <- None) node.children;
 
     let dependent_routes = dependents node in
-
-    (* let f t route =
-      let new_map = Prefix_map.remove route.net t.map in
-      let new_trie = Prefix_trie.unset t.trie (prefix_to_bits route.net) in
-      { trie = new_trie; map = new_map }
-    in
-    let new_t = List.fold_left f new_t dependent_routes in *)
 
     (* find those that are invalid after this route is removed *)
     let f (t, wd) route = 
@@ -544,8 +537,6 @@ let () =
   let node = Prefix_map.find pfx8 t.map in
   assert (node.value.gw = None);
 
-  print t;
-
   (* Withdraw a non-depended route *)
   let t, wd = remove t pfx3 in
   assert (wd = [ pfx3 ]);
@@ -554,8 +545,6 @@ let () =
   assert ((dependents_v node) = []);
   assert (not (Prefix_map.mem pfx3 t.map));
   assert (not (Prefix_trie.mem t.trie (prefix_to_bits pfx3)));
-
-  print t;
 
   (* Withdraw a depended route *)
   let t, wd = remove t pfx7 in
@@ -568,6 +557,4 @@ let () =
   assert (not (Prefix_trie.mem t.trie (prefix_to_bits pfx7)));
   let node = Prefix_map.find pfx8 t.map in
   assert ((dependents_v node) = []);
-
-  print t;
 ;;
