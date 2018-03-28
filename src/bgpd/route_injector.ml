@@ -4,9 +4,10 @@ type route = {
   net: Ipaddr.V4.Prefix.t;
   gw: Ipaddr.V4.t option;
   iface: string option;
+  metric: int;
 }
 
-let route_to_string { net; gw; iface } =
+let route_to_string { net; gw; iface; metric } =
   let s_iface = match iface with
     | None -> ""
     | Some v -> v
@@ -17,7 +18,7 @@ let route_to_string { net; gw; iface } =
     | Some v -> Ipaddr.V4.to_string v
   in
 
-  Printf.sprintf "%s %s %s" (Ipaddr.V4.Prefix.to_string net) s_gw s_iface
+  Printf.sprintf "%s %s %d %s" (Ipaddr.V4.Prefix.to_string net) s_gw metric s_iface
 ;;
 
 module type S = sig
@@ -53,6 +54,7 @@ module Unix = struct
     | Invalid_subnet
     | Invalid_mask
     | Invalid_gw
+    | Invalid_metric
     | Unknown
 
   exception Err of error
@@ -98,9 +100,16 @@ module Unix = struct
                 | Some v -> Some v
             in
 
+            let metric = 
+              let tmp = List.nth cols 4 in
+              match int_of_string_opt tmp with
+              | None -> raise (Err Invalid_metric)
+              | Some v -> v
+            in
+
             let iface = Some (List.nth cols 7) in
 
-            { net; gw; iface }
+            { net; gw; iface; metric; }
           in
           
           try Result.Ok (List.map f (List.tl (List.tl output))) with
@@ -113,15 +122,11 @@ module Unix = struct
   ;;
 
 
-  let add_route { net; gw; iface } =
+  let add_route net gw =
     let subnet = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.network net) in
     
     let mask = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.netmask net) in
-
-    let gw = match gw with
-      | None -> "*" 
-      | Some v -> Ipaddr.V4.to_string v 
-    in
+    let gw = Ipaddr.V4.to_string gw in
 
     let cmd = Bos.Cmd.((v "route") % "add" % "-net" % subnet % "netmask" % mask % "gw" % gw) in
     let output = Bos.OS.Cmd.(run_out cmd |> out_lines) in
@@ -139,7 +144,7 @@ module Unix = struct
     | Result.Error _ -> Result.Error Unknown
   ;;
 
-  let del_route { net; gw; iface } =
+  let del_route net =
     let subnet = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.network net) in
     
     let mask = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.netmask net) in
@@ -162,24 +167,22 @@ module Unix = struct
   ;;
 end
 
-
-
-(* let () =
+let test () =
   let bits = Mask.str_to_int "255.255.255.255" in
   assert (bits = Some 32);
 
-  let net = Ipaddr.V4.(Prefix.make 16 (of_string_exn "10.11.0.0")) in
+  (* let net = Ipaddr.V4.(Prefix.make 16 (of_string_exn "10.11.0.0")) in
   let gw = Some (Ipaddr.V4.of_string_exn "172.19.0.253") in
   let iface = None in
-  match Unix.del_route { net; gw; iface } with
+  match Unix.del_route net with
   | Result.Ok () -> Printf.printf "Route added."
-  | Result.Error _ -> Printf.printf "Error."
+  | Result.Error _ -> Printf.printf "Error." *)
 
   match Unix.get_routes () with
   | Result.Ok routes ->
     List.iter (fun r -> Printf.printf "%s\n" (route_to_string r)) routes
   | Result.Error _ ->
     Printf.printf "Error!!!"
-;; *)
+;;
 
 

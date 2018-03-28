@@ -92,7 +92,7 @@ let resolve_opt t target_net gw =
         if not (Ipaddr.V4.Prefix.mem next_ip target_net) then 
           match route.iface with
           | None -> aux_resolve next_ip
-          | Some _ -> Some next_ip
+          | Some _ -> Some (next_ip, route.metric)
         else
           let p = Prefix_trie.find t.trie (ip_to_bits next_ip) in
           if Ipaddr.V4.Prefix.subset target_net p then
@@ -101,11 +101,11 @@ let resolve_opt t target_net gw =
           else 
             match route.iface with
             | None -> aux_resolve next_ip
-            | Some _ -> Some next_ip
+            | Some _ -> Some (next_ip, route.metric)
       end
       | None -> begin
         match route.iface with
-        | Some v -> Some ip
+        | Some v -> Some (ip, route.metric)
         | None -> 
           (* Error case: One route has neither iface nor gw. *)
           Logs.err (fun m -> m "One route has neither iface nor gw.");
@@ -125,18 +125,15 @@ let resolve t net gw =
 
 let resolvable t net gw = resolve_opt t net gw <> None    
 
-let add_static t net gw iface = 
-  let route = { 
-    net; gw; iface; 
-  } in
-  let trie = Prefix_trie.set t.trie (prefix_to_bits net) net in
-  let map = Prefix_map.add net route t.map in
+let add_static t route = 
+  let trie = Prefix_trie.set t.trie (prefix_to_bits route.net) route.net in
+  let map = Prefix_map.add route.net route t.map in
   { trie; map }
 ;;
 
 let cardinal t = Prefix_map.cardinal t.map
 
-let () = 
+let test () = 
   Printexc.record_backtrace true;
 
   (* Test convertor *)
@@ -185,8 +182,21 @@ let () =
 
   (* Test resolve *)
   let t = empty in
-  let t = add_static t pfx1 None (Some iface1) in
-  let t = add_static t pfx3 (Some ip4) None in
+  let route1 = {
+    metric = 0;
+    net = pfx1;
+    iface = Some iface1;
+    gw = None;
+  } in
+  let t = add_static t route1 in
+
+  let route2 = {
+    metric = 0;
+    net = pfx3;
+    iface = None;
+    gw = Some ip4;
+  } in
+  let t = add_static t route2 in
   
   (* Resovled *)
   let pfx4 = Ipaddr.V4.(Prefix.make 16 (of_string_exn "40.40.0.0")) in
@@ -194,7 +204,7 @@ let () =
   
   match resolve_opt t pfx4 ip5 with
   | None -> assert false
-  | Some gw -> assert (gw = ip4);
+  | Some (gw, m) -> assert (gw = ip4);
 
   (* Mutual resolved *)
   let pfx5 = Ipaddr.V4.(Prefix.make 24 (of_string_exn "10.10.20.0")) in
@@ -206,7 +216,13 @@ let () =
   assert (resolve_opt t pfx6 ip6 = None);
 
   (* False mutual resolved *)
-  let t = add_static t pfx4 (Some ip5) None in
+  let route3 = {
+    net = pfx4;
+    gw = Some ip5;
+    iface = None;
+    metric = 0;
+  } in
+  let t = add_static t route3 in
   let pfx9 = Ipaddr.V4.(Prefix.make 8 (of_string_exn "20.0.0.0")) in
   let ip9 = Ipaddr.V4.of_string_exn "40.40.0.1" in
   assert (resolvable t pfx9 ip9);
