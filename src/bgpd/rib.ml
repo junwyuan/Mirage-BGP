@@ -1,6 +1,14 @@
 open Bgp
 open Lwt.Infix
 
+let option_get = function
+  | None -> 
+    Logs.debug (fun m -> m "option_get is called on None.");
+    assert false
+  | Some v -> v
+;;
+
+
 (* Design choices: To avoid dependency loop, I allow Loc-RIB to depend on In-RIB and out-RIB. *)
 (* This does cost some inflxibility as the form of callback is fixed. *)
 (* The interconnection between IN-RIB and Loc-RIB must be defined at initialisation in bgpd.ml *)
@@ -403,6 +411,7 @@ module Loc_rib = struct
 
   type input = 
     | Push of Ipaddr.V4.t * update
+    | Resolved of (Ipaddr.V4.Prefix.t * (Ipaddr.V4.t * int) option) list
     | Sub of Ipaddr.V4.t * Adj_rib_in.t * Adj_rib_out.t
     | Unsub of Ipaddr.V4.t
     | Stop
@@ -420,6 +429,8 @@ module Loc_rib = struct
     subs: peer Ip_map.t;
     db: (ID.t * Ipaddr.V4.t) Prefix_map.t;
     dict: Dict.t;
+    route_mgr: Route_mgr.t;
+    hold_queue: (Ipaddr.V4.t * update) Queue.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -430,6 +441,8 @@ module Loc_rib = struct
     local_id = t.local_id;
     subs;
     db = t.db; dict = t.dict;
+    route_mgr = t.route_mgr;
+    hold_queue = t.hold_queue;
     stream = t.stream;
     pf = t.pf;
   }
@@ -440,6 +453,8 @@ module Loc_rib = struct
     local_id = t.local_id;
     subs = t.subs;
     db; dict;
+    route_mgr = t.route_mgr;
+    hold_queue = t.hold_queue;
     stream = t.stream;
     pf = t.pf;
   }
@@ -610,30 +625,50 @@ module Loc_rib = struct
         | Stop -> 
           (* Remove installed routes from kernel's routing table *)
           if Key_gen.kernel () && Key_gen.remove () then
-            let open Route_injector in            
-            let f pfx (attr_id, _src_id) =
-              let attrs = Dict.find attr_id t.dict in
-              let next_hop = Bgp.find_next_hop attrs in
-              match next_hop with
-              | None -> 
-                Rib_log.err (fun m -> m " Some route does not have NEXT HOP attribute. ");
-                assert false
-              | Some ip ->
-                let route = { net = pfx; gw = Some ip; iface = None } in
-                match Route_injector.Unix.del_route route with
-                | Result.Ok () -> ()
-                | Result.Error _ -> 
-                  (* No real action is performed to handle the error *)
-                  Rib_log.debug (fun m -> m " Error occurs when deleting route from kernel. ");
-            in
-            let () = Prefix_map.iter f t.db in
+            let f (pfx, _) = pfx in
+            let l_rm = List.map f (Prefix_map.bindings t.db) in
+            let open Route_mgr in
+            let krt_change = { insert = []; remove = l_rm } in
+            let () = Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change) in
             Lwt.return_unit
           else Lwt.return_unit
         | Push (remote_id, update) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
-          else 
-            let new_db, new_dict, out_update = update_loc_db t.local_id t.local_asn (remote_id, update) t.db t.dict in
-            
+          else begin
+            let pf = t.pf in
+            let callback result = pf (Some (Resolved result)) in
+
+            Queue.push (remote_id, update) t.hold_queue;
+            if update.nlri = [] then begin
+              (* Dummy request *)
+              let next_hop = Ipaddr.V4.localhost in
+              Route_mgr.input t.route_mgr (Route_mgr.Resolve ([], next_hop, callback));
+              handle_loop t
+            end
+            else begin
+              let next_hop = option_get (Bgp.find_next_hop update.path_attrs) in
+              Route_mgr.input t.route_mgr (Route_mgr.Resolve (update.nlri, next_hop, callback));
+              handle_loop t
+            end
+          end
+        | Resolved results ->
+          let (remote_id, update) = Queue.pop t.hold_queue in 
+          if not (Ip_map.mem remote_id t.subs) then handle_loop t
+          else begin
+            let tersed =
+              if update.nlri = [] then update
+              else
+                let p (pfx, result) = result <> None in
+                let resolvable = List.map (fun (x, _) -> x) (List.filter p results) in
+                {  
+                  withdrawn = update.withdrawn;
+                  path_attrs = update.path_attrs;
+                  nlri = resolvable;
+                }
+            in
+
+            let new_db, new_dict, out_update = update_loc_db t.local_id t.local_asn (remote_id, tersed) t.db t.dict in
+              
             let ip_and_peer = Ip_map.bindings t.subs in
 
             (* Send the updates: blocking *)
@@ -659,41 +694,37 @@ module Loc_rib = struct
 
             (* Update kernel's routing table *)
             let () = 
-              let open Route_injector in
-              if Key_gen.kernel () then
-                (* Remove routes *)
-                let () =
-                  let f pfx = 
-                    match Unix.del_route { net = pfx; gw = None; iface = None } with
-                    | Result.Ok () -> ()
-                    | Result.Error _ -> 
-                      (* No real action is performed to handle the error *)
-                      Rib_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
+              if Key_gen.kernel () then begin
+                let open Route_injector in
+                let open Route_mgr in
+                let krt_change = 
+                  let remove = out_update.withdrawn in
+                  let insert = 
+                    if out_update.nlri <> [] then
+                      let direct_gw = 
+                        let _, opt = List.hd results in
+                        let direct_gw, _metric = option_get opt in
+                        direct_gw
+                      in
+
+                      let f pfx = 
+                        { net = pfx; gw = Some direct_gw; iface = None; metric = 0 }                      
+                      in
+                      List.map f out_update.nlri
+                    else []
                   in
-                  List.iter f out_update.withdrawn
+                  { insert; remove }
                 in
 
-                if out_update.nlri <> [] then
-                  let next_hop = 
-                    match Bgp.find_next_hop out_update.path_attrs with
-                    | None -> assert false
-                    | Some v -> v
-                  in
-
-                  let f pfx = 
-                    match Unix.add_route { net = pfx; gw = Some next_hop; iface = None } with
-                    | Result.Ok () -> ()
-                    | Result.Error _ -> 
-                      (* No real action is performed to handle the error *)
-                      Rib_log.debug (fun m -> m " Error occurs when adding route to kernel. ")
-                  in
-                  List.iter f out_update.nlri
-                else ()
+                if krt_change.insert = [] && krt_change.remove = [] then ()
+                else Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change)
+              end
               else ()
             in
 
             let new_t = set_store new_db new_dict t in
             handle_loop new_t
+          end
         | Sub (remote_id, in_rib, out_rib) -> begin
           if Ip_map.mem remote_id t.subs then
             Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
@@ -735,7 +766,7 @@ module Loc_rib = struct
   ;;
 
 
-  let create local_id local_asn = 
+  let create local_id local_asn route_mgr = 
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let t = {
@@ -744,6 +775,8 @@ module Loc_rib = struct
       subs = Ip_map.empty;
       db = Prefix_map.empty;
       dict = Dict.empty;
+      route_mgr;
+      hold_queue = Queue.create ();
       stream; pf
     } in
 

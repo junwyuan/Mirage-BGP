@@ -111,8 +111,10 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (* parse_config kv >>= fun config -> *)
     let config = parse_from_file (Key_gen.config ()) in
 
+    let route_mgr = Route_mgr.create () in
+
     (* Init loc-rib *)
-    let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn in
+    let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn route_mgr in
 
     (* Init shared data *)
     let init_t peer = Router.create s loc_rib config peer in

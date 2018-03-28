@@ -12,28 +12,28 @@ type krt_change = {
   remove: Ipaddr.V4.Prefix.t list;
 }
 
-type callback = ((Ipaddr.V4.Prefix.t * Ipaddr.V4.t) * (Ipaddr.V4.t * int) option) list -> unit
+type callback = (Ipaddr.V4.Prefix.t * (Ipaddr.V4.t * int) option) list -> unit
 
 type input = 
   | Krt_change of krt_change
-  | Resolve of (Ipaddr.V4.Prefix.t * Ipaddr.V4.t) list * callback
+  | Resolve of Ipaddr.V4.Prefix.t list * Ipaddr.V4.t * callback
   | Stop
 
 module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
 
 type t = {
-  mutable table: Route_table.t;
+  table: Route_table.t;
   stream: input Lwt_stream.t;
   pf: input option -> unit;
 }
 
 let rec handle_loop t =
   let route_mgr_handle = function
-    | Resolve (quests, cb) ->
-      let f ((target_net, nh) as quest) =
-        (quest, Route_table.resolve_opt t.table target_net nh)
+    | Resolve (pfxs, nh, cb) ->
+      let f target_net =
+        (target_net, Route_table.resolve_opt t.table target_net nh)
       in
-      let result = List.map f quests in
+      let result = List.map f pfxs in
       let () = cb result in
       handle_loop t
     | Krt_change change ->
@@ -69,10 +69,10 @@ let rec handle_loop t =
     | Stop -> Lwt.return_unit
   in
   Lwt_stream.get t.stream >>= function
-    | None -> 
-      Mgr_log.err (fun m -> m "It is not recommended and potentially buggy to terminate in this way.");
-      Lwt.return_unit
-    | Some input -> route_mgr_handle input
+  | None -> 
+    Mgr_log.err (fun m -> m "It is not recommended and potentially buggy to terminate in this way.");
+    Lwt.return_unit
+  | Some input -> route_mgr_handle input
 ;;
 
 let create () =
