@@ -212,23 +212,17 @@ module Adj_rib_out = struct
   type t = {
     (* States *)
     remote_id: Ipaddr.V4.t;
+    remote_asn: int32;
     local_id: Ipaddr.V4.t;
     local_asn: int32;
+    iBGP: bool;
+    
     callback: update -> unit;
-    past_routes: Prefix_set.t;
+    mutable past_routes: Prefix_set.t;
+    
     (* Queue *)
     stream: input Lwt_stream.t;
     pf: input option -> unit;
-  }
-
-  let set_past_routes pr t = {
-    remote_id = t.remote_id;
-    local_id = t.local_id;
-    local_asn = t.local_asn;
-    callback = t.callback;
-    past_routes = pr;
-    stream = t.stream;
-    pf = t.pf;
   }
 
   let build_db rev_updates =
@@ -300,28 +294,57 @@ module Adj_rib_out = struct
     aux_split l len []
   ;;
 
-  let gen_updates wd db =
+  let prepend_aspath attrs asn =
+    let append_aspath asn segments = 
+      match segments with
+      | [] -> [ Asn_seq [asn] ]
+      | hd::tl -> match hd with
+        | Asn_set _ -> (Asn_seq [asn])::segments
+        | Asn_seq l -> (Asn_seq (asn::l))::tl
+    in
+    let segs = find_as_path attrs in
+    set_as_path attrs (append_aspath asn segs)
+  ;;
+
+  let gen_updates local_asn local_id iBGP wd db =
     let max_update_len = 4096 in
     let min_update_len = 23 in
     let pfx_len = 5 in
     
     (* Generate messages for each set of distinct path attributes *)
     let aux_gen_updates (wd, acc) (_id, (attrs, ins)) =
-      let attrs_len = len_path_attrs_buffer attrs in
+      (* Update attrs *)
+      let updated_attrs = 
+        if iBGP then  
+          (* Remove MED *)
+          let tmp = Bgp.set_med attrs None in
+          (* TODO: Add LOCAL_PREF *)
+          tmp
+        else
+          (* Remove LOCAL_PREF *)
+          let tmp = Bgp.set_local_pref attrs None in
+          (* Update NEXT HOP *)
+          let tmp = Bgp.set_next_hop tmp local_id in
+          (* Update AS PATH *)
+          let tmp = prepend_aspath tmp local_asn in
+          tmp
+      in
+
+
+      let attrs_len = len_path_attrs_buffer updated_attrs in
       let pfxs_list, rest = split ins ((max_update_len - min_update_len - attrs_len) / pfx_len) in
-      
-      let gen_ins_update ins = { withdrawn = []; path_attrs = attrs; nlri = ins } in
+      let gen_ins_update ins = { withdrawn = []; path_attrs = updated_attrs; nlri = ins } in
       
       let updates, rest_wd = 
-      let partial = List.map gen_ins_update pfxs_list in
+        let partial = List.map gen_ins_update pfxs_list in
         if rest <> [] then
           let wd_num = (max_update_len - min_update_len - attrs_len - pfx_len * (List.length rest)) / pfx_len in
           let wd, rest_wd = take wd wd_num in
-          let update = { withdrawn = wd; path_attrs = attrs; nlri = rest } in
+          let update = { withdrawn = wd; path_attrs = updated_attrs; nlri = rest } in
           (update::partial, rest_wd)
         else (partial, wd)
       in
-
+      
       (rest_wd, updates @ acc)
     in
 
@@ -360,20 +383,19 @@ module Adj_rib_out = struct
           let wd_set, ins_set, db = build_db rev_updates in
           let aux = Prefix_set.inter wd_set t.past_routes in
           let wd = Prefix_set.elements aux in
-          let updates = gen_updates wd (ID_map.bindings db) in
+          let updates = gen_updates t.local_asn t.local_id t.iBGP wd (ID_map.bindings db) in
           
           (* Decision choice: must send all previous updates before handling next batch. *)
           let () = List.iter (fun u -> t.callback u) updates in
 
           (* Update data structure *)
-          let new_routes = Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set in
-          let new_t = set_past_routes new_routes t in
+          t.past_routes <- Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set;
 
           (* Minimal advertisement time interval *)
           (* OS.Time.sleep_ns (Duration.of_ms 0)
           >>= fun () -> *)
 
-          handle_loop new_t
+          handle_loop t
     in
 
     Lwt_stream.peek t.stream >>= fun input ->
@@ -381,12 +403,13 @@ module Adj_rib_out = struct
   ;;
 
 
-  let create remote_id local_id local_asn callback : t = 
+  let create remote_id remote_asn local_id local_asn callback : t = 
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let past_routes = Prefix_set.empty in
     let t = {
-      remote_id; local_id; local_asn;
+      remote_id; remote_asn; local_id; local_asn;
+      iBGP = remote_asn = local_asn;
       callback; past_routes;
       stream; pf;
     } in
@@ -406,29 +429,37 @@ end
 
 
 module Loc_rib = struct
-  
   module Ip_map = Map.Make(Ipaddr.V4)
 
   type input = 
     | Push of Ipaddr.V4.t * update
     | Resolved of (Ipaddr.V4.Prefix.t * (Ipaddr.V4.t * int) option) list
-    | Sub of Ipaddr.V4.t * Adj_rib_in.t * Adj_rib_out.t
+    | Sub of Ipaddr.V4.t * int32 * Adj_rib_in.t * Adj_rib_out.t
     | Unsub of Ipaddr.V4.t
     | Stop
 
   type peer = {
     remote_id: Ipaddr.V4.t;
+    remote_asn: int32;
+    iBGP: bool;
     in_rib: Adj_rib_in.t;
     out_rib: Adj_rib_out.t;
+  }
+
+  type rte = {
+    path_attrs: Bgp.path_attrs;
+    peer: peer;
+    nh_metric: int;
+    direct_gw: Ipaddr.V4.t;
   }
 
   type t = {
     mutable running: bool;
     local_asn: int32;
     local_id: Ipaddr.V4.t;
-    subs: peer Ip_map.t;
-    db: (ID.t * Ipaddr.V4.t) Prefix_map.t;
-    dict: Dict.t;
+    mutable subs: peer Ip_map.t;
+    mutable db: (ID.t * Ipaddr.V4.t) Prefix_map.t;
+    mutable dict: Dict.t;
     route_mgr: Route_mgr.t;
     hold_queue: (Ipaddr.V4.t * update) Queue.t;
     stream: input Lwt_stream.t;
@@ -478,35 +509,6 @@ module Loc_rib = struct
     let f_sum acc x = acc + x in
     List.fold_left f_sum 0 aux
   ;;
-  
-  let update_aspath asn attrs =
-    let append_aspath asn segments = 
-      match segments with
-      | [] -> [ Asn_seq [asn] ]
-      | hd::tl -> match hd with
-        | Asn_set _ -> (Asn_seq [asn])::segments
-        | Asn_seq l -> (Asn_seq (asn::l))::tl
-    in
-    let f_update_aspath attr acc =
-      match attr with
-      | As_path segments -> 
-        let new_attr = As_path (append_aspath asn segments) in
-        new_attr::acc
-      | _ -> attr::acc
-    in
-    List.fold_right f_update_aspath attrs []
-  ;;
-
-  let update_nexthop ip attrs =
-    let f_update_nexthop attr acc =
-      match attr with
-      | Next_hop _ -> 
-        let new_attr = Next_hop ip in
-        new_attr::acc
-      | _ -> attr::acc
-    in
-    List.fold_right f_update_nexthop attrs []
-  ;;
 
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
   let tie_break attrs1 attrs2 = 
@@ -550,12 +552,7 @@ module Loc_rib = struct
       let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
       (db, dict, out_update)
     end else
-      let updated_attrs = 
-        update.path_attrs 
-        |> update_nexthop local_id 
-        |> update_aspath local_asn
-      in
-      let u_attr_id = ID.create updated_attrs in
+      let u_attr_id = ID.create update.path_attrs in
 
       let wd, ins, db, dict =   
         let loc_ins_pfx (wd, ins, db, dict) pfx = 
@@ -567,12 +564,12 @@ module Loc_rib = struct
             match Prefix_map.find_opt pfx db with
             | None -> 
               (* If this is a new destination *)
-              (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id updated_attrs dict)
+              (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id update.path_attrs dict)
             | Some (attr_id, src_id) ->
               let stored_attrs = Dict.find attr_id dict in
-              if tie_break updated_attrs stored_attrs then
+              if tie_break update.path_attrs stored_attrs then
                 (* Replace if the new route is more preferable *)
-                (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id updated_attrs dict)
+                (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id update.path_attrs dict)
               else if src_id = peer_id then 
                 (* If from the same peer then the current best path is no longer valid. *) 
                 (* Remove the current best path and reselects the path later. *)
@@ -584,7 +581,7 @@ module Loc_rib = struct
 
       let out_update = {
         withdrawn = wd;
-        path_attrs = updated_attrs;
+        path_attrs = update.path_attrs;
         nlri = ins
       } in 
 
@@ -698,36 +695,42 @@ module Loc_rib = struct
             let new_t = set_store new_db new_dict t in
             handle_loop new_t
           end
-        | Sub (remote_id, in_rib, out_rib) -> begin
-          if Ip_map.mem remote_id t.subs then
+        | Sub (remote_id, remote_asn, in_rib, out_rib) ->
+          if Ip_map.mem remote_id t.subs then begin
             Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
                                     (Ipaddr.V4.to_string remote_id));
-          
-          let new_subs = Ip_map.add remote_id { remote_id; in_rib; out_rib } t.subs in
-          let new_t = set_subs new_subs t in
+            assert false
+          end
+          else begin
+            let peer = { 
+              remote_id; remote_asn; in_rib; out_rib;
+              iBGP = remote_asn = t.local_asn;
+            } in
+            t.subs <- Ip_map.add remote_id peer t.subs;
             
-          (* Synchronize with peer: blocking *)
-          let () =
-            let f (pfx, (attr_id, _)) = 
-              let attrs = Dict.find attr_id new_t.dict in
-              let update = { withdrawn = []; path_attrs = attrs; nlri = [ pfx ] } in
-              Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+            (* Synchronize with peer: blocking *)
+            let () =
+              let f (pfx, (attr_id, _)) = 
+                let attrs = Dict.find attr_id t.dict in
+                let update = { withdrawn = []; path_attrs = attrs; nlri = [ pfx ] } in
+                Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+              in
+              List.iter f (Prefix_map.bindings t.db)
             in
-            List.iter f (Prefix_map.bindings t.db)
-          in
 
-          handle_loop new_t
-        end
+            handle_loop t
+          end
         | Unsub remote_id ->
-          if not (Ip_map.mem remote_id t.subs) then
+          if not (Ip_map.mem remote_id t.subs) then begin
             Rib_log.err (fun m -> m "No rib subscription for remote %s" 
                                       (Ipaddr.V4.to_string remote_id));
-
-          (* Update subscribed ribs *)
-          let new_subs = Ip_map.remove remote_id t.subs in
-
-          let new_t = set_subs new_subs t in
-          handle_loop new_t
+            assert false
+          end
+          else begin
+            (* Update subscribed ribs *)
+            t.subs <- Ip_map.remove remote_id t.subs;
+            handle_loop t
+          end
     in
 
     t_ref := Some t;
@@ -778,7 +781,6 @@ module Loc_rib = struct
     Printf.sprintf "%s" pfxs_str
   ;;
 
-
   let size t = Prefix_map.cardinal t.db
 
   let input t input = t.pf (Some input)
@@ -790,6 +792,6 @@ module Loc_rib = struct
     t_ref := None
   ;;
 
-  let sub t (id, in_rib, out_rib) = input t (Sub (id, in_rib, out_rib))
+  let sub t (id, asn, in_rib, out_rib) = input t (Sub (id, asn, in_rib, out_rib))
   let unsub t id = input t (Unsub id) 
 end

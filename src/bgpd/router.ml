@@ -39,13 +39,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     mutable rec_keepalive: int;
     mutable rec_notif: int;
   }
-
-  type session_type = IBGP | EBGP
-
   
   type t = {
     mutable running: bool;
-    session_type: session_type;
+    iBGP: bool;
 
     remote_id: Ipaddr.V4.t;
     remote_port: int;
@@ -387,11 +384,11 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         let callback u = 
           send_msg t (Bgp.Update u)
         in
-        Rib.Adj_rib_out.create t.remote_id t.local_id t.local_asn callback
+        Rib.Adj_rib_out.create t.remote_id t.remote_asn t.local_id t.local_asn callback
       in
       t.output_rib <- Some out_rib;
       
-      Rib.Loc_rib.sub t.loc_rib (t.remote_id, in_rib, out_rib)
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, out_rib)
     | Release_rib ->
       let () =
         match t.input_rib with
@@ -512,11 +509,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     let t = {
       running = true;
 
-      session_type = if config.local_asn = peer_config.remote_asn then IBGP else EBGP;
-
       socket; 
       conn_starter = None;
-      
       flow_handler = None;
       in_flow = None;
       out_flow = None;
@@ -527,6 +521,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_id = config.local_id;
       local_port = config.local_port;
       local_asn = config.local_asn;
+      iBGP = config.local_asn = peer_config.remote_asn;
 
       fsm = Fsm.create peer_config.conn_retry_time (peer_config.hold_time) (peer_config.hold_time / 3);
 
