@@ -380,15 +380,11 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       in
       t.input_rib <- Some in_rib;
 
-      let out_rib =
-        let callback u = 
-          send_msg t (Bgp.Update u)
-        in
-        Rib.Adj_rib_out.create t.remote_id t.remote_asn t.local_id t.local_asn callback
+      let callback u = 
+        send_msg t (Bgp.Update u)
       in
-      t.output_rib <- Some out_rib;
       
-      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, out_rib)
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, callback)
     | Release_rib ->
       let () =
         match t.input_rib with

@@ -8,7 +8,6 @@ let option_get = function
   | Some v -> v
 ;;
 
-
 (* Design choices: To avoid dependency loop, I allow Loc-RIB to depend on In-RIB and out-RIB. *)
 (* This does cost some inflxibility as the form of callback is fixed. *)
 (* The interconnection between IN-RIB and Loc-RIB must be defined at initialisation in bgpd.ml *)
@@ -22,6 +21,7 @@ module Rib_log = (val Logs.src_log rib_log : Logs.LOG)
 (* The underlying data store is a binary tree *)
 module Prefix = Ipaddr.V4.Prefix
 module Prefix_map = Map.Make(Prefix)
+module Ip_map = Map.Make(Ipaddr.V4)
 
 module ID = struct
   type t = int
@@ -211,13 +211,11 @@ module Adj_rib_out = struct
 
   type t = {
     (* States *)
-    remote_id: Ipaddr.V4.t;
-    remote_asn: int32;
     local_id: Ipaddr.V4.t;
     local_asn: int32;
     iBGP: bool;
     
-    callback: update -> unit;
+    mutable callbacks: (update -> unit) Ip_map.t;
     mutable past_routes: Prefix_set.t;
     
     (* Queue *)
@@ -330,7 +328,6 @@ module Adj_rib_out = struct
           tmp
       in
 
-
       let attrs_len = len_path_attrs_buffer updated_attrs in
       let pfxs_list, rest = split ins ((max_update_len - min_update_len - attrs_len) / pfx_len) in
       let gen_ins_update ins = { withdrawn = []; path_attrs = updated_attrs; nlri = ins } in
@@ -386,13 +383,16 @@ module Adj_rib_out = struct
           let updates = gen_updates t.local_asn t.local_id t.iBGP wd (ID_map.bindings db) in
           
           (* Decision choice: must send all previous updates before handling next batch. *)
-          let () = List.iter (fun u -> t.callback u) updates in
+          let () = 
+            let f _ cb = List.iter (fun u -> cb u) updates in
+            Ip_map.iter f t.callbacks
+          in
 
           (* Update data structure *)
           t.past_routes <- Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set;
 
           (* Minimal advertisement time interval *)
-          (* OS.Time.sleep_ns (Duration.of_ms 0)
+          (* OS.Time.sleep_ns (Duration.of_ms 50)
           >>= fun () -> *)
 
           handle_loop t
@@ -403,14 +403,14 @@ module Adj_rib_out = struct
   ;;
 
 
-  let create remote_id remote_asn local_id local_asn callback : t = 
+  let create local_id local_asn iBGP : t = 
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let past_routes = Prefix_set.empty in
     let t = {
-      remote_id; remote_asn; local_id; local_asn;
-      iBGP = remote_asn = local_asn;
-      callback; past_routes;
+      local_id; local_asn; iBGP;
+      callbacks = Ip_map.empty; 
+      past_routes;
       stream; pf;
     } in
 
@@ -429,12 +429,10 @@ end
 
 
 module Loc_rib = struct
-  module Ip_map = Map.Make(Ipaddr.V4)
-
   type input = 
     | Push of Ipaddr.V4.t * update
     | Resolved of (Ipaddr.V4.Prefix.t * (Ipaddr.V4.t * int) option) list
-    | Sub of Ipaddr.V4.t * int32 * Adj_rib_in.t * Adj_rib_out.t
+    | Sub of Ipaddr.V4.t * int32 * Adj_rib_in.t * (update -> unit)
     | Unsub of Ipaddr.V4.t
     | Stop
 
@@ -443,7 +441,7 @@ module Loc_rib = struct
     remote_asn: int32;
     iBGP: bool;
     in_rib: Adj_rib_in.t;
-    out_rib: Adj_rib_out.t;
+    cb: update -> unit;
   }
 
   type rte = {
@@ -464,6 +462,9 @@ module Loc_rib = struct
     hold_queue: (Ipaddr.V4.t * update) Queue.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
+
+    ibgp_out_rib: Adj_rib_out.t;
+    ebgp_out_rib: Adj_rib_out.t;
   }
 
   let set_subs subs t = {
@@ -476,6 +477,9 @@ module Loc_rib = struct
     hold_queue = t.hold_queue;
     stream = t.stream;
     pf = t.pf;
+
+    ibgp_out_rib = t.ibgp_out_rib;
+    ebgp_out_rib = t.ebgp_out_rib;
   }
 
   let set_store db dict t = {
@@ -488,6 +492,9 @@ module Loc_rib = struct
     hold_queue = t.hold_queue;
     stream = t.stream;
     pf = t.pf;
+
+    ibgp_out_rib = t.ibgp_out_rib;
+    ebgp_out_rib = t.ebgp_out_rib;
   }
 
   let t_ref : t option ref = ref None
@@ -648,11 +655,8 @@ module Loc_rib = struct
             (* Send the updates: blocking *)
             let () = 
               if not (is_empty_update out_update) then
-                let f (peer_id, peer) = 
-                  if peer_id <> remote_id then 
-                    Adj_rib_out.input peer.out_rib (Adj_rib_out.Push out_update)
-                in
-                List.iter f ip_and_peer
+                (* TODO distinguish iBGP and eBGP *)
+                Adj_rib_out.input t.ebgp_out_rib (Adj_rib_out.Push out_update)
               else ()
             in
 
@@ -695,7 +699,7 @@ module Loc_rib = struct
             let new_t = set_store new_db new_dict t in
             handle_loop new_t
           end
-        | Sub (remote_id, remote_asn, in_rib, out_rib) ->
+        | Sub (remote_id, remote_asn, in_rib, cb) ->
           if Ip_map.mem remote_id t.subs then begin
             Rib_log.err (fun m -> m "Duplicated rib subscription for remote %s" 
                                     (Ipaddr.V4.to_string remote_id));
@@ -703,17 +707,25 @@ module Loc_rib = struct
           end
           else begin
             let peer = { 
-              remote_id; remote_asn; in_rib; out_rib;
+              remote_id; remote_asn; in_rib; cb;
               iBGP = remote_asn = t.local_asn;
             } in
             t.subs <- Ip_map.add remote_id peer t.subs;
+
+            let () =
+              let open Adj_rib_out in
+              if peer.iBGP then 
+                t.ibgp_out_rib.callbacks <- Ip_map.add remote_id cb t.ibgp_out_rib.callbacks
+              else
+                t.ebgp_out_rib.callbacks <- Ip_map.add remote_id cb t.ebgp_out_rib.callbacks
+            in
             
             (* Synchronize with peer: blocking *)
             let () =
               let f (pfx, (attr_id, _)) = 
                 let attrs = Dict.find attr_id t.dict in
                 let update = { withdrawn = []; path_attrs = attrs; nlri = [ pfx ] } in
-                Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+                cb update
               in
               List.iter f (Prefix_map.bindings t.db)
             in
@@ -728,7 +740,15 @@ module Loc_rib = struct
           end
           else begin
             (* Update subscribed ribs *)
+            let peer = Ip_map.find remote_id t.subs in
             t.subs <- Ip_map.remove remote_id t.subs;
+            let () = 
+              let open Adj_rib_out in
+              if peer.iBGP then 
+                t.ibgp_out_rib.callbacks <- Ip_map.remove remote_id t.ibgp_out_rib.callbacks
+              else
+                t.ebgp_out_rib.callbacks <- Ip_map.remove remote_id t.ebgp_out_rib.callbacks
+            in
             handle_loop t
           end
     in
@@ -753,7 +773,10 @@ module Loc_rib = struct
       dict = Dict.empty;
       route_mgr;
       hold_queue = Queue.create ();
-      stream; pf
+      stream; pf;
+
+      ibgp_out_rib = Adj_rib_out.create local_id local_asn true;
+      ebgp_out_rib = Adj_rib_out.create local_id local_asn false;
     } in
 
     (* Spawn handling loop thread *)
