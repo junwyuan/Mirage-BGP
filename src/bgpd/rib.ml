@@ -508,34 +508,10 @@ module Loc_rib = struct
     List.fold_right f_update_nexthop attrs []
   ;;
 
-  let find_origin path_attrs = 
-    match Bgp.find_origin path_attrs with
-    | None ->
-      Rib_log.err (fun m -> m "MISSING ORIGIN");
-      failwith "MISSING ORIGIN"
-    | Some v -> v
-  ;;
-
-  let find_aspath path_attrs = 
-    match Bgp.find_aspath path_attrs with
-    | None -> 
-      Rib_log.err (fun m -> m "MISSING AS PATH");
-      failwith "MISSING ASPATH"
-    | Some v -> v
-  ;;
-
-  let find_next_hop attrs = 
-    match Bgp.find_next_hop attrs with
-    | None -> 
-      Rib_log.err (fun m -> m "MISSING NEXTHOP");
-      failwith "MISSING NEXTHOP"
-    | Some v -> v
-  ;;
-
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
   let tie_break attrs1 attrs2 = 
-    let as_path_1 = find_aspath attrs1 in
-    let as_path_2 = find_aspath attrs2 in
+    let as_path_1 = find_as_path attrs1 in
+    let as_path_2 = find_as_path attrs2 in
     if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then true
     else if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then false
     else begin
@@ -570,7 +546,7 @@ module Loc_rib = struct
     in
 
     (* If the advertised path is looping, don't install any new routes OR no advertised route *)
-    if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
+    if update.nlri = [] || is_aspath_loop local_asn (find_as_path update.path_attrs) then begin
       let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
       (db, dict, out_update)
     end else
@@ -647,7 +623,7 @@ module Loc_rib = struct
               handle_loop t
             end
             else begin
-              let next_hop = option_get (Bgp.find_next_hop update.path_attrs) in
+              let next_hop = Bgp.find_next_hop update.path_attrs in
               Route_mgr.input t.route_mgr (Route_mgr.Resolve (update.nlri, next_hop, callback));
               handle_loop t
             end
@@ -801,6 +777,7 @@ module Loc_rib = struct
     in  
     Printf.sprintf "%s" pfxs_str
   ;;
+
 
   let size t = Prefix_map.cardinal t.db
 

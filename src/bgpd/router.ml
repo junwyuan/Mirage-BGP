@@ -40,9 +40,12 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     mutable rec_notif: int;
   }
 
+  type session_type = IBGP | EBGP
+
   
   type t = {
     mutable running: bool;
+    session_type: session_type;
 
     remote_id: Ipaddr.V4.t;
     remote_port: int;
@@ -508,6 +511,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
 
     let t = {
       running = true;
+
+      session_type = if config.local_asn = peer_config.remote_asn then IBGP else EBGP;
 
       socket; 
       conn_starter = None;
