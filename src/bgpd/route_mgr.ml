@@ -8,7 +8,7 @@ module Mgr_log = (val Logs.src_log mgr_log : Logs.LOG)
 type route = Route_injector.route
 
 type krt_change = {
-  insert: route list;
+  insert: Ipaddr.V4.Prefix.t list * Ipaddr.V4.t;
   remove: Ipaddr.V4.Prefix.t list;
 }
 
@@ -23,6 +23,7 @@ module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
 
 type t = {
   table: Route_table.t;
+  mutable cache: Prefix_set.t;
   stream: input Lwt_stream.t;
   pf: input option -> unit;
 }
@@ -38,33 +39,43 @@ let rec handle_loop t =
       handle_loop t
     | Krt_change change ->
       (* Remove *)
-      let f pfx = 
-        match Route_injector.Unix.del_route pfx with
+      let filtered = List.filter (fun p -> Prefix_set.mem p t.cache) change.remove in
+      let rm_route acc pfx = Prefix_set.remove pfx acc in
+      t.cache <- List.fold_left rm_route t.cache filtered;
+
+      let () = 
+        match Route_injector.Unix.del_routes filtered with
+        | Result.Ok () -> ()
+        | Result.Error _ -> 
+          (* No real action is performed to handle the error *)
+          Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
+      in
+      
+      let l_ins, gw = change.insert in
+
+      (* Add *)
+      let need_to_rm = List.filter (fun p -> Prefix_set.mem p t.cache) l_ins in
+      t.cache <- List.fold_left rm_route t.cache need_to_rm;
+
+      let () = 
+        match Route_injector.Unix.del_routes need_to_rm with
+        | Result.Ok () -> ()
+        | Result.Error _ -> 
+          (* No real action is performed to handle the error *)
+          Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
+      in
+
+      let add_route acc pfx = Prefix_set.add pfx acc in
+      t.cache <- List.fold_left add_route t.cache l_ins;
+
+      let () =
+        match Route_injector.Unix.add_routes l_ins gw with
         | Result.Ok () -> ()
         | Result.Error _ -> 
           (* No real action is performed to handle the error *)
           Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ");
       in
-      let () = List.iter f change.remove in
-
-      (* Add *)
-      let f route =
-        let () = match Route_injector.Unix.del_route route.net with
-          | Result.Ok () -> ()
-          | Result.Error _ -> 
-            (* No real action is performed to handle the error *)
-            Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
-        in
-        let () = match Route_injector.Unix.add_route route.net (option_get route.gw) with
-          | Result.Ok () -> ()
-          | Result.Error _ -> 
-            (* No real action is performed to handle the error *)
-            Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ");
-        in
-        ()
-      in
-      let () = List.iter f change.insert in
-
+      
       handle_loop t
     | Stop -> Lwt.return_unit
   in
@@ -83,7 +94,8 @@ let create () =
     in
     let table = List.fold_left f Route_table.empty routes in
     let stream, pf = Lwt_stream.create () in
-    let t = { table; stream; pf; } in
+    let cache = Prefix_set.empty in
+    let t = { table; stream; pf; cache; } in
     let _ = handle_loop t in
     t
   | Result.Error _ ->

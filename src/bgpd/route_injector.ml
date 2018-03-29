@@ -32,15 +32,14 @@ module Mask = struct
   let masks =
     let rec gen n =
       if n >= 0 then
-        (n, Ipaddr.V4.Prefix.mask n)::(gen (n - 1))
+        (n, Ipaddr.V4.to_string (Ipaddr.V4.Prefix.mask n))::(gen (n - 1))
       else []
     in
     gen 32
   ;;
-
+  
   let str_to_int str = 
-    let tmp = Ipaddr.V4.of_string_exn str in
-    let f (n, mask) = mask = tmp in
+    let f (n, mask) = mask = str in
     match List.find_opt f masks with
     | None -> None
     | Some (bits, _) -> Some bits
@@ -128,51 +127,35 @@ module Unix = struct
       | `Signaled code -> Result.Error (Signaled code)
     end
     | Result.Error _ -> Result.Error Unknown
-  ;;
+  ;;    
 
-
-  let add_route net gw =
-    let subnet = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.network net) in
-    
-    let mask = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.netmask net) in
+  let add_routes nets gw =
     let gw = Ipaddr.V4.to_string gw in
-
-    let cmd = Bos.Cmd.((v "route") % "add" % "-net" % subnet % "netmask" % mask % "gw" % gw) in
-    let output = Bos.OS.Cmd.(run_out cmd |> out_lines) in
-    match output with
-    | Result.Ok (_, (_, status)) -> begin
-      match status with
-      | `Exited code -> 
-        if code = 0 then
-          Result.Ok ()
-        else
-          Result.Error (Exited code)
-      | `Signaled code ->
-        Result.Error (Signaled code)
-    end
-    | Result.Error _ -> Result.Error Unknown
+    let f net = 
+      let subnet = Ipaddr.V4.Prefix.to_string net in
+      
+      let mask = List.assoc (Ipaddr.V4.Prefix.bits net) Mask.masks in  
+      (* let cmd = Bos.Cmd.((v "route") % "add" % "-net" % subnet % "netmask" % mask % "gw" % gw % "metric" % "1") in *)
+      let str = Printf.sprintf "ip route add metric %d %s via %s" 1 subnet gw in
+      str
+    in
+    let str = String.concat "&&" (List.map f nets) in
+    match Sys.command str with
+    | 0 -> Result.Ok ()
+    | v -> Result.Error v
   ;;
 
-  let del_route net =
-    let subnet = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.network net) in
-    
-    let mask = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.netmask net) in
-
-    (* let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask % "gw" % gw) in *)
-    let cmd = Bos.Cmd.((v "route") % "del" % "-net" % subnet % "netmask" % mask) in
-    let output = Bos.OS.Cmd.(run_out cmd |> out_lines) in
-    match output with
-    | Result.Ok (_, (_, status)) -> begin
-      match status with
-      | `Exited code -> 
-        if code = 0 then
-          Result.Ok ()
-        else
-          Result.Error (Exited code)
-      | `Signaled code ->
-        Result.Error (Signaled code)
-    end
-    | Result.Error _ -> Result.Error Unknown
+  let del_routes nets =
+    let f net =
+      let subnet = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.network net) in
+      let mask = List.assoc (Ipaddr.V4.Prefix.bits net) Mask.masks in  
+      let str = Printf.sprintf "route add -net %s netmask %s metric %d" subnet mask 1 in
+      str
+    in
+    let str = String.concat "&&" (List.map f nets) in
+    match Sys.command str with
+    | 0 -> Result.Ok ()
+    | v -> Result.Error v
   ;;
 end
 
@@ -180,18 +163,17 @@ let test () =
   let bits = Mask.str_to_int "255.255.255.255" in
   assert (bits = Some 32);
 
-  (* let net = Ipaddr.V4.(Prefix.make 16 (of_string_exn "10.11.0.0")) in
-  let gw = Some (Ipaddr.V4.of_string_exn "172.19.0.253") in
-  let iface = None in
-  match Unix.del_route net with
+  let net = Ipaddr.V4.(Prefix.make 16 (of_string_exn "10.11.0.0")) in
+  let gw = Ipaddr.V4.of_string_exn "172.19.0.253" in
+  match Unix.add_routes [net] gw with
   | Result.Ok () -> Printf.printf "Route added."
-  | Result.Error _ -> Printf.printf "Error." *)
+  | Result.Error _ -> Printf.printf "Error."
 
-  match Unix.get_routes () with
+  (* match Unix.get_routes () with
   | Result.Ok routes ->
     List.iter (fun r -> Printf.printf "%s\n" (route_to_string r)) routes
   | Result.Error _ ->
-    Printf.printf "Error!!!"
+    Printf.printf "Error!!!" *)
 ;;
 
 

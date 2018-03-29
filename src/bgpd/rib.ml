@@ -627,7 +627,7 @@ module Loc_rib = struct
             let f (pfx, _) = pfx in
             let l_rm = List.map f (Prefix_map.bindings t.db) in
             let open Route_mgr in
-            let krt_change = { insert = []; remove = l_rm } in
+            let krt_change = { insert = [], Ipaddr.V4.localhost; remove = l_rm } in
             let () = Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change) in
             Lwt.return_unit
           else Lwt.return_unit
@@ -707,17 +707,13 @@ module Loc_rib = struct
                         let direct_gw, _metric = option_get opt in
                         direct_gw
                       in
-
-                      let f pfx = 
-                        { net = pfx; gw = Some direct_gw; iface = None; metric = 0 }                      
-                      in
-                      List.map f out_update.nlri
-                    else []
+                      out_update.nlri, direct_gw
+                    else [], Ipaddr.V4.localhost
                   in
                   { insert; remove }
                 in
 
-                if krt_change.insert = [] && krt_change.remove = [] then ()
+                if out_update.nlri = [] && out_update.withdrawn = [] then ()
                 else Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change)
               end
               else ()
