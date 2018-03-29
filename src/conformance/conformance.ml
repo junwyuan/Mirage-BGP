@@ -258,6 +258,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop 0
   ;;
 
+
   
 
   let test_create_session s () = 
@@ -306,10 +307,6 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun (flow2, _) ->
 
     let cond u = 
-      assert (find_origin u.path_attrs <> None);
-      assert (find_aspath u.path_attrs <> None);
-      assert (find_next_hop u.path_attrs <> None);
-      
       match u.nlri with 
       | [ pfx ] ->
         assert (Ipaddr.V4.Prefix.network pfx = sample_id);
@@ -771,7 +768,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     let count = ref 0 in
     let cond ({ nlri; path_attrs; withdrawn } as u) =
-      assert (find_aspath path_attrs = Some [ Asn_seq [dut_asn (); (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l; ]]);
+      assert (find_as_path path_attrs = [ Asn_seq [dut_asn (); (relay1 ()).local_asn; 65001_l; 65002_l; 65003_l; ]]);
       count := !count + List.length nlri;
       !count = 3
     in

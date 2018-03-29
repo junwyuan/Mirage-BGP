@@ -22,14 +22,14 @@ let quagga_relay2 = {
 
 let dev_relay1 = {
   local_id = Ipaddr.V4.of_string_exn "172.19.10.3";
-  remote_port = 179;
+  remote_port = 50002;
   remote_id = Ipaddr.V4.of_string_exn "127.0.0.1";
   local_asn = 4_l;
 }
 
 let dev_relay2 = {
   local_id = Ipaddr.V4.of_string_exn "172.19.10.4";
-  remote_port = 179;
+  remote_port = 50003;
   remote_id = Ipaddr.V4.of_string_exn "127.0.0.1";
   local_asn = 5_l;
 }
