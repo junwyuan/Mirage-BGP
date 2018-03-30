@@ -374,7 +374,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     end
     | Initiate_rib ->
       let in_rib = 
-        let callback u = Rib.Loc_rib.push_update t.loc_rib (t.remote_id, u) in
+        let callback u = 
+          let weights = List.map (fun x -> (x, 0)) u.nlri in
+          Rib.Loc_rib.push_update t.loc_rib (t.remote_id, u, weights) 
+        in
         let signal () = Lwt_condition.signal t.cond_var () in
         Rib.Adj_rib_in.create t.remote_id callback signal
       in

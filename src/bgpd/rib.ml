@@ -32,7 +32,7 @@ end
 module ID_map = Map.Make(ID)
 
 module Dict = struct
-  type t = (Bgp.path_attrs * int) ID_map.t
+  type 'a t = ('a * int) ID_map.t
 
   let add id attrs t = 
     match ID_map.find_opt id t with
@@ -88,7 +88,7 @@ module Adj_rib_in = struct
     callback: update -> unit;
     signal: unit -> unit;
     db: ID.t Prefix_map.t;
-    dict: Dict.t;
+    dict: path_attrs Dict.t;
     stream: input Lwt_stream.t;
     pf: input option -> unit;
   }
@@ -281,7 +281,7 @@ module Adj_rib_out = struct
       aux_take l n []
   ;;
 
-  let rec split l len =
+  let split l len =
     let rec aux_split l len acc = 
       if List.length l > len then 
         let taken, rest = take l len in
@@ -430,7 +430,7 @@ end
 
 module Loc_rib = struct
   type input = 
-    | Push of Ipaddr.V4.t * update
+    | Push of Ipaddr.V4.t * update * ((Ipaddr.V4.Prefix.t * int) list)
     | Resolved of (Ipaddr.V4.Prefix.t * (Ipaddr.V4.t * int) option) list
     | Sub of Ipaddr.V4.t * int32 * Adj_rib_in.t * (update -> unit)
     | Unsub of Ipaddr.V4.t
@@ -446,55 +446,31 @@ module Loc_rib = struct
 
   type rte = {
     path_attrs: Bgp.path_attrs;
-    peer: peer;
-    nh_metric: int;
+    remote_id: Ipaddr.V4.t;
+    remote_asn: int32;
+    iBGP: bool;
+    igp_metric: int;
     direct_gw: Ipaddr.V4.t;
+    weight: int;
   }
 
   type t = {
     mutable running: bool;
     local_asn: int32;
     local_id: Ipaddr.V4.t;
+    
     mutable subs: peer Ip_map.t;
-    mutable db: (ID.t * Ipaddr.V4.t) Prefix_map.t;
-    mutable dict: Dict.t;
+    mutable db: int Prefix_map.t;
+    mutable dict: rte Dict.t;
+    
     route_mgr: Route_mgr.t;
-    hold_queue: (Ipaddr.V4.t * update) Queue.t;
+    hold_queue: (Ipaddr.V4.t * update * ((Ipaddr.V4.Prefix.t * int) list)) Queue.t;
+    
     stream: input Lwt_stream.t;
     pf: input option -> unit;
 
     ibgp_out_rib: Adj_rib_out.t;
     ebgp_out_rib: Adj_rib_out.t;
-  }
-
-  let set_subs subs t = {
-    running = t.running;
-    local_asn = t.local_asn;
-    local_id = t.local_id;
-    subs;
-    db = t.db; dict = t.dict;
-    route_mgr = t.route_mgr;
-    hold_queue = t.hold_queue;
-    stream = t.stream;
-    pf = t.pf;
-
-    ibgp_out_rib = t.ibgp_out_rib;
-    ebgp_out_rib = t.ebgp_out_rib;
-  }
-
-  let set_store db dict t = {
-    running = t.running;
-    local_asn = t.local_asn;
-    local_id = t.local_id;
-    subs = t.subs;
-    db; dict;
-    route_mgr = t.route_mgr;
-    hold_queue = t.hold_queue;
-    stream = t.stream;
-    pf = t.pf;
-
-    ibgp_out_rib = t.ibgp_out_rib;
-    ebgp_out_rib = t.ebgp_out_rib;
   }
 
   let t_ref : t option ref = ref None
@@ -518,37 +494,71 @@ module Loc_rib = struct
   ;;
 
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
-  let tie_break attrs1 attrs2 = 
-    let as_path_1 = find_as_path attrs1 in
-    let as_path_2 = find_as_path attrs2 in
-    if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then true
-    else if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then false
-    else begin
-      let origin_1 = find_origin attrs1 in
-      let origin_2 = find_origin attrs2 in
-      if origin_1 = Bgp.EGP && origin_2 = Bgp.IGP then true
-      else if origin_1 = Bgp.IGP && origin_2 = Bgp.EGP then false
-      else begin
-        let nexthop1 = find_next_hop attrs1 in
-        let nexthop2 = find_next_hop attrs2 in
-        if Ipaddr.V4.compare nexthop1 nexthop2 < 0 then true else false
-      end
-    end
+  let is_better_route route1 route2 = 
+    if route1.weight <> route2.weight then 
+      (* Prefer route with higher weight *)
+      route1.weight - route2.weight > 0
+    else 
+      let attrs1 = route1.path_attrs in
+      let attrs2 = route2.path_attrs in
+      let len_asp1 = get_aspath_len (Bgp.find_as_path attrs1) in
+      let len_asp2 = get_aspath_len (Bgp.find_as_path attrs2) in
+      if len_asp1 <> len_asp2 then 
+        (* Prefer route with shorter AS PATH *)
+        len_asp2 - len_asp1 > 0
+      else
+        let origin_1 = Bgp.origin_to_int (find_origin attrs1) in
+        let origin_2 = Bgp.origin_to_int (find_origin attrs2) in
+        if origin_1 <> origin_2 then
+          (* Prefer route with lower origin number *)
+          origin_2 - origin_1 > 0
+        else
+          if route1.remote_asn = route2.remote_asn then
+            let med_1 = Bgp.find_med attrs1 in
+            let med_2 = Bgp.find_med attrs2 in
+            if med_1 = None || med_2 = None then
+              (* Prefer eBGP over iBGP *)
+              if route1.iBGP && not route2.iBGP then false
+              else if (not route1.iBGP) && route2.iBGP then true
+              else 
+                if route1.igp_metric <> route2.igp_metric then 
+                  (* Prefer route with lower IGP metric *)
+                  route2.igp_metric - route1.igp_metric > 0
+                else
+                  (* Prefer route of smaller router id *)
+                  Ipaddr.V4.compare route1.remote_id route2.remote_id < 0 
+            else
+              let v1 = option_get med_1 in
+              let v2 = option_get med_2 in
+              (* Prefer route with lower MED *)
+              Int32.sub v2 v1 < 0_l
+          else
+            (* Prefer eBGP over iBGP *)
+            if route1.iBGP && not route2.iBGP then false
+            else if (not route1.iBGP) && route2.iBGP then true
+            else 
+              if route1.igp_metric <> route2.igp_metric then 
+                (* Prefer route with lower IGP metric *)
+                route2.igp_metric - route1.igp_metric > 0
+              else
+                (* Prefer route of smaller router id *)
+                Ipaddr.V4.compare route1.remote_id route2.remote_id < 0 
   ;;
 
   
 
 
   (* This function is pure *)
-  let update_loc_db local_id local_asn (peer_id, update) db dict =
+  let update_loc_db (peer_id, update, weights, resolved_results) local_asn (peers: peer Ip_map.t) db dict =
     (* Withdrawn from Loc-RIB *)
     let wd, db, dict =
       let loc_wd_pfx (wd, db, dict) pfx = 
         match Prefix_map.find_opt pfx db with
         | None -> wd, db, dict
-        | Some (attr_id, src_id) -> 
-          if (src_id = peer_id) then 
-            (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict) 
+        | Some rte_id -> 
+          let rte = Dict.find rte_id dict in
+          if (rte.remote_id = peer_id) then 
+            (pfx::wd, Prefix_map.remove pfx db, Dict.remove rte_id dict) 
           else wd, db, dict
       in
       List.fold_left loc_wd_pfx ([], db, dict) update.withdrawn
@@ -559,29 +569,53 @@ module Loc_rib = struct
       let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
       (db, dict, out_update)
     end else
-      let u_attr_id = ID.create update.path_attrs in
-
       let wd, ins, db, dict =   
         let loc_ins_pfx (wd, ins, db, dict) pfx = 
           match List.mem pfx wd with
           | true -> 
-            (* We do not install new attrs immediately after withdrawn *)
-            (wd, ins, db, dict)
+            (* Do not install new attrs immediately after withdrawn *)
+            (wd, ins, db, dict) 
           | false ->
-            match Prefix_map.find_opt pfx db with
-            | None -> 
-              (* If this is a new destination *)
-              (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id update.path_attrs dict)
-            | Some (attr_id, src_id) ->
-              let stored_attrs = Dict.find attr_id dict in
-              if tie_break update.path_attrs stored_attrs then
-                (* Replace if the new route is more preferable *)
-                (wd, pfx::ins, Prefix_map.add pfx (u_attr_id, peer_id) db, Dict.add u_attr_id update.path_attrs dict)
-              else if src_id = peer_id then 
-                (* If from the same peer then the current best path is no longer valid. *) 
-                (* Remove the current best path and reselects the path later. *)
-                (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove attr_id dict)
-              else wd, ins, db, dict
+            match List.assoc pfx resolved_results with
+            | None ->
+              (* Unreachable *)
+              (wd, ins, db, dict) 
+            | Some (direct_gw, igp_metric) ->
+              let weight = List.assoc pfx weights in
+              let peer = Ip_map.find peer_id peers in
+            
+              (* let updated_attrs = 
+                if peer.iBGP then 
+                  update.path_attrs 
+                else
+                  Bgp.set_local_pref update.path_attrs (Some (Int32.of_int weight)) 
+              in *)
+              
+              let rte = {
+                path_attrs = update.path_attrs;
+                weight;
+                direct_gw;
+                igp_metric;
+                remote_id = peer.remote_id;
+                remote_asn = peer.remote_asn;
+                iBGP = peer.iBGP;
+              } in
+              let rte_id = ID.create rte in
+
+              match Prefix_map.find_opt pfx db with
+              | None -> 
+                (* If this is a new destination *)
+                (wd, pfx::ins, Prefix_map.add pfx rte_id db, Dict.add rte_id rte dict)
+              | Some s_rte_id ->
+                let s_rte = Dict.find s_rte_id dict in
+                if is_better_route rte s_rte then
+                  (* Replace if the new route is more preferable *)
+                  (wd, pfx::ins, Prefix_map.add pfx rte_id db, Dict.add rte_id rte dict)
+                else if rte.remote_id = s_rte.remote_id then 
+                  (* If from the same peer then the current best path is no longer valid. *) 
+                  (* Remove the current best path and reselects the path later. *)
+                  (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove s_rte_id dict)
+                else wd, ins, db, dict
         in
         List.fold_left loc_ins_pfx (wd, [], db, dict) update.nlri
       in
@@ -611,15 +645,14 @@ module Loc_rib = struct
             let () = Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change) in
             Lwt.return_unit
           else Lwt.return_unit
-        | Push (remote_id, update) ->
+        | Push (remote_id, update, weights) ->
           if (not (Ip_map.mem remote_id t.subs)) && update.nlri <> [] then handle_loop t
           else begin
-            let pf = t.pf in
             let callback result = 
-              pf (Some (Resolved result)) 
+              t.pf (Some (Resolved result)) 
             in
 
-            Queue.push (remote_id, update) t.hold_queue;
+            Queue.push (remote_id, update, weights) t.hold_queue;
             if update.nlri = [] then begin
               (* Dummy request *)
               let next_hop = Ipaddr.V4.localhost in
@@ -633,22 +666,12 @@ module Loc_rib = struct
             end
           end
         | Resolved results ->
-          let (remote_id, update) = Queue.pop t.hold_queue in 
+          let (remote_id, update, weights) = Queue.pop t.hold_queue in 
           if (not (Ip_map.mem remote_id t.subs)) && update.nlri <> [] then handle_loop t
           else begin
-            let tersed =
-              if update.nlri = [] then update
-              else
-                let p (pfx, result) = result <> None in
-                let resolvable = List.map (fun (x, _) -> x) (List.filter p results) in
-                {  
-                  withdrawn = update.withdrawn;
-                  path_attrs = update.path_attrs;
-                  nlri = resolvable;
-                }
+            let new_db, new_dict, out_update = 
+              update_loc_db (remote_id, update, weights, results) t.local_asn t.subs t.db t.dict 
             in
-
-            let new_db, new_dict, out_update = update_loc_db t.local_id t.local_asn (remote_id, tersed) t.db t.dict in
               
             let ip_and_peer = Ip_map.bindings t.subs in
 
@@ -696,8 +719,10 @@ module Loc_rib = struct
               else ()
             in
 
-            let new_t = set_store new_db new_dict t in
-            handle_loop new_t
+            t.db <- new_db;
+            t.dict <- new_dict;
+
+            handle_loop t
           end
         | Sub (remote_id, remote_asn, in_rib, cb) ->
           if Ip_map.mem remote_id t.subs then begin
@@ -722,9 +747,9 @@ module Loc_rib = struct
             
             (* Synchronize with peer: blocking *)
             let () =
-              let f (pfx, (attr_id, _)) = 
-                let attrs = Dict.find attr_id t.dict in
-                let update = { withdrawn = []; path_attrs = attrs; nlri = [ pfx ] } in
+              let f (pfx, rte_id) = 
+                let rte = Dict.find rte_id t.dict in
+                let update = { withdrawn = []; path_attrs = rte.path_attrs; nlri = [ pfx ] } in
                 cb update
               in
               List.iter f (Prefix_map.bindings t.db)
@@ -788,14 +813,14 @@ module Loc_rib = struct
   let to_string t = 
     let count = ref 0 in
     let pfxs_str = 
-      let f pfx (attr_id, id) acc = 
-        let attrs = Dict.find attr_id t.dict in
+      let f pfx rte_id acc = 
+        let rte = Dict.find rte_id t.dict in
         count := !count + 1;
         let pfx_str = Printf.sprintf "%d: %s | %s | %s" 
                                       (!count)
                                       (Ipaddr.V4.Prefix.to_string pfx) 
-                                      (Ipaddr.V4.to_string id) 
-                                      (path_attrs_to_string attrs) 
+                                      (Ipaddr.V4.to_string rte.remote_id) 
+                                      (path_attrs_to_string rte.path_attrs) 
         in
         pfx_str::acc
       in 
@@ -807,7 +832,7 @@ module Loc_rib = struct
   let size t = Prefix_map.cardinal t.db
 
   let input t input = t.pf (Some input)
-  let push_update t (id, u) = input t (Push (id, u)) 
+  let push_update t (id, u, w) = input t (Push (id, u, w)) 
   
   let stop t = 
     input t Stop;
