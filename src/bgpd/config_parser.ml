@@ -7,6 +7,7 @@ type peer = {
   remote_port: int;
   hold_time: int;
   conn_retry_time: int;
+  peer_group: int option;
   inbound_filter: route_map option;
 }
 
@@ -114,6 +115,11 @@ let parse_neighbor route_maps json =
       let route_map = List.find p route_maps in
       Some route_map
   in  
+
+  let peer_group =
+    let tmp = Basic.Util.member "peer_group" json in
+    Basic.Util.to_int_option tmp
+  in  
   
   { 
     remote_asn; 
@@ -121,6 +127,7 @@ let parse_neighbor route_maps json =
     remote_port; 
     hold_time; 
     conn_retry_time;
+    peer_group;
     inbound_filter;
   }
 ;;
@@ -144,6 +151,7 @@ let default_config = {
       hold_time = 90;
       conn_retry_time = 0;
       inbound_filter = None;
+      peer_group = None;
     };
     {
       remote_asn = 5_l;
@@ -151,6 +159,7 @@ let default_config = {
       remote_port = 179;
       hold_time = 90;
       conn_retry_time = 0;
+      peer_group = None;
       inbound_filter = None;
     };
   ]

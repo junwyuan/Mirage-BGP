@@ -23,7 +23,7 @@ module Device = struct
   let stop t = Lwt.cancel t
 end
 
-module Id_map = Map.Make(Ipaddr.V4)
+module Ip_map = Map.Make(Ipaddr.V4)
 
 module  Make (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
@@ -52,6 +52,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     local_asn: int32;
     socket: S.t;
 
+    inbound_filter: Filter.route_map option;
+
     (* Temporary flow storage *)
     mutable in_flow: Bgp_flow.t option;
     mutable out_flow: Bgp_flow.t option;
@@ -64,9 +66,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     mutable keepalive_timer: Device.t option;
     mutable conn_starter: Device.t option;
 
-    mutable input_rib: Rib.Adj_rib_in.t option;
-    mutable output_rib: Rib.Adj_rib_out.t option;
-    mutable loc_rib: Rib.Loc_rib.t;
+    mutable in_rib: Rib.Adj_rib_in.t option;
+    out_rib: Rib.Adj_rib_out.t;
+    loc_rib: Rib.Loc_rib.t;
     
     stat: stat;
 
@@ -115,14 +117,14 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         Logs.info (fun m -> m "Receive incoming connection from %s remote as %ld" 
                                 (Ipaddr.V4.to_string remote_id) remote_asn);
 
-        match Id_map.mem remote_id id_map with
+        match Ip_map.mem remote_id id_map with
         | false -> 
           Logs.info (fun m -> m "Refuse connection because remote id %s is unconfigured." 
                                     (Ipaddr.V4.to_string remote_id));
           Bgp_flow.close flow
         | true -> begin
           let open Fsm in
-          let t = Id_map.find remote_id id_map in
+          let t = Ip_map.find remote_id id_map in
           let module Log = (val t.log : Logs.LOG) in
 
           match t.fsm.state with
@@ -365,7 +367,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
                             (fun () -> t.keepalive_timer <- None; push_event t Keepalive_timer_expired))
     end
     | Process_update_msg u -> begin
-      match t.input_rib with
+      match t.in_rib with
       | None -> 
         Bgp_log.err (fun m -> m "Input RIB not initiated"); 
         failwith "Input RIB not initiated."
@@ -374,35 +376,36 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     end
     | Initiate_rib ->
       let in_rib = 
-        let callback u = 
-          let weights = List.map (fun x -> (x, 0)) u.nlri in
-          Rib.Loc_rib.push_update t.loc_rib (t.remote_id, u, weights) 
+        let callback (wd, ins) = 
+          Rib.Loc_rib.push_update t.loc_rib (t.local_id, wd, ins) 
         in
         let signal () = Lwt_condition.signal t.cond_var () in
-        Rib.Adj_rib_in.create t.remote_id callback signal
+        Rib.Adj_rib_in.create t.remote_id t.iBGP callback signal t.inbound_filter
       in
-      t.input_rib <- Some in_rib;
+      t.in_rib <- Some in_rib;
 
       let callback u = 
         send_msg t (Bgp.Update u)
       in
+
+      let () = 
+        let open Rib.Adj_rib_out in
+        t.out_rib.callbacks <- Ip_map.add t.remote_id callback t.out_rib.callbacks
+      in
       
-      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, callback)
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, t.out_rib, callback)
     | Release_rib ->
       let () =
-        match t.input_rib with
+        match t.in_rib with
         | None -> ()
         | Some rib ->
-          t.input_rib <- None;
+          t.in_rib <- None;
           Rib.Adj_rib_in.stop rib
       in
 
       let () = 
-        match t.output_rib with
-        | None -> ()
-        | Some rib -> 
-          t.output_rib <- None; 
-          Rib.Adj_rib_out.stop rib
+        let open Rib.Adj_rib_out in
+        t.out_rib.callbacks <- Ip_map.remove t.remote_id t.out_rib.callbacks
       in
 
       ()
@@ -486,7 +489,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       router_handle res
   ;;
 
-  let create socket loc_rib config peer_config =
+  let create socket loc_rib out_rib config peer_config =
     let open Config_parser in
     
     (* Init shared data *)
@@ -520,16 +523,18 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_id = config.local_id;
       local_port = config.local_port;
       local_asn = config.local_asn;
+      
       iBGP = config.local_asn = peer_config.remote_asn;
-
+      inbound_filter = peer_config.inbound_filter;
+      
       fsm = Fsm.create peer_config.conn_retry_time (peer_config.hold_time) (peer_config.hold_time / 3);
 
       conn_retry_timer = None; 
       hold_timer = None; 
       keepalive_timer = None;
 
-      input_rib = None;
-      output_rib = None;
+      in_rib = None;
+      out_rib;
       loc_rib;
 
       stat;

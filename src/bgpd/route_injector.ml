@@ -129,17 +129,16 @@ module Unix = struct
     | Result.Error _ -> Result.Error Unknown
   ;;    
 
-  let add_routes nets gw =
-    let gw = Ipaddr.V4.to_string gw in
-    let f net = 
+  let add_routes routes =
+    let f (net, gw) = 
+      let gw = Ipaddr.V4.to_string gw in
       let subnet = Ipaddr.V4.Prefix.to_string net in
-      
       let mask = List.assoc (Ipaddr.V4.Prefix.bits net) Mask.masks in  
       (* let cmd = Bos.Cmd.((v "route") % "add" % "-net" % subnet % "netmask" % mask % "gw" % gw % "metric" % "1") in *)
       let str = Printf.sprintf "ip route add metric %d %s via %s" 1 subnet gw in
       str
     in
-    let str = String.concat "&&" (List.map f nets) in
+    let str = String.concat "&&" (List.map f routes) in
     match Sys.command str with
     | 0 -> Result.Ok ()
     | v -> Result.Error v
@@ -159,13 +158,14 @@ module Unix = struct
   ;;
 end
 
+
 let test () =
   let bits = Mask.str_to_int "255.255.255.255" in
   assert (bits = Some 32);
 
   let net = Ipaddr.V4.(Prefix.make 16 (of_string_exn "10.11.0.0")) in
   let gw = Ipaddr.V4.of_string_exn "172.19.0.253" in
-  match Unix.add_routes [net] gw with
+  match Unix.add_routes [net, gw] with
   | Result.Ok () -> Printf.printf "Route added."
   | Result.Error _ -> Printf.printf "Error."
 

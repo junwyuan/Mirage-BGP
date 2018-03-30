@@ -8,15 +8,15 @@ module Mgr_log = (val Logs.src_log mgr_log : Logs.LOG)
 type route = Route_injector.route
 
 type krt_change = {
-  insert: Ipaddr.V4.Prefix.t list * Ipaddr.V4.t;
+  insert: (Ipaddr.V4.Prefix.t * Ipaddr.V4.t) list;
   remove: Ipaddr.V4.Prefix.t list;
 }
 
-type callback = (Ipaddr.V4.Prefix.t * (Ipaddr.V4.t * int) option) list -> unit
+type callback = (Ipaddr.V4.Prefix.t * Bgp.path_attrs * int * (Ipaddr.V4.t * int) option) list -> unit
 
 type input = 
   | Krt_change of krt_change
-  | Resolve of Ipaddr.V4.Prefix.t list * Ipaddr.V4.t * callback
+  | Resolve of (Ipaddr.V4.Prefix.t * Bgp.path_attrs * int) list * callback
   | Stop
 
 module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
@@ -30,11 +30,12 @@ type t = {
 
 let rec handle_loop t =
   let route_mgr_handle = function
-    | Resolve (pfxs, nh, cb) ->
-      let f target_net =
-        (target_net, Route_table.resolve_opt t.table target_net nh)
+    | Resolve (quests, cb) ->
+      let f (target_net, path_attrs, weight) =
+        let nh = Bgp.find_next_hop path_attrs in
+        (target_net, path_attrs, weight, Route_table.resolve_opt t.table target_net nh)
       in
-      let result = List.map f pfxs in
+      let result = List.map f quests in
       let () = cb result in
       handle_loop t
     | Krt_change change ->
@@ -50,26 +51,25 @@ let rec handle_loop t =
           (* No real action is performed to handle the error *)
           Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
       in
-      
-      let l_ins, gw = change.insert in
 
       (* Add *)
-      let need_to_rm = List.filter (fun p -> Prefix_set.mem p t.cache) l_ins in
-      t.cache <- List.fold_left rm_route t.cache need_to_rm;
+      let need_to_rm = List.filter (fun (p, gw) -> Prefix_set.mem p t.cache) change.insert in
+      let f acc (pfx, _) = Prefix_set.remove pfx acc in
+      t.cache <- List.fold_left f t.cache need_to_rm;
 
       let () = 
-        match Route_injector.Unix.del_routes need_to_rm with
+        match Route_injector.Unix.del_routes (List.map (fun (x, _) -> x) need_to_rm) with
         | Result.Ok () -> ()
         | Result.Error _ -> 
           (* No real action is performed to handle the error *)
           Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
       in
 
-      let add_route acc pfx = Prefix_set.add pfx acc in
-      t.cache <- List.fold_left add_route t.cache l_ins;
+      let add_route acc (pfx, _) = Prefix_set.add pfx acc in
+      t.cache <- List.fold_left add_route t.cache change.insert;
 
       let () =
-        match Route_injector.Unix.add_routes l_ins gw with
+        match Route_injector.Unix.add_routes change.insert with
         | Result.Ok () -> ()
         | Result.Error _ -> 
           (* No real action is performed to handle the error *)

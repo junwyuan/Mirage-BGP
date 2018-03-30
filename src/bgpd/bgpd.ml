@@ -116,8 +116,15 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn route_mgr in
 
+
+    let c = ref 0 in
+
     (* Init shared data *)
-    let init_t peer = Router.create s loc_rib config peer in
+    let init_t peer = 
+      let out_rib = Rib.Adj_rib_out.create !c config.local_id config.local_asn (config.local_id = peer.remote_id) in
+      c := !c + 1;
+      Router.create s loc_rib out_rib config peer 
+    in
     let t_list = List.map init_t config.peers in
     let peers = List.fold_left (fun acc (peer: Router.t) -> Id_map.add peer.remote_id peer acc) (Id_map.empty) t_list in
 
