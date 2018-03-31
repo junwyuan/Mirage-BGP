@@ -91,30 +91,21 @@ module Adj_rib_in = struct
   type output = (Ipaddr.V4.Prefix.t list) * ((Ipaddr.V4.Prefix.t * Bgp.path_attrs * int) list)
 
   type t = {
+    mutable running: bool;
+
     remote_id: Ipaddr.V4.t;
     iBGP: bool;
     
     callback: output -> unit;
     signal: unit -> unit;
     
-    db: (ID.t * int) Prefix_map.t;
-    dict: path_attrs Dict.t;
+    mutable db: (ID.t * int) Prefix_map.t;
+    mutable dict: path_attrs Dict.t;
     
     stream: input Lwt_stream.t;
     pf: input option -> unit;
 
     filter: Filter.route_map option;
-  }
-
-  let set_store new_db new_dict t = {
-    remote_id = t.remote_id;
-    iBGP = t.iBGP;
-    callback = t.callback;
-    signal = t.signal;
-    db = new_db; dict = new_dict;
-    stream = t.stream;
-    pf = t.pf;
-    filter = t.filter;
   }
     
   let update_in_db { withdrawn; path_attrs; nlri } filter_opt ibgp db dict = 
@@ -192,15 +183,16 @@ module Adj_rib_in = struct
       | Some input -> match input with
         | Push update -> 
           let new_db, new_dict, out = update_in_db update t.filter t.iBGP t.db t.dict in
-          let new_t = set_store new_db new_dict t in
+          t.db <- new_db;
+          t.dict <- new_dict;
 
           let (wd, ins) = out in
           if wd = [] && ins = [] then 
-            handle_loop new_t
+            handle_loop t
           else 
             (* Handle the callback before handling next input request. This guarantees update message ordering *)
             let () = t.callback out in
-            handle_loop new_t
+            handle_loop t
         | Pull pfx_list -> 
           let f acc pfx =
             match Prefix_map.find_opt pfx t.db with
@@ -213,13 +205,7 @@ module Adj_rib_in = struct
           let () = t.callback ([], ins) in
           handle_loop t
         | Stop -> 
-          (* Withdraw all previously advertised messages *)
-          let wd = List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings t.db) in
-          let () = t.callback (wd, []) in
-          
-          (* Free the Router thread *)
           let () = t.signal () in
-          
           Lwt.return_unit
     in
     Lwt_stream.get t.stream >>= fun input ->
@@ -232,6 +218,7 @@ module Adj_rib_in = struct
     let db = Prefix_map.empty in
     let dict = Dict.empty in
     let t = {
+      running = true;
       remote_id; 
       iBGP;
       callback; signal;
@@ -610,7 +597,13 @@ module Loc_rib = struct
         match Prefix_map.find_opt pfx db with
         | None -> wd, db, dict
         | Some rte_id -> 
+
+          Logs.info (fun m -> m "DICT %d" (Dict.cardinal dict));
+
           let rte = Dict.find rte_id dict in
+
+          
+
           if (rte.remote_id = peer_id) then 
             (pfx::wd, Prefix_map.remove pfx db, Dict.remove rte_id dict) 
           else wd, db, dict
@@ -664,7 +657,8 @@ module Loc_rib = struct
                 let s_rte = Dict.find s_rte_id dict in
                 if is_better_route rte s_rte then
                   (* Replace if the new route is more preferable *)
-                  (wd, (pfx, rte)::ins, Prefix_map.add pfx rte_id db, Dict.add rte_id rte dict)
+                  let new_dict = Dict.add rte_id rte (Dict.remove s_rte_id dict) in
+                  (wd, (pfx, rte)::ins, Prefix_map.add pfx rte_id db, new_dict)
                 else if rte.remote_id = s_rte.remote_id then 
                   (* If from the same peer then the current best path is no longer valid. *) 
                   (* Remove the current best path and reselects the path later. *)
@@ -694,8 +688,13 @@ module Loc_rib = struct
             Lwt.return_unit
           else Lwt.return_unit
         | Push (remote_id, wd, ins) ->
-          if (not (Ip_map.mem remote_id t.subs)) && ins <> [] then handle_loop t
+
+          Logs.info (fun m -> m "PUSH checkpoint. wd %d, ins %d" (List.length wd) (List.length ins));
+
+          if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
+            Logs.info (fun m -> m "PUSH accepted. wd %d, ins %d" (List.length wd) (List.length ins));
+
             let callback v = 
               t.pf (Some (Resolved v))
             in
@@ -705,25 +704,38 @@ module Loc_rib = struct
           end
         | Resolved ins ->
           let (remote_id, wd) = Queue.pop t.hold_queue in 
-          if (not (Ip_map.mem remote_id t.subs)) && ins <> [] then handle_loop t
+
+          Logs.info (fun m -> m "RESOLVED checkpoint. wd %d, ins %d" (List.length wd) (List.length ins));
+
+          if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
+
+            Logs.info (fun m -> m "RESOLVED accepted. wd %d, ins %d" (List.length wd) (List.length ins));
+
             let peer = Ip_map.find remote_id t.subs in
 
             let wd, ins, new_db, new_dict = 
               update_loc_db (remote_id, wd, ins) t.local_asn t.subs t.db t.dict 
             in
 
+            Logs.info (fun m -> m "PRIOR SEND. wd %d, ins %d" (List.length wd) (List.length ins));
+
             (* Send the updates: blocking *)
             let () = 
-              if wd <> [] && ins <> [] then
+              if wd <> [] || ins <> [] then
                 let updates = List.map (fun (p, r) -> { withdrawn = []; path_attrs = r.path_attrs; nlri = [p] }) ins in
                 let tmp = { withdrawn = wd; path_attrs = []; nlri = [] }::updates in
 
                 let open Adj_rib_out in
                 let f _ out_rib =
-                  if out_rib.iBGP && peer.iBGP then ()
-                  else 
+                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id) then begin
+                    Logs.info (fun m -> m "SEND refused. wd %d, ins %d" (List.length wd) (List.length ins));
+                    ()
+                  end
+                  else begin
+                    Logs.info (fun m -> m "SEND accepted. wd %d, ins %d" (List.length wd) (List.length ins));
                     List.iter (fun u -> Adj_rib_out.input out_rib (Adj_rib_out.Push u)) tmp
+                  end
                 in
                 Dict.iter f t.out_ribs
               else ()
@@ -760,6 +772,8 @@ module Loc_rib = struct
 
             t.db <- new_db;
             t.dict <- new_dict;
+
+            Logs.info (fun m -> m "POST SEND. db %d, dict %d" (Prefix_map.cardinal t.db) (Dict.cardinal t.dict));
 
             handle_loop t
           end
@@ -807,6 +821,30 @@ module Loc_rib = struct
             let () =
               let open Adj_rib_out in
               t.out_ribs <- Dict.remove peer.out_rib.id t.out_ribs
+            in
+
+            (* Withdraw all previously advertised messages *)
+            let wd = 
+              let open Adj_rib_in in
+              List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings peer.in_rib.db) 
+            in
+            let () = 
+              if wd <> [] then
+                let update = { withdrawn = wd; path_attrs = []; nlri = [] } in
+
+                let open Adj_rib_out in
+                let f _ out_rib =
+                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id) then begin
+                    Logs.info (fun m -> m "SEND refused. wd %d, ins %d" (List.length wd) 0);
+                    ()
+                  end
+                  else begin
+                    Logs.info (fun m -> m "SEND accepted. wd %d, ins %d" (List.length wd) (0));
+                    Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+                  end
+                in
+                Dict.iter f t.out_ribs
+              else ()
             in
             
             handle_loop t

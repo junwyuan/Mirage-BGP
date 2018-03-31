@@ -377,7 +377,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     | Initiate_rib ->
       let in_rib = 
         let callback (wd, ins) = 
-          Rib.Loc_rib.push_update t.loc_rib (t.local_id, wd, ins) 
+          Rib.Loc_rib.push_update t.loc_rib (t.remote_id, wd, ins) 
         in
         let signal () = Lwt_condition.signal t.cond_var () in
         Rib.Adj_rib_in.create t.remote_id t.iBGP callback signal t.inbound_filter
