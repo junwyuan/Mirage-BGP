@@ -97,7 +97,6 @@ module Adj_rib_in = struct
     iBGP: bool;
     
     callback: output -> unit;
-    signal: unit -> unit;
     
     mutable db: (ID.t * int) Prefix_map.t;
     mutable dict: path_attrs Dict.t;
@@ -205,14 +204,13 @@ module Adj_rib_in = struct
           let () = t.callback ([], ins) in
           handle_loop t
         | Stop -> 
-          let () = t.signal () in
           Lwt.return_unit
     in
     Lwt_stream.get t.stream >>= fun input ->
     in_rib_handle input
   ;;
 
-  let create remote_id iBGP callback signal filter : t = 
+  let create remote_id iBGP callback filter : t = 
     (* Construct the data structure *)
     let stream, pf = Lwt_stream.create () in
     let db = Prefix_map.empty in
@@ -221,7 +219,7 @@ module Adj_rib_in = struct
       running = true;
       remote_id; 
       iBGP;
-      callback; signal;
+      callback;
       db; dict;
       stream; pf;
       filter;
@@ -809,7 +807,7 @@ module Loc_rib = struct
           end
         | Unsub remote_id ->
           if not (Ip_map.mem remote_id t.subs) then begin
-            Rib_log.err (fun m -> m "No rib subscription for remote %s" 
+            Rib_log.err (fun m -> m "No subscription for remote %s" 
                                       (Ipaddr.V4.to_string remote_id));
             assert false
           end
@@ -828,6 +826,15 @@ module Loc_rib = struct
               let open Adj_rib_in in
               List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings peer.in_rib.db) 
             in
+
+            let wd, ins, new_db, new_dict = 
+              update_loc_db (remote_id, wd, []) t.local_asn t.subs t.db t.dict 
+            in
+            t.db <- new_db;
+            t.dict <- new_dict;
+
+            Logs.debug (fun m -> m "IN RIB %d" (List.length wd));
+
             let () = 
               if wd <> [] then
                 let update = { withdrawn = wd; path_attrs = []; nlri = [] } in
