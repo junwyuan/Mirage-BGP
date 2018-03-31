@@ -26,8 +26,7 @@
 
   "neighbor 1": {
     "remote_asn": 4,
-    "remote_id": "172.19.10.3",
-    "inbound_filter": "route_map map1"
+    "remote_id": "172.19.10.3"
   },
   
   "neighbor 2": {
