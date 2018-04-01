@@ -77,6 +77,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
 
     stream: Fsm.event Lwt_stream.t;
     pf: Fsm.event option -> unit;
+
+    (* Sync *)
+    cond_var: unit Lwt_condition.t;
   }
 
   let push_event t event = t.pf (Some event)
@@ -380,16 +383,13 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       in
       t.in_rib <- Some in_rib;
 
+      (* Sub out_rib *)
       let callback u = 
         send_msg t (Bgp.Update u)
       in
-
-      let () = 
-        let open Rib.Adj_rib_out in
-        t.out_rib.callbacks <- Ip_map.add t.remote_id callback t.out_rib.callbacks
-      in
+      Rib.Adj_rib_out.sub t.out_rib t.remote_id callback;
       
-      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, t.out_rib, callback)
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, t.out_rib)
     | Release_rib ->
       let () =
         match t.in_rib with
@@ -398,13 +398,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           t.in_rib <- None;
           Rib.Adj_rib_in.stop rib
       in
-
-      let () = 
-        let open Rib.Adj_rib_out in
-        t.out_rib.callbacks <- Ip_map.remove t.remote_id t.out_rib.callbacks
-      in
-
-      Rib.Loc_rib.unsub t.loc_rib t.remote_id
+      Rib.Adj_rib_out.unsub t.out_rib t.remote_id;
+      Rib.Loc_rib.unsub t.loc_rib t.remote_id t.cond_var
   ;;    
   
   let rec handle_event_loop t =
@@ -453,6 +448,14 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
             let f t act = perform_action t act in
             List.iter (f t) actions
           in
+
+          (* Wait for Loc-RIB to clean up *)
+          let wthread = 
+            if List.mem Fsm.Release_rib actions then
+              Lwt_condition.wait t.cond_var
+            else Lwt.return_unit
+          in
+          wthread >>= fun () ->
             
           match Fsm.state t.fsm with
           | Fsm.IDLE -> begin
@@ -522,6 +525,8 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       log = Logs.src_log bgpd_src;
 
       stream; pf;
+
+      cond_var = Lwt_condition.create ();
     } in
 
     let _ = handle_event_loop t in

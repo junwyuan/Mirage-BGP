@@ -31,8 +31,6 @@ type t = {
 let rec handle_loop t =
   let route_mgr_handle = function
     | Resolve (quests, cb) ->
-      Logs.info (fun m -> m "RESOLVE checkpoint. ins %d" (List.length quests));
-
       let f (target_net, path_attrs, weight) =
         let nh = Bgp.find_next_hop path_attrs in
         (target_net, path_attrs, weight, Route_table.resolve_opt t.table target_net nh)
