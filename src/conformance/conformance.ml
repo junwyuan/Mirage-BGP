@@ -191,17 +191,21 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           assert false
         | Open o ->
           Log.debug (fun m -> m "Rec: %s" (to_string msg)); 
+          
           send_msg flow Bgp.Keepalive (module Log)
           >>= fun () ->
 
           let cond = function
-            | Keepalive -> true
+            | Keepalive -> 
+              true
             | msg -> 
               Log.err (fun m -> m "Expect Keepalive but rec: %s" (to_string msg));
               assert false
           in
           read_loop flow cond (module Log)
           >>= fun () ->
+
+          OS.Time.sleep_ns (Duration.of_sec 1) >>= fun () ->
 
           Lwt.return (flow, o)
   ;;
@@ -330,6 +334,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     >>= fun (flow1, _) ->
     create_session s (relay2 ()) test_name (module Sp2_log)
     >>= fun (flow2, _) ->
+
+    OS.Time.sleep_ns (Duration.of_sec 1) >>= fun () ->
 
     send_msg flow1 (default_update ()) (module Sp1_log)
     >>= fun () ->
@@ -1006,8 +1012,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     Conf_log.info (fun m -> m "Tests start.");
     let tests = [
-      (* test_create_session s; 
-      test_maintain_session s; *)
+      test_create_session s; 
+      test_maintain_session s;
       test_no_propagate_update_to_src s;
       test_propagate_update_to_old_peer s;
       test_propagate_update_to_new_peer s;
