@@ -62,7 +62,7 @@ let rec handle_loop t =
         | Result.Ok () -> ()
         | Result.Error _ -> 
           (* No real action is performed to handle the error *)
-          Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ")
+          Mgr_log.debug (fun m -> m " Error occurs when removing existing route from kernel prior to insertion. ")
       in
 
       let add_route acc (pfx, _) = Prefix_set.add pfx acc in
@@ -73,7 +73,7 @@ let rec handle_loop t =
         | Result.Ok () -> ()
         | Result.Error _ -> 
           (* No real action is performed to handle the error *)
-          Mgr_log.debug (fun m -> m " Error occurs when deleting route from kernel. ");
+          Mgr_log.debug (fun m -> m " Error occurs when adding route into kernel. ");
       in
       
       handle_loop t

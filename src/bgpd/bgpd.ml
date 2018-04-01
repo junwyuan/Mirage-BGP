@@ -121,7 +121,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
     (* Init shared data *)
     let init_t peer = 
-      let out_rib = Rib.Adj_rib_out.create !c config.local_id config.local_asn (config.local_id = peer.remote_id) in
+      let out_rib = Rib.Adj_rib_out.create !c config.local_id config.local_asn (config.local_asn = peer.remote_asn) in
       c := !c + 1;
       Router.create s loc_rib out_rib config peer 
     in

@@ -148,7 +148,7 @@ module Unix = struct
     let f net =
       let subnet = Ipaddr.V4.to_string (Ipaddr.V4.Prefix.network net) in
       let mask = List.assoc (Ipaddr.V4.Prefix.bits net) Mask.masks in  
-      let str = Printf.sprintf "route add -net %s netmask %s metric %d" subnet mask 1 in
+      let str = Printf.sprintf "route del -net %s netmask %s metric %d" subnet mask 1 in
       str
     in
     let str = String.concat "&&" (List.map f nets) in

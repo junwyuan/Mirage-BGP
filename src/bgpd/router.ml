@@ -93,6 +93,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     Device.create (fun () -> OS.Time.sleep_ns (Duration.of_sec time)) callback
   ;;
 
+
   let listen_tcp_connection s local_port id_map =
     let on_connect flow =
       Bgp_flow.read flow >>= function
@@ -428,7 +429,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
               match t.out_flow with
               | None -> Bgp_log.err (fun m -> m "In_flow missing.")
               | Some flow ->
-                let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
+                let flow_handler = Flow_handler.create t.remote_id t.remote_asn t.iBGP (push_event t) flow t.log in
                 t.flow_handler <- Some flow_handler;
                 t.out_flow <- None
             end
@@ -436,7 +437,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
               match t.in_flow with
               | None -> Bgp_log.err (fun m -> m "Out_flow missing.")
               | Some flow ->
-                let flow_handler = Flow_handler.create t.remote_id t.remote_asn (push_event t) flow t.log in
+                let flow_handler = Flow_handler.create t.remote_id t.remote_asn t.iBGP (push_event t) flow t.log in
                 t.flow_handler <- Some flow_handler;
                 t.in_flow <- None
             end

@@ -651,7 +651,6 @@ module Loc_rib = struct
       in
       List.fold_left loc_wd_pfx ([], db, dict) wd
     in
-
     
     let wd, ins, db, dict =   
       let loc_ins_pfx (wd, ins, db, dict) (pfx, path_attrs, weight, resolved_result) = 
@@ -664,7 +663,7 @@ module Loc_rib = struct
           | None ->
             (* Unreachable *)
             (wd, ins, db, dict) 
-          | Some (direct_gw, igp_metric) ->
+          | Some (direct_gw, igp_metric) ->            
             match is_aspath_loop local_asn (find_as_path path_attrs) with
             | true ->
               (* AS PATH LOOP *)
@@ -672,7 +671,6 @@ module Loc_rib = struct
             | false ->
               let peer = Ip_map.find peer_id peers in
 
-              (* Hmm, should be done in OUT RIB I think *)
               let updated_attrs = 
                 if peer.iBGP then path_attrs 
                 else
@@ -761,8 +759,12 @@ module Loc_rib = struct
 
                 let open Adj_rib_out in
                 let f _ out_rib =
-                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id) then ()
-                  else List.iter (fun u -> Adj_rib_out.input out_rib (Adj_rib_out.Push u)) tmp
+                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id) then 
+                    let () = Rib_log.info (fun m -> m "SEND refused wd %d ins %d" (List.length wd) (List.length ins)) in
+                    ()
+                  else
+                    let () = Rib_log.info (fun m -> m "SEND accepted wd %d ins %d" (List.length wd) (List.length ins)) in 
+                    List.iter (fun u -> Adj_rib_out.input out_rib (Adj_rib_out.Push u)) tmp
                 in
                 Dict.iter f t.out_ribs
               else ()
@@ -783,7 +785,6 @@ module Loc_rib = struct
               if Key_gen.kernel () then begin
                 if wd = [] && ins = [] then ()
                 else 
-                  let open Route_injector in
                   let open Route_mgr in
                   let krt_change = 
                     let remove = wd in
@@ -860,6 +861,23 @@ module Loc_rib = struct
             in
             t.db <- new_db;
             t.dict <- new_dict;
+
+            let () = 
+              if Key_gen.kernel () then begin
+                if wd = [] && ins = [] then ()
+                else 
+                  let open Route_mgr in
+                  let krt_change = 
+                    let remove = wd in
+                    let insert = 
+                      List.map (fun (p, r) -> (p, r.direct_gw)) ins
+                    in
+                    { insert; remove }
+                  in
+                  Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change)
+              end
+              else ()
+            in
 
             let () = 
               if wd <> [] then

@@ -8,6 +8,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
     mutable running: bool;
     remote_id: Ipaddr.V4.t;
     remote_asn: int32;
+    iBGP: bool;
     callback: Fsm.event -> unit;
     flow: Bgp_flow.t;
     stream: Bgp.t Lwt_stream.t;
@@ -73,7 +74,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
                 | hd::tl ->
                   match hd with
                   | Asn_seq l -> 
-                    if List.hd l <> t.remote_asn then Fsm.Update_msg_err Malformed_as_path
+                    if (not t.iBGP) && List.hd l <> t.remote_asn then Fsm.Update_msg_err Malformed_as_path
                     else Fsm.Update_msg u
                   | Asn_set l ->
                     if List.mem t.remote_asn l then Fsm.Update_msg_err Malformed_as_path
@@ -135,10 +136,10 @@ module Make (S: Mirage_stack_lwt.V4) = struct
       flow_reader_handle res
   ;;
 
-  let create remote_id remote_asn callback flow log =
+  let create remote_id remote_asn iBGP callback flow log =
     let stream, pf = Lwt_stream.create () in
     let t = { 
-      running = true; stream; pf; 
+      running = true; stream; pf; iBGP;
       remote_id; remote_asn; callback; 
       flow; log 
     } in
