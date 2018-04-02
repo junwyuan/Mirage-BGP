@@ -88,7 +88,7 @@ module Adj_rib_in = struct
     | Pull of Prefix.t list
     | Stop
   
-  type output = (Ipaddr.V4.Prefix.t list) * ((Ipaddr.V4.Prefix.t * Bgp.path_attrs * int) list)
+  type output = Ipaddr.V4.Prefix.t list * Ipaddr.V4.Prefix.t list * Bgp.path_attrs * int
 
   type t = {
     mutable running: bool;
@@ -96,7 +96,7 @@ module Adj_rib_in = struct
     remote_id: Ipaddr.V4.t;
     iBGP: bool;
     
-    callback: output -> unit;
+    callback: output list -> unit;
     
     mutable db: (ID.t * int) Prefix_map.t;
     mutable dict: path_attrs Dict.t;
@@ -121,6 +121,7 @@ module Adj_rib_in = struct
     | None -> 
       let attr_id = ID.create path_attrs in
 
+      (* Set weight *)
       let weight = 
         if ibgp then 
           match Bgp.find_local_pref path_attrs with
@@ -141,11 +142,11 @@ module Adj_rib_in = struct
         List.fold_left f (db_aft_wd, dict_aft_wd) nlri
       in
 
-      let insert = 
-        List.map (fun pfx -> (pfx, path_attrs, weight)) nlri
+      
+      let out = 
+        if out_wd = [] && nlri = [] then [] 
+        else [out_wd, nlri, path_attrs, weight] 
       in
-
-      let out = (out_wd, insert) in
 
       (db_aft_ins, dict_aft_ins, out)
     | Some filter ->
@@ -172,7 +173,10 @@ module Adj_rib_in = struct
         List.fold_left f (out_wd, [], db_aft_wd, dict_aft_wd) nlri
       in
 
-      let out = (wd, ins) in
+      let out_wd = if wd <> [] then [(wd, [], [], 0)] else [] in
+      let out_ins = List.map (fun (pfx, attrs, weight) -> ([], [pfx], attrs, weight)) ins in
+
+      let out = out_wd @ out_ins in
       (db_aft_ins, dict_aft_ins, out)
   ;;
 
@@ -185,23 +189,19 @@ module Adj_rib_in = struct
           t.db <- new_db;
           t.dict <- new_dict;
 
-          let (wd, ins) = out in
-          if wd = [] && ins = [] then 
-            handle_loop t
-          else 
-            (* Handle the callback before handling next input request. This guarantees update message ordering *)
-            let () = t.callback out in
-            handle_loop t
+          (* Handle the callback before handling next input request. This guarantees update message ordering *)
+          let () = t.callback out in
+          handle_loop t
         | Pull pfx_list -> 
           let f acc pfx =
             match Prefix_map.find_opt pfx t.db with
             | None -> acc
             | Some (attr_id, w) ->
               let path_attrs = Dict.find attr_id t.dict in
-              (pfx, path_attrs, w)::acc
+              ([], [pfx], path_attrs, w)::acc
           in
-          let ins = List.fold_left f [] pfx_list in
-          let () = t.callback ([], ins) in
+          let out = List.fold_left f [] pfx_list in
+          let () = t.callback out in
           handle_loop t
         | Stop -> 
           Lwt.return_unit
@@ -522,8 +522,8 @@ end
 
 module Loc_rib = struct
   type input = 
-    | Push of Ipaddr.V4.t * (Ipaddr.V4.Prefix.t list) * ((Ipaddr.V4.Prefix.t * Bgp.path_attrs * int) list)
-    | Resolved of (Ipaddr.V4.Prefix.t * Bgp.path_attrs * int * (Ipaddr.V4.t * int) option) list
+    | Push of Ipaddr.V4.t * (Adj_rib_in.output list)
+    | Resolved of Ipaddr.V4.Prefix.t list * ((Ipaddr.V4.t * int) option)
     | Sub of Ipaddr.V4.t * int32 * Adj_rib_in.t * Adj_rib_out.t
     | Unsub of Ipaddr.V4.t * unit Lwt_condition.t
     | Stop
@@ -557,7 +557,7 @@ module Loc_rib = struct
     mutable out_ribs: Adj_rib_out.t Dict.t;
     
     route_mgr: Route_mgr.t;
-    hold_queue: (Ipaddr.V4.t * (Ipaddr.V4.Prefix.t list)) Queue.t;
+    hold_queue: (Ipaddr.V4.t * (Ipaddr.V4.Prefix.t list) * Bgp.path_attrs * int) Queue.t;
     
     stream: input Lwt_stream.t;
     pf: input option -> unit;
@@ -637,7 +637,7 @@ module Loc_rib = struct
 
   
   (* This function is pure *)
-  let update_loc_db (peer_id, wd, ins) local_asn (peers: peer Ip_map.t) db dict =
+  let update_loc_db (peer_id, wd, ins, path_attrs, weight, resolved) local_asn (peers: peer Ip_map.t) db dict =
     (* Withdrawn from Loc-RIB *)
     let wd, db, dict =
       let loc_wd_pfx (wd, db, dict) pfx = 
@@ -653,13 +653,13 @@ module Loc_rib = struct
     in
     
     let wd, ins, db, dict =   
-      let loc_ins_pfx (wd, ins, db, dict) (pfx, path_attrs, weight, resolved_result) = 
+      let loc_ins_pfx (wd, ins, db, dict) pfx = 
         match List.mem pfx wd with
         | true -> 
           (* Do not install new attrs immediately after withdrawn *)
           (wd, ins, db, dict) 
         | false ->
-          match resolved_result with
+          match resolved with
           | None ->
             (* Unreachable *)
             (wd, ins, db, dict) 
@@ -726,24 +726,26 @@ module Loc_rib = struct
             let () = Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change) in
             Lwt.return_unit
           else Lwt.return_unit
-        | Push (remote_id, wd, ins) ->
+        | Push (remote_id, changes) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
-            let callback v = 
-              t.pf (Some (Resolved v))
+            let callback (l, v) = t.pf (Some (Resolved (l, v))) in
+            let f (wd, ins, attrs, weight) =
+              Queue.push (remote_id, wd, attrs, weight) t.hold_queue;
+              let nh = if ins <> [] then Bgp.find_next_hop attrs else Ipaddr.V4.localhost in
+              Route_mgr.input t.route_mgr (Route_mgr.Resolve (ins, nh, callback))
             in
-            Queue.push (remote_id, wd) t.hold_queue;
-            Route_mgr.input t.route_mgr (Route_mgr.Resolve (ins, callback));
+            List.iter f changes;
             handle_loop t
           end
-        | Resolved ins ->
-          let (remote_id, wd) = Queue.pop t.hold_queue in 
+        | Resolved (ins, v) ->
+          let (remote_id, wd, attrs, weight) = Queue.pop t.hold_queue in 
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
             let peer = Ip_map.find remote_id t.subs in
 
             let wd, ins, new_db, new_dict = 
-              update_loc_db (remote_id, wd, ins) t.local_asn t.subs t.db t.dict 
+              update_loc_db (remote_id, wd, ins, attrs, weight, v) t.local_asn t.subs t.db t.dict 
             in
 
             (* Send the updates: blocking *)
@@ -857,7 +859,7 @@ module Loc_rib = struct
             in
 
             let wd, ins, new_db, new_dict = 
-              update_loc_db (remote_id, wd, []) t.local_asn t.subs t.db t.dict 
+              update_loc_db (remote_id, wd, [], [], 0, None) t.local_asn t.subs t.db t.dict 
             in
             t.db <- new_db;
             t.dict <- new_dict;
@@ -951,7 +953,7 @@ module Loc_rib = struct
   let size t = Prefix_map.cardinal t.db
 
   let input t input = t.pf (Some input)
-  let push_update t (id, u, w) = input t (Push (id, u, w)) 
+  let push_update t (id, l) = input t (Push (id, l)) 
   
   let stop t = 
     input t Stop;

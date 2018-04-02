@@ -12,11 +12,11 @@ type krt_change = {
   remove: Ipaddr.V4.Prefix.t list;
 }
 
-type callback = (Ipaddr.V4.Prefix.t * Bgp.path_attrs * int * (Ipaddr.V4.t * int) option) list -> unit
+type callback = (Ipaddr.V4.Prefix.t list * (Ipaddr.V4.t * int) option) -> unit
 
 type input = 
   | Krt_change of krt_change
-  | Resolve of (Ipaddr.V4.Prefix.t * Bgp.path_attrs * int) list * callback
+  | Resolve of Ipaddr.V4.Prefix.t list * Ipaddr.V4.t * callback
   | Stop
 
 module Prefix_set = Set.Make(Ipaddr.V4.Prefix)
@@ -30,13 +30,16 @@ type t = {
 
 let rec handle_loop t =
   let route_mgr_handle = function
-    | Resolve (quests, cb) ->
-      let f (target_net, path_attrs, weight) =
-        let nh = Bgp.find_next_hop path_attrs in
-        (target_net, path_attrs, weight, Route_table.resolve_opt t.table target_net nh)
+    | Resolve (quests, nh, cb) ->
+      let f target_net =
+        (target_net, Route_table.resolve_opt t.table target_net nh)
       in
-      let result = List.map f quests in
-      let () = cb result in
+      let passed = List.filter (fun pfx -> resolvable t.table pfx nh) quests in
+      let v =
+        if passed = [] then None 
+        else resolve_opt t.table (List.hd passed) nh
+      in
+      let () = cb (passed, v) in
       handle_loop t
     | Krt_change change ->
       (* Remove *)

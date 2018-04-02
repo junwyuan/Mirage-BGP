@@ -278,7 +278,7 @@ let parse_from_file file_name =
   parse json_config
 ;;
 
-let () = 
+let test () = 
   Printexc.record_backtrace true;
   let config = parse_from_file "config/bgpd.json" in
   Printf.printf "%s \n" (config_to_string config)
