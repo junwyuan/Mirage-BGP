@@ -254,6 +254,7 @@ module Adj_rib_out = struct
     local_id: Ipaddr.V4.t;
     local_asn: int32;
     iBGP: bool;
+    internal_transit: bool;
 
     mutable callbacks: (update -> unit) Ip_map.t;
     mutable db: path_attrs Prefix_map.t;
@@ -495,7 +496,7 @@ module Adj_rib_out = struct
     else ()
   ;;
 
-  let create id local_id local_asn iBGP : t = 
+  let create id local_id local_asn iBGP transit : t = 
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let t = {
@@ -503,6 +504,7 @@ module Adj_rib_out = struct
       local_id; local_asn; iBGP;
       callbacks = Ip_map.empty; 
       db = Prefix_map.empty;
+      internal_transit = transit;
       stream; pf;
     } in
 
@@ -557,7 +559,7 @@ module Loc_rib = struct
     mutable out_ribs: Adj_rib_out.t Dict.t;
     
     route_mgr: Route_mgr.t;
-    hold_queue: (Ipaddr.V4.t * (Ipaddr.V4.Prefix.t list) * Bgp.path_attrs * int) Queue.t;
+    hold_queue: (Ipaddr.V4.t * (Ipaddr.V4.Prefix.t list) * (Ipaddr.V4.Prefix.t list) * Bgp.path_attrs * int) Queue.t;
     
     stream: input Lwt_stream.t;
     pf: input option -> unit;
@@ -637,7 +639,7 @@ module Loc_rib = struct
 
   
   (* This function is pure *)
-  let update_loc_db (peer_id, wd, ins, path_attrs, weight, resolved) local_asn (peers: peer Ip_map.t) db dict =
+  let update_loc_db (peer_id, wd, ins, origin_ins, path_attrs, weight, resolved) local_asn (peers: peer Ip_map.t) db dict =
     (* Withdrawn from Loc-RIB *)
     let wd, db, dict =
       let loc_wd_pfx (wd, db, dict) pfx = 
@@ -731,21 +733,21 @@ module Loc_rib = struct
           else begin
             let callback (l, v) = t.pf (Some (Resolved (l, v))) in
             let f (wd, ins, attrs, weight) =
-              Queue.push (remote_id, wd, attrs, weight) t.hold_queue;
+              Queue.push (remote_id, wd, ins, attrs, weight) t.hold_queue;
               let nh = if ins <> [] then Bgp.find_next_hop attrs else Ipaddr.V4.localhost in
               Route_mgr.input t.route_mgr (Route_mgr.Resolve (ins, nh, callback))
             in
             List.iter f changes;
             handle_loop t
           end
-        | Resolved (ins, v) ->
-          let (remote_id, wd, attrs, weight) = Queue.pop t.hold_queue in 
+        | Resolved (origin_ins, v) ->
+          let (remote_id, wd, ins, attrs, weight) = Queue.pop t.hold_queue in 
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
             let peer = Ip_map.find remote_id t.subs in
 
             let wd, ins, new_db, new_dict = 
-              update_loc_db (remote_id, wd, ins, attrs, weight, v) t.local_asn t.subs t.db t.dict 
+              update_loc_db (remote_id, wd, origin_ins, ins, attrs, weight, v) t.local_asn t.subs t.db t.dict 
             in
 
             (* Send the updates: blocking *)
@@ -761,11 +763,9 @@ module Loc_rib = struct
 
                 let open Adj_rib_out in
                 let f _ out_rib =
-                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id) then 
-                    let () = Rib_log.info (fun m -> m "SEND refused wd %d ins %d" (List.length wd) (List.length ins)) in
+                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id && out_rib.internal_transit = false) then 
                     ()
                   else
-                    let () = Rib_log.info (fun m -> m "SEND accepted wd %d ins %d" (List.length wd) (List.length ins)) in 
                     List.iter (fun u -> Adj_rib_out.input out_rib (Adj_rib_out.Push u)) tmp
                 in
                 Dict.iter f t.out_ribs
@@ -887,8 +887,10 @@ module Loc_rib = struct
 
                 let open Adj_rib_out in
                 let f _ out_rib =
-                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id) then ()
-                  else Adj_rib_out.input out_rib (Adj_rib_out.Push update)
+                  if (out_rib.iBGP && peer.iBGP) || (peer.out_rib.id = out_rib.id && out_rib.internal_transit = false) then 
+                    ()
+                  else 
+                    Adj_rib_out.input out_rib (Adj_rib_out.Push update)
                 in
                 Dict.iter f t.out_ribs
               else ()

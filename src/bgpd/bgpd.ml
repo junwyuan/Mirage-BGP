@@ -7,6 +7,7 @@ let ctl_src = Logs.Src.create "Ctl" ~doc:"CTL logging"
 module Ctl_log = (val Logs.src_log ctl_src : Logs.LOG)
 
 module Id_map = Map.Make(Ipaddr.V4)
+module Str_map = Map.Make(String)
 
 module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   module Router = Router.Make(S)
@@ -116,15 +117,36 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn route_mgr in
 
-
-    let c = ref 0 in
+    let c = ref 1000 in
+    let out_ribs = ref [] in
 
     (* Init shared data *)
     let init_t peer = 
-      let out_rib = Rib.Adj_rib_out.create !c config.local_id config.local_asn (config.local_asn = peer.remote_asn) in
-      c := !c + 1;
-      Router.create s loc_rib out_rib config peer 
+      match peer.peer_group with
+      | None -> 
+        let out_rib_id = !c in
+        let out_rib = Rib.Adj_rib_out.create out_rib_id 
+                                      config.local_id config.local_asn 
+                                      (config.local_asn = peer.remote_asn) 
+                                      (Key_gen.pg_transit ()) 
+        in
+        out_ribs := (out_rib_id, out_rib)::(!out_ribs);
+        c := (!c) + 1;
+        Router.create s loc_rib out_rib config peer 
+      | Some out_rib_id ->
+        match List.assoc_opt out_rib_id (!out_ribs) with
+        | None -> 
+          let out_rib = Rib.Adj_rib_out.create out_rib_id 
+                                    config.local_id config.local_asn 
+                                    (config.local_asn = peer.remote_asn) 
+                                    (Key_gen.pg_transit ()) 
+          in
+          out_ribs := (out_rib_id, out_rib)::(!out_ribs);
+          Router.create s loc_rib out_rib config peer 
+        | Some out_rib ->
+          Router.create s loc_rib out_rib config peer 
     in
+
     let t_list = List.map init_t config.peers in
     let peers = List.fold_left (fun acc (peer: Router.t) -> Id_map.add peer.remote_id peer acc) (Id_map.empty) t_list in
 

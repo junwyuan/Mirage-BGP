@@ -26,6 +26,11 @@ let remove =
   Key.(create "remove" Arg.(flag doc))
 ;;
 
+let peer_group_transit = 
+  let doc = Key.Arg.info ~doc:"Flag indicating whether transit within peer group is allowed." ["pg_transit"] in
+  Key.(create "pg_transit" Arg.(flag doc))
+;;
+
 let main = foreign 
   ~keys:[ 
     Key.abstract config;
@@ -33,6 +38,7 @@ let main = foreign
     Key.abstract runtime;
     Key.abstract kernel;
     Key.abstract remove;
+    Key.abstract peer_group_transit;
   ] 
   "Bgpd.Main" 
   (console @-> stackv4 @-> job)
