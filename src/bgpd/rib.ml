@@ -298,22 +298,22 @@ module Adj_rib_out = struct
 
           (* Construct the db of updates in reverse time order *)
           let wd_set, ins_set, db = build_db rev_updates in
-          (* let aux = Prefix_set.inter wd_set t.past_routes in *)
-          let wd = Prefix_set.elements wd_set in
+          let aux = Prefix_set.inter wd_set t.past_routes in
+          let wd = Prefix_set.elements aux in
           let updates = gen_updates wd (ID_map.bindings db) in
           
           (* Decision choice: must send all previous updates before handling next batch. *)
           let () = List.iter (fun u -> t.callback u) updates in
 
           (* Update data structure *)
-          (* let new_routes = Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set in *)
-          (* let new_t = set_past_routes new_routes t in *)
+          let new_routes = Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set in
+          let new_t = set_past_routes new_routes t in
 
           (* Minimal advertisement time interval *)
           (* OS.Time.sleep_ns (Duration.of_ms 0)
           >>= fun () -> *)
 
-          handle_loop t
+          handle_loop new_t
     in
 
     if not t.running then 
