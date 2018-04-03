@@ -129,6 +129,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                       config.local_id config.local_asn 
                                       (config.local_asn = peer.remote_asn) 
                                       (Key_gen.pg_transit ()) 
+                                      None false
         in
         out_ribs := (out_rib_id, out_rib)::(!out_ribs);
         c := (!c) + 1;
@@ -140,6 +141,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                     config.local_id config.local_asn 
                                     (config.local_asn = peer.remote_asn) 
                                     (Key_gen.pg_transit ()) 
+                                    None true
           in
           out_ribs := (out_rib_id, out_rib)::(!out_ribs);
           Router.create s loc_rib out_rib config peer 

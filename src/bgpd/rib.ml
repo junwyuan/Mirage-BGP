@@ -255,6 +255,8 @@ module Adj_rib_out = struct
     local_asn: int32;
     iBGP: bool;
     internal_transit: bool;
+    filter_opt: Filter.route_map option;
+    peer_group: bool;
 
     mutable callbacks: (update -> unit) Ip_map.t;
     mutable db: path_attrs Prefix_map.t;
@@ -386,25 +388,32 @@ module Adj_rib_out = struct
     (* Construct the db of updates in reverse time order *)
     let wd_set, ins_set, ins_and_attrs = build_db rev_updates in
     
-    let new_db, wd = 
-      let tmp = Prefix_set.elements wd_set in
-      let f (db, wd) p = 
-        match Prefix_map.find_opt p db with
-        | None -> (db, wd)
-        | Some _ -> (Prefix_map.remove p db, p::wd)
+    let wd = if t.peer_group then begin
+      let new_db, wd = 
+        let tmp = Prefix_set.elements wd_set in
+        let f (db, wd) p = 
+          match Prefix_map.find_opt p db with
+          | None -> (db, wd)
+          | Some _ -> (Prefix_map.remove p db, p::wd)
+        in
+        List.fold_left f (t.db, []) tmp
       in
-      List.fold_left f (t.db, []) tmp
-    in
-    t.db <- new_db;
+      t.db <- new_db;
 
-    let new_db =
-      let f _ (attrs, ins) acc =
-        let g acc p = Prefix_map.add p attrs acc in
-        List.fold_left g acc ins
+      let new_db =
+        let f _ (attrs, ins) acc =
+          let g acc p = Prefix_map.add p attrs acc in
+          List.fold_left g acc ins
+        in
+        ID_map.fold f ins_and_attrs t.db
       in
-      ID_map.fold f ins_and_attrs t.db
+      t.db <- new_db; 
+
+      wd
+    end 
+    else 
+      Prefix_set.elements wd_set
     in
-    t.db <- new_db; 
 
     let updates = gen_updates wd (ID_map.bindings ins_and_attrs) in
 
@@ -496,7 +505,7 @@ module Adj_rib_out = struct
     else ()
   ;;
 
-  let create id local_id local_asn iBGP transit : t = 
+  let create id local_id local_asn iBGP transit filter_opt peer_group : t = 
     (* Initiate data structure *)
     let stream, pf = Lwt_stream.create () in
     let t = {
@@ -506,6 +515,8 @@ module Adj_rib_out = struct
       db = Prefix_map.empty;
       internal_transit = transit;
       stream; pf;
+      filter_opt;
+      peer_group;
     } in
 
     (* Spawn handling loop *)
@@ -525,7 +536,7 @@ end
 module Loc_rib = struct
   type input = 
     | Push of Ipaddr.V4.t * (Adj_rib_in.output list)
-    | Resolved of Ipaddr.V4.Prefix.t list * ((Ipaddr.V4.t * int) option)
+    | Resolved of (Ipaddr.V4.Prefix.t * ((Ipaddr.V4.t * int) option)) list
     | Sub of Ipaddr.V4.t * int32 * Adj_rib_in.t * Adj_rib_out.t
     | Unsub of Ipaddr.V4.t * unit Lwt_condition.t
     | Stop
@@ -639,7 +650,7 @@ module Loc_rib = struct
 
   
   (* This function is pure *)
-  let update_loc_db (peer_id, wd, ins, path_attrs, weight, resolved) local_asn (peers: peer Ip_map.t) db dict =
+  let update_loc_db (peer_id, wd, ins_and_resolved, path_attrs, weight) local_asn (peers: peer Ip_map.t) db dict =
     (* Withdrawn from Loc-RIB *)
     let wd, db, dict =
       let loc_wd_pfx (wd, db, dict) pfx = 
@@ -655,16 +666,23 @@ module Loc_rib = struct
     in
     
     let wd, ins, db, dict =   
-      let loc_ins_pfx (wd, ins, db, dict) pfx = 
+      let loc_ins_pfx (wd, ins, db, dict) (pfx, resolved) = 
         match List.mem pfx wd with
         | true -> 
           (* Do not install new attrs immediately after withdrawn *)
           (wd, ins, db, dict) 
         | false ->
           match resolved with
-          | None ->
+          | None -> begin
             (* Unreachable *)
-            (wd, ins, db, dict) 
+            match Prefix_map.find_opt pfx db with
+            | None -> (wd, ins, db, dict) 
+            | Some rte_id ->
+              let rte = Dict.find rte_id dict in
+              if rte.remote_id = peer_id then 
+                (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove rte_id dict) 
+              else (wd, ins, db, dict)
+          end
           | Some (direct_gw, igp_metric) ->            
             match is_aspath_loop local_asn (find_as_path path_attrs) with
             | true ->
@@ -706,7 +724,7 @@ module Loc_rib = struct
                   (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove s_rte_id dict)
                 else wd, ins, db, dict
         in
-        List.fold_left loc_ins_pfx (wd, [], db, dict) ins
+        List.fold_left loc_ins_pfx (wd, [], db, dict) ins_and_resolved
       in
 
       (wd, ins, db, dict)
@@ -731,7 +749,7 @@ module Loc_rib = struct
         | Push (remote_id, changes) ->
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
-            let callback (l, v) = t.pf (Some (Resolved (l, v))) in
+            let callback l = t.pf (Some (Resolved l)) in
             let f (wd, ins, attrs, weight) =
               Queue.push (remote_id, wd, ins, attrs, weight) t.hold_queue;
               let nh = if ins <> [] then Bgp.find_next_hop attrs else Ipaddr.V4.localhost in
@@ -740,14 +758,14 @@ module Loc_rib = struct
             List.iter f changes;
             handle_loop t
           end
-        | Resolved (ins, v) ->
+        | Resolved (ins_and_resolved) ->
           let (remote_id, wd, _, attrs, weight) = Queue.pop t.hold_queue in 
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
             let peer = Ip_map.find remote_id t.subs in
 
             let wd, ins, new_db, new_dict = 
-              update_loc_db (remote_id, wd, ins, attrs, weight, v) t.local_asn t.subs t.db t.dict 
+              update_loc_db (remote_id, wd, ins_and_resolved, attrs, weight) t.local_asn t.subs t.db t.dict 
             in
 
             (* Send the updates: blocking *)
@@ -859,7 +877,7 @@ module Loc_rib = struct
             in
 
             let wd, ins, new_db, new_dict = 
-              update_loc_db (remote_id, wd, [], [], 0, None) t.local_asn t.subs t.db t.dict 
+              update_loc_db (remote_id, wd, [], [], 0) t.local_asn t.subs t.db t.dict 
             in
             t.db <- new_db;
             t.dict <- new_dict;
