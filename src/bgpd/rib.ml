@@ -9,6 +9,20 @@ let option_get = function
 ;;
 
 
+let classify list compare = 
+  if list = [] then []
+  else
+    let sorted_by_val = List.sort (fun (x1, y1) (x2, y2) -> compare y1 y2) list in
+    let rec lift (groups, curr_group, prev_v) = function
+      | [] -> (curr_group, prev_v)::groups
+      | (x, y)::tl ->
+        if y = prev_v then lift (groups, x::curr_group, prev_v) tl
+        else lift ((curr_group, prev_v)::groups, [x], y) tl
+    in
+    let _, prev_v = List.hd sorted_by_val in
+    lift ([], [], prev_v) sorted_by_val
+;;
+
 
 (* Design choices: To avoid dependency loop, I allow Loc-RIB to depend on In-RIB and out-RIB. *)
 (* This does cost some inflxibility as the form of callback is fixed. *)
@@ -185,10 +199,10 @@ module Adj_rib_in = struct
               let attr_id = ID.create attrs in
               match Prefix_map.find_opt pfx db with
               | None ->
-                let tmp = (pfx, attrs, attr_id, weight) in
+                let tmp = (pfx, (attrs, attr_id, weight)) in
                 (wd, tmp::ins, Prefix_map.add pfx (attr_id, weight) db, Dict.add attr_id path_attrs dict)
               | Some (stored, _w) ->
-                let tmp = (pfx, attrs, attr_id, weight) in
+                let tmp = (pfx, (attrs, attr_id, weight)) in
                 let new_dict = Dict.add attr_id path_attrs dict |> Dict.remove stored in
                 (wd, tmp::ins, Prefix_map.add pfx (attr_id, weight) db, new_dict)
           in
@@ -196,8 +210,18 @@ module Adj_rib_in = struct
         in
 
         let out_wd = if wd <> [] then [(wd, [], [], 0, 0)] else [] in
-        let out_ins = List.map (fun (pfx, attrs, attr_id, weight) -> ([], [pfx], attrs, attr_id, weight)) ins in
 
+        (* Regroup *)
+        let f (_, id1, w1) (_, id2, w2) = 
+          let x = (id1, w1) in
+          let y = (id2, w2) in
+          if x > y then 1 
+          else if x = y then 0
+          else -1 
+        in
+        let groups = classify ins f in
+
+        let out_ins = List.map (fun (ins, (attrs, attr_id, weight)) -> ([], ins, attrs, attr_id, weight)) groups in
         let out = out_wd @ out_ins in
         (db_aft_ins, dict_aft_ins, out)
     end
@@ -211,7 +235,7 @@ module Adj_rib_in = struct
           let new_db, new_dict, out = update_in_db update t.local_asn t.filter t.iBGP t.db t.dict in
           t.db <- new_db;
           t.dict <- new_dict;
-
+          
           (* Handle the callback before handling next input request. This guarantees update message ordering *)
           let () = t.callback out in
           handle_loop t
@@ -887,21 +911,7 @@ module Loc_rib = struct
                 match Dict.mem out_rib.id t.out_ribs with
                 | false ->
                   (* Sync *)
-                  let classify list = 
-                    if list = [] then []
-                    else
-                      let sorted_by_val = List.sort (fun (x1, y1) (x2, y2) -> y1 - y2) list in
-                      let rec lift (groups, curr_group, prev_v) = function
-                        | [] -> (curr_group, prev_v)::groups
-                        | (x, y)::tl ->
-                          if y = prev_v then lift (groups, x::curr_group, prev_v) tl
-                          else lift ((curr_group, prev_v)::groups, [x], y) tl
-                      in
-                      let _, prev_v = List.hd sorted_by_val in
-                      lift ([], [], prev_v) sorted_by_val
-                  in
-
-                  let groups = classify (Prefix_map.bindings t.db) in
+                  let groups = classify (Prefix_map.bindings t.db) (fun a b -> a - b) in
 
                   let f (ins, rte_id) =
                     let rte = Dict.find rte_id t.dict in
