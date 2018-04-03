@@ -68,10 +68,9 @@ module Make (S: Mirage_stack_lwt.V4) = struct
                 (* Do not perform attribute check if no route is advertised *)
                 Fsm.Update_msg u
               | _ ->
-                match find_aspath u.path_attrs with
-                | None -> Fsm.Update_msg_err (Missing_wellknown_attribute 2)
-                | Some [] -> Fsm.Update_msg_err Malformed_as_path
-                | Some (hd::tl) ->
+                match find_as_path u.path_attrs with
+                | [] -> Fsm.Update_msg_err Malformed_as_path
+                | (hd::tl) ->
                   match hd with
                   | Asn_seq l -> 
                     if List.hd l <> t.remote_asn then Fsm.Update_msg_err Malformed_as_path

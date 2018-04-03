@@ -298,22 +298,22 @@ module Adj_rib_out = struct
 
           (* Construct the db of updates in reverse time order *)
           let wd_set, ins_set, db = build_db rev_updates in
-          let aux = Prefix_set.inter wd_set t.past_routes in
-          let wd = Prefix_set.elements aux in
+          (* let aux = Prefix_set.inter wd_set t.past_routes in *)
+          let wd = Prefix_set.elements wd_set in
           let updates = gen_updates wd (ID_map.bindings db) in
           
           (* Decision choice: must send all previous updates before handling next batch. *)
           let () = List.iter (fun u -> t.callback u) updates in
 
           (* Update data structure *)
-          let new_routes = Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set in
-          let new_t = set_past_routes new_routes t in
+          (* let new_routes = Prefix_set.union (Prefix_set.diff t.past_routes aux) ins_set in *)
+          (* let new_t = set_past_routes new_routes t in *)
 
           (* Minimal advertisement time interval *)
           (* OS.Time.sleep_ns (Duration.of_ms 0)
           >>= fun () -> *)
 
-          handle_loop new_t
+          handle_loop t
     in
 
     if not t.running then 
@@ -445,34 +445,10 @@ module Loc_rib = struct
     List.fold_right f_update_nexthop attrs []
   ;;
 
-  let find_origin path_attrs = 
-    match Bgp.find_origin path_attrs with
-    | None ->
-      Rib_log.err (fun m -> m "MISSING ORIGIN");
-      failwith "MISSING ORIGIN"
-    | Some v -> v
-  ;;
-
-  let find_aspath path_attrs = 
-    match Bgp.find_aspath path_attrs with
-    | None -> 
-      Rib_log.err (fun m -> m "MISSING AS PATH");
-      failwith "MISSING ASPATH"
-    | Some v -> v
-  ;;
-
-  let find_next_hop attrs = 
-    match Bgp.find_next_hop attrs with
-    | None -> 
-      Rib_log.err (fun m -> m "MISSING NEXTHOP");
-      failwith "MISSING NEXTHOP"
-    | Some v -> v
-  ;;
-
   (* Output true: 1st argument is more preferable, output false: 2nd argument is more preferable *)
   let tie_break attrs1 attrs2 = 
-    let as_path_1 = find_aspath attrs1 in
-    let as_path_2 = find_aspath attrs2 in
+    let as_path_1 = find_as_path attrs1 in
+    let as_path_2 = find_as_path attrs2 in
     if (get_aspath_len as_path_1 < get_aspath_len as_path_2) then true
     else if (get_aspath_len as_path_1 > get_aspath_len as_path_2) then false
     else begin
@@ -505,7 +481,7 @@ module Loc_rib = struct
     in
 
     (* If the advertised path is looping, don't install any new routes OR no advertised route *)
-    if update.nlri = [] || is_aspath_loop local_asn (find_aspath update.path_attrs) then begin
+    if update.nlri = [] || is_aspath_loop local_asn (find_as_path update.path_attrs) then begin
       let out_update = { withdrawn = wd; path_attrs = []; nlri = [] } in
       (db, out_update)
     end else
