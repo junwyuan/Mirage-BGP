@@ -380,7 +380,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
         let callback out = 
           Rib.Loc_rib.push_update t.loc_rib (t.remote_id, out) 
         in
-        Rib.Adj_rib_in.create t.remote_id t.iBGP callback t.inbound_filter
+        Rib.Adj_rib_in.create t.local_asn t.remote_id t.iBGP callback t.inbound_filter
       in
       t.in_rib <- Some in_rib;
 
