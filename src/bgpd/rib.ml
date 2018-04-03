@@ -639,7 +639,7 @@ module Loc_rib = struct
 
   
   (* This function is pure *)
-  let update_loc_db (peer_id, wd, ins, origin_ins, path_attrs, weight, resolved) local_asn (peers: peer Ip_map.t) db dict =
+  let update_loc_db (peer_id, wd, ins, path_attrs, weight, resolved) local_asn (peers: peer Ip_map.t) db dict =
     (* Withdrawn from Loc-RIB *)
     let wd, db, dict =
       let loc_wd_pfx (wd, db, dict) pfx = 
@@ -740,14 +740,14 @@ module Loc_rib = struct
             List.iter f changes;
             handle_loop t
           end
-        | Resolved (origin_ins, v) ->
-          let (remote_id, wd, ins, attrs, weight) = Queue.pop t.hold_queue in 
+        | Resolved (ins, v) ->
+          let (remote_id, wd, _, attrs, weight) = Queue.pop t.hold_queue in 
           if not (Ip_map.mem remote_id t.subs) then handle_loop t
           else begin
             let peer = Ip_map.find remote_id t.subs in
 
             let wd, ins, new_db, new_dict = 
-              update_loc_db (remote_id, wd, origin_ins, ins, attrs, weight, v) t.local_asn t.subs t.db t.dict 
+              update_loc_db (remote_id, wd, ins, attrs, weight, v) t.local_asn t.subs t.db t.dict 
             in
 
             (* Send the updates: blocking *)
