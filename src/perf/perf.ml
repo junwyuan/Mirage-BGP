@@ -76,7 +76,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
                   assert false
   ;;
 
-  let close_session flow = 
+  let close_session flow (module Log : Logs.LOG) = 
+    Log.debug (fun m -> m "Send message: %s" (to_string (Notification Cease)));
     Bgp_flow.write flow (Bgp.Notification Bgp.Cease)
     >>= function
     | Error _ -> fail "tcp write fail"
@@ -84,11 +85,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       Bgp_flow.close flow
   ;;
 
-  let plain_feed ?(cluster_size=500) ~total ~seed ~flow ~path_attrs (module Log : Logs.LOG) =
+  let plain_feed ?(num_pfx_per_msg=500) ~total_num_msg ~seed ~flow ~path_attrs (module Log : Logs.LOG) =
     let rec loop count seed = 
-      if count = total then Lwt.return seed
+      if count >= total_num_msg then Lwt.return seed
       else 
-        let nlri, n_seed = Pfx_gen.gen seed cluster_size in
+        let nlri, n_seed = Pfx_gen.gen seed num_pfx_per_msg in
         let msg = Update { withdrawn=[]; path_attrs; nlri } in
 
         Log.debug (fun m -> m "Feed %d: %s" count (Bgp.to_string msg));
@@ -99,17 +100,17 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           Log.err (fun m -> m "fail to write");
           Lwt.fail_with "fail to write"
         | Ok () -> 
-          loop (count + cluster_size) n_seed
+          loop (count + 1) n_seed
     in
     loop 0 seed
   ;;
 
 
-  let plain_feed_withdrawl ?(cluster_size=500) ~total ~seed ~flow (module Log : Logs.LOG) =
+  let plain_feed_withdrawl ?(num_pfx_per_msg=500) ~total_num_msg ~seed ~flow (module Log : Logs.LOG) =
     let rec loop count seed = 
-      if count = total then Lwt.return seed
+      if count >= total_num_msg then Lwt.return seed
       else
-        let withdrawn, n_seed = Pfx_gen.gen seed cluster_size in
+        let withdrawn, n_seed = Pfx_gen.gen seed num_pfx_per_msg in
         let msg = Update { withdrawn; path_attrs = []; nlri= [] } in
 
         Log.debug (fun m -> m "Feed %d: %s" count (Bgp.to_string msg));
@@ -120,7 +121,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           Log.err (fun m -> m "fail to write");
           Lwt.fail_with "fail to write"
         | Ok () -> 
-          loop (count + cluster_size) n_seed
+          loop (count + 1) n_seed
     in
     loop 0 seed
   ;;
@@ -144,7 +145,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop ()
   ;;
 
-  let read_loop_count_nlri flow total (module Log : Logs.LOG) =
+  let read_loop_count_nlri flow total_num_pfx (module Log : Logs.LOG) =
     let rec loop count =
       match%lwt Bgp_flow.read flow with
       | Ok msg -> 
@@ -155,7 +156,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let new_count = count + List.length nlri in
           Log.debug (fun m -> m "Insert count %d" new_count);
           
-          if new_count = total then Lwt.return_unit else loop new_count
+          if new_count = total_num_pfx then Lwt.return_unit else loop new_count
         | Notification _ ->
           Log.err (fun m -> m "Rec NOTIF: %s" (to_string msg));
           Lwt.return_unit
@@ -172,7 +173,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop 0
   ;;
 
-  let read_loop_count_withdrawn flow total (module Log : Logs.LOG) =
+  let read_loop_count_withdrawn flow total_num_pfx (module Log : Logs.LOG) =
     let rec loop count =
       match%lwt Bgp_flow.read flow with
       | Ok msg -> 
@@ -183,7 +184,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
           let new_count = count + List.length withdrawn in
           Log.debug (fun m -> m "Withdrawl count %d" new_count);
           
-          if new_count = total then Lwt.return_unit else loop new_count
+          if new_count = total_num_pfx then Lwt.return_unit else loop new_count
         | Notification _ ->
           Log.err (fun m -> m "Rec NOTIF: %s" (to_string msg));
           Lwt.return_unit
@@ -215,8 +216,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop ()
   ;;
 
-  let phased_insert ?(cluster_size=500) ?(stage_size=100000) ~phase_name ~total ~seed ~path_attrs ~flow1 ~flow2 (module Log1 : Logs.LOG) (module Log2 : Logs.LOG) =
-    let num_stages = total / stage_size in
+  let phased_insert ?(num_pfx_per_msg=500) ?(num_pfx_per_round=100000) ~phase_name ~total_num_pfx ~seed ~path_attrs ~flow1 ~flow2 (module Log1 : Logs.LOG) (module Log2 : Logs.LOG) =
+    let num_stages = total_num_pfx / num_pfx_per_round in
     let rec loop stage_count seed time = 
       if stage_count = num_stages then begin
         Log1.info (fun m -> m "%s phase total: %.4fs" phase_name time);
@@ -225,11 +226,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       else begin
         (* Latency test *)
         (* Listen speaker2 *)
-        let rec_rloop = read_loop_count_nlri flow2 cluster_size (module Log2) in
+        let rec_rloop = read_loop_count_nlri flow2 num_pfx_per_msg (module Log2) in
         (* Ping *)
         let start_time = Unix.gettimeofday () in
         
-        plain_feed ~total:cluster_size ~flow:flow1 ~seed ~path_attrs (module Log1)
+        plain_feed ~num_pfx_per_msg ~total_num_msg:1 ~flow:flow1 ~seed ~path_attrs (module Log1)
         >>= fun n_seed ->
         (* Speaker2 checks on receiving all updates *)
         rec_rloop
@@ -241,18 +242,18 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
         (* Throughput test *)
         (* Listen speaker2 *)
-        let rec_rloop = read_loop_count_nlri flow2 (stage_size - cluster_size) (module Log2) in
+        let rec_rloop = read_loop_count_nlri flow2 (num_pfx_per_round - num_pfx_per_msg) (module Log2) in
         (* start feeding speaker1 *)
         let start_time = Unix.gettimeofday () in
-        plain_feed ~total:(stage_size - cluster_size) ~flow:flow1 ~seed:n_seed ~path_attrs (module Log1)
+        plain_feed ~num_pfx_per_msg ~total_num_msg:(num_pfx_per_round / num_pfx_per_msg - 1) ~flow:flow1 ~seed:n_seed ~path_attrs (module Log1)
         >>= fun n_seed ->
         (* Speaker2 checks on receiving all updates *)
         rec_rloop 
         >>= fun () ->
         let insert_time = Unix.gettimeofday () -. start_time in
 
-        Log1.info (fun m -> m "%s phase stage %d, RIB size %d: latency: %.4fs, total: %.4fs" 
-                            phase_name stage_count (stage_count * stage_size) latency insert_time);
+        Mon_log.info (fun m -> m "%s phase stage %d, RIB size %d: latency: %.4f s, total: %.4f s" 
+                            phase_name stage_count (stage_count * num_pfx_per_round) latency insert_time);
         
         (* Cool down *)
         OS.Time.sleep_ns (Duration.of_sec 1)
@@ -264,8 +265,8 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop 0 seed 0.
   ;;
 
-  let phased_withdrawn ?(cluster_size=500) ?(stage_size=100000) ~total ~seed ~flow1 ~flow2 (module Log1 : Logs.LOG) (module Log2 : Logs.LOG) =
-    let num_stages = total / stage_size in
+  let phased_withdrawn ?(num_pfx_per_msg=500) ?(num_pfx_per_round=100000) ~total_num_pfx ~seed ~flow1 ~flow2 (module Log1 : Logs.LOG) (module Log2 : Logs.LOG) =
+    let num_stages = total_num_pfx / num_pfx_per_round in
     let rec loop stage_count seed time = 
       if stage_count = num_stages then begin
         Log1.info (fun m -> m "Withdrawn phase total: %.4fs" time);
@@ -274,11 +275,11 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       else begin
         (* Latency test *)
         (* Listen speaker2 *)
-        let rec_rloop = read_loop_count_withdrawn flow2 cluster_size (module Log2) in
+        let rec_rloop = read_loop_count_withdrawn flow2 num_pfx_per_msg (module Log2) in
         (* Ping *)
         let start_time = Unix.gettimeofday () in
         
-        plain_feed_withdrawl ~total:cluster_size ~flow:flow1 ~seed (module Log1)
+        plain_feed_withdrawl ~num_pfx_per_msg:num_pfx_per_msg ~total_num_msg:1 ~flow:flow1 ~seed (module Log1)
         >>= fun n_seed ->
         (* Speaker2 checks on receiving all updates *)
         rec_rloop
@@ -290,18 +291,18 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
         (* Throughput test *)
         (* Listen speaker2 *)
-        let rec_rloop = read_loop_count_withdrawn flow2 (stage_size - cluster_size) (module Log2) in
+        let rec_rloop = read_loop_count_withdrawn flow2 (num_pfx_per_round - num_pfx_per_msg) (module Log2) in
         (* start feeding speaker1 *)
         let start_time = Unix.gettimeofday () in
-        plain_feed_withdrawl ~total:(stage_size - cluster_size) ~flow:flow1 ~seed:n_seed (module Log1)
+        plain_feed_withdrawl ~total_num_msg:(num_pfx_per_round / num_pfx_per_msg - 1) ~num_pfx_per_msg ~flow:flow1 ~seed:n_seed (module Log1)
         >>= fun n_seed ->
         (* Speaker2 checks on receiving all updates *)
         rec_rloop 
         >>= fun () ->
         let wd_time = Unix.gettimeofday () -. start_time in
 
-        Log1.info (fun m -> m "Withdrawn phase stage %d, RIB size %d: latency: %.4fs, total: %.4fs" 
-                              stage_count (stage_count * stage_size) latency wd_time);
+        Mon_log.info (fun m -> m "Withdrawn phase stage %d, RIB size %d: latency: %.4f s, total: %.4f s" 
+                              stage_count (stage_count * num_pfx_per_round) latency wd_time);
         
         (* Cool down *)
         OS.Time.sleep_ns (Duration.of_sec 1)
@@ -313,7 +314,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
     loop 0 seed 0.
   ;;
   
-  let start_perf_test ?(cluster_size=500) ?(stage_size=50000) ~s ~total ~seed ~(config:Config_parser.config) =
+  let start_perf_test ?(num_pfx_per_msg=500) ?(num_pfx_per_round=50000) ~s ~total_num_pfx ~seed ~(config:Config_parser.config) =
     let peer1 = List.nth config.relays 0 in
     let peer2 = List.nth config.relays 1 in
 
@@ -340,7 +341,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       let as_path = As_path [Asn_seq [peer1.local_asn; 2000_l; 2001_l; 2002_l; 2003_l]] in
       [origin; next_hop; as_path]
     in
-    phased_insert ~stage_size ~cluster_size ~seed:(Pfx_gen.default_seed) ~total ~flow1 ~flow2 
+    phased_insert ~num_pfx_per_round ~num_pfx_per_msg ~seed:(Pfx_gen.default_seed) ~total_num_pfx ~flow1 ~flow2 
                   ~path_attrs (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) ~phase_name:"Insert"
     >>= fun n_seed ->
 
@@ -354,7 +355,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
         [origin; next_hop; as_path]
       in
       let start_time = Unix.gettimeofday () in
-      plain_feed  ~cluster_size ~total:stage_size ~seed:Pfx_gen.default_seed ~path_attrs
+      plain_feed  ~num_pfx_per_msg ~total_num_msg:(num_pfx_per_round / num_pfx_per_msg) ~seed:Pfx_gen.default_seed ~path_attrs
                   ~flow:flow2 (module Sp2_log : Logs.LOG)
       >>= fun _ ->
       let update = {
@@ -368,7 +369,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       | Ok () -> 
         rloop
         >>= fun () ->
-        Mon_log.info (fun m -> m "unchange phase stage 0, RIB size %d: %.4fs" total (Unix.gettimeofday () -. start_time));
+        Mon_log.info (fun m -> m "unchange phase stage 0, RIB size %d: %.4f s" total_num_pfx (Unix.gettimeofday () -. start_time));
         Lwt.return_unit
     in
     unchange_phase ()
@@ -382,15 +383,15 @@ module Main (S: Mirage_stack_lwt.V4) = struct
       let as_path = As_path [Asn_seq [peer1.local_asn; 2004_l; 2005_l; 2006_l]] in
       [origin; next_hop; as_path]
     in
-    phased_insert ~stage_size ~cluster_size ~path_attrs
-                  ~seed:(Pfx_gen.default_seed) ~total:100000 
+    phased_insert ~num_pfx_per_round ~num_pfx_per_msg ~path_attrs
+                  ~seed:(Pfx_gen.default_seed) ~total_num_pfx:(total_num_pfx/2) 
                   ~flow1 ~flow2 
                   (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG) 
                   ~phase_name:"replace"
     >>= fun _ ->
 
     (* Withdrawn phase *)
-    phased_withdrawn  ~stage_size ~cluster_size  ~total:100000 
+    phased_withdrawn  ~num_pfx_per_round ~num_pfx_per_msg  ~total_num_pfx:(total_num_pfx/2) 
                       ~seed:(Pfx_gen.default_seed) 
                       ~flow1 ~flow2
                       (module Sp1_log : Logs.LOG) (module Sp2_log : Logs.LOG)
@@ -399,7 +400,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     (* Link flap phase *)
     (* Speaker2 starts another listen *)
-    let rec_rloop2 = read_loop_count_withdrawn flow2 (total - 100000) (module Sp2_log) in
+    let rec_rloop2 = read_loop_count_withdrawn flow2 (total_num_pfx / 2) (module Sp2_log) in
     
     (* Buffer time for installation and processing overrun *)
     let buffer_time = 5 in
@@ -408,16 +409,16 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
     (* Close flows *)
     let start_time = Unix.gettimeofday () in
-    close_session flow1
+    close_session flow1 (module Sp1_log)
     >>= fun () ->
 
     (* Speaker 2 wait for all withdrawl *)
     rec_rloop2
     >>= fun () ->
-    Mon_log.info (fun m -> m "link flap phase stage 0, RIB size %d: %.4fs" 
-                    (total - 100000) (Unix.gettimeofday () -. start_time));
+    Mon_log.info (fun m -> m "link flap phase stage 0, RIB size %d: %.4f s" 
+                    (total_num_pfx) (Unix.gettimeofday () -. start_time));
     (* Clean up *)
-    close_session flow2
+    close_session flow2 (module Sp2_log)
     >>= fun () ->
 
     Lwt.return seed
@@ -426,10 +427,10 @@ module Main (S: Mirage_stack_lwt.V4) = struct
   
   let start s =
     let config = Config_parser.parse_from_file (Key_gen.config ()) in
-    let total = 200000 in
+    let total_num_pfx = 200000 in
     let seed = Pfx_gen.default_seed in
     Mon_log.info (fun m -> m "Test starts.");
-    start_perf_test ~cluster_size:500 ~stage_size:50000 ~s ~total ~seed ~config
+    start_perf_test ~num_pfx_per_msg:500 ~num_pfx_per_round:50000 ~s ~total_num_pfx ~seed ~config
     >>= fun new_seed ->
     Mon_log.info (fun m -> m "Test finishes.");
     Lwt.return_unit
