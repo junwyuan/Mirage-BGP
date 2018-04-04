@@ -1,0 +1,67 @@
+{
+  "local_asn": 10,
+  "local_id": "172.19.0.3",
+  "local_port": 179,
+
+  "network": [
+    "172.10.0.0/16"
+  ],
+
+  "prefix_list 1": [
+    "10.10.0.0/16"
+  ],
+
+  "prefix_list 2": [
+    "20.20.0.0/16"
+  ],
+
+  "route_map map1": [
+    {
+      "order": 10,
+      "permit": false,
+      "conditions": [
+        "prefix_list 1"
+      ],
+      "actions": []
+    },
+    {
+      "order": 20,
+      "permit": true,
+      "conditions": [],
+      "actions": []
+    },
+    {
+      "order": 15,
+      "permit": true,
+      "conditions": [
+        "prefix_list 2"        
+      ],
+      "actions": [
+        "set_weight 20"
+      ]
+    }
+  ],
+
+  "neighbor 1": {
+    "remote_asn": 4,
+    "remote_id": "172.19.10.3",
+    "inbound_filter": "route_map map1"
+  },
+  
+  "neighbor 2": {
+    "remote_asn": 5,
+    "remote_id": "172.19.10.4"
+  },
+
+  "neighbor 3": {
+    "remote_asn": 10,
+    "remote_id": "172.19.11.3",
+    "peer_group": 1
+  },
+
+  "neighbor 4": {
+    "remote_asn": 10,
+    "remote_id": "172.19.11.4",
+    "peer_group": 1
+  }
+}

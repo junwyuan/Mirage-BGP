@@ -142,89 +142,91 @@ module Adj_rib_in = struct
       List.fold_left f ([], db, dict) withdrawn
     in
 
-    match is_aspath_loop local_asn (find_as_path path_attrs) with
-    | true ->
-      (* AS PATH LOOP *)
-      let f (wd, db, dict) pfx = 
-        match Prefix_map.find_opt pfx db with
-        | None -> (wd, db, dict)
-        | Some (attr_id, _w) -> (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict)
-      in
-      let (wd, db, dict) = List.fold_left f ([], db, dict) nlri in
-      (db, dict, [wd, [], path_attrs, 0, 0])
-    | false -> begin
-      match filter_opt with
-      | None -> 
-        let attr_id = ID.create path_attrs in
-
-        (* Set weight *)
-        let weight = 
-          if ibgp then 
-            match Bgp.find_local_pref path_attrs with
-            | None -> 0
-            | Some v -> Int32.to_int v
-          else 0
+    if nlri = [] then (db_aft_wd, dict_aft_wd, [out_wd, [], [], 0, 0])
+    else
+      match is_aspath_loop local_asn (find_as_path path_attrs) with
+      | true ->
+        (* AS PATH LOOP *)
+        let f (wd, db, dict) pfx = 
+          match Prefix_map.find_opt pfx db with
+          | None -> (wd, db, dict)
+          | Some (attr_id, _w) -> (pfx::wd, Prefix_map.remove pfx db, Dict.remove attr_id dict)
         in
+        let (wd, db, dict) = List.fold_left f (out_wd, db_aft_wd, dict_aft_wd) nlri in
+        (db, dict, [wd, [], path_attrs, 0, 0])
+      | false -> begin
+        match filter_opt with
+        | None -> 
+          let attr_id = ID.create path_attrs in
 
-        let db_aft_ins, dict_aft_ins = 
-          let f (db, dict) pfx =
-            match Prefix_map.find_opt pfx db with
-            | None ->
-              (Prefix_map.add pfx (attr_id, weight) db, Dict.add attr_id path_attrs dict)
-            | Some (stored, _w) ->
-              let new_dict = Dict.add attr_id path_attrs dict |> Dict.remove stored in
-              (Prefix_map.add pfx (attr_id, weight) db, new_dict)
+          (* Set weight *)
+          let weight = 
+            if ibgp then 
+              match Bgp.find_local_pref path_attrs with
+              | None -> 0
+              | Some v -> Int32.to_int v
+            else 0
           in
-          List.fold_left f (db_aft_wd, dict_aft_wd) nlri
-        in
 
-        
-        let out = 
-          if out_wd = [] && nlri = [] then [] 
-          else [out_wd, nlri, path_attrs, attr_id, weight] 
-        in
-
-        (db_aft_ins, dict_aft_ins, out)
-      | Some filter ->
-        let wd, ins, db_aft_ins, dict_aft_ins = 
-          let f (wd, ins, db, dict) pfx =
-            match Filter.apply filter pfx path_attrs with
-            | None -> begin
-              match Prefix_map.find_opt pfx db with
-              | None -> (wd, ins, db, dict)
-              | Some (s_attr_id, _w) ->
-                (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove s_attr_id dict)
-            end
-            | Some (attrs, weight) ->
-              let attr_id = ID.create attrs in
+          let db_aft_ins, dict_aft_ins = 
+            let f (db, dict) pfx =
               match Prefix_map.find_opt pfx db with
               | None ->
-                let tmp = (pfx, (attrs, attr_id, weight)) in
-                (wd, tmp::ins, Prefix_map.add pfx (attr_id, weight) db, Dict.add attr_id path_attrs dict)
+                (Prefix_map.add pfx (attr_id, weight) db, Dict.add attr_id path_attrs dict)
               | Some (stored, _w) ->
-                let tmp = (pfx, (attrs, attr_id, weight)) in
                 let new_dict = Dict.add attr_id path_attrs dict |> Dict.remove stored in
-                (wd, tmp::ins, Prefix_map.add pfx (attr_id, weight) db, new_dict)
+                (Prefix_map.add pfx (attr_id, weight) db, new_dict)
+            in
+            List.fold_left f (db_aft_wd, dict_aft_wd) nlri
           in
-          List.fold_left f (out_wd, [], db_aft_wd, dict_aft_wd) nlri
-        in
 
-        let out_wd = if wd <> [] then [(wd, [], [], 0, 0)] else [] in
+          
+          let out = 
+            if out_wd = [] && nlri = [] then [] 
+            else [out_wd, nlri, path_attrs, attr_id, weight] 
+          in
 
-        (* Regroup *)
-        let f (_, id1, w1) (_, id2, w2) = 
-          let x = (id1, w1) in
-          let y = (id2, w2) in
-          if x > y then 1 
-          else if x = y then 0
-          else -1 
-        in
-        let groups = classify ins f in
+          (db_aft_ins, dict_aft_ins, out)
+        | Some filter ->
+          let wd, ins, db_aft_ins, dict_aft_ins = 
+            let f (wd, ins, db, dict) pfx =
+              match Filter.apply filter pfx path_attrs with
+              | None -> begin
+                match Prefix_map.find_opt pfx db with
+                | None -> (wd, ins, db, dict)
+                | Some (s_attr_id, _w) ->
+                  (pfx::wd, ins, Prefix_map.remove pfx db, Dict.remove s_attr_id dict)
+              end
+              | Some (attrs, weight) ->
+                let attr_id = ID.create attrs in
+                match Prefix_map.find_opt pfx db with
+                | None ->
+                  let tmp = (pfx, (attrs, attr_id, weight)) in
+                  (wd, tmp::ins, Prefix_map.add pfx (attr_id, weight) db, Dict.add attr_id path_attrs dict)
+                | Some (stored, _w) ->
+                  let tmp = (pfx, (attrs, attr_id, weight)) in
+                  let new_dict = Dict.add attr_id path_attrs dict |> Dict.remove stored in
+                  (wd, tmp::ins, Prefix_map.add pfx (attr_id, weight) db, new_dict)
+            in
+            List.fold_left f (out_wd, [], db_aft_wd, dict_aft_wd) nlri
+          in
 
-        let out_ins = List.map (fun (ins, (attrs, attr_id, weight)) -> ([], ins, attrs, attr_id, weight)) groups in
-        let out = out_wd @ out_ins in
-        (db_aft_ins, dict_aft_ins, out)
-    end
+          let out_wd = if wd <> [] then [(wd, [], [], 0, 0)] else [] in
+
+          (* Regroup *)
+          let f (_, id1, w1) (_, id2, w2) = 
+            let x = (id1, w1) in
+            let y = (id2, w2) in
+            if x > y then 1 
+            else if x = y then 0
+            else -1 
+          in
+          let groups = classify ins f in
+
+          let out_ins = List.map (fun (ins, (attrs, attr_id, weight)) -> ([], ins, attrs, attr_id, weight)) groups in
+          let out = out_wd @ out_ins in
+          (db_aft_ins, dict_aft_ins, out)
+      end
   ;;
 
   let rec handle_loop t = 
@@ -245,13 +247,24 @@ module Adj_rib_in = struct
             | None -> acc
             | Some (attr_id, w) ->
               let path_attrs = Dict.find attr_id t.dict in
-              ([], [pfx], path_attrs, attr_id, w)::acc
+              (pfx, (path_attrs, attr_id, w))::acc
           in
           let out = List.fold_left f [] pfx_list in
-          let () = t.callback out in
+
+          (* Regroup *)
+          let f (_, id1, w1) (_, id2, w2) = 
+            let x = (id1, w1) in
+            let y = (id2, w2) in
+            if x > y then 1 
+            else if x = y then 0
+            else -1 
+          in
+          let groups = classify out f in
+          let res = List.map (fun (ins, (attrs, attr_id, w)) -> ([], ins, attrs, attr_id, w)) groups in
+          
+          let () = t.callback res in
           handle_loop t
-        | Stop -> 
-          Lwt.return_unit
+        | Stop -> Lwt.return_unit
     in
     Lwt_stream.get t.stream >>= fun input ->
     in_rib_handle input
@@ -696,9 +709,7 @@ module Loc_rib = struct
 
   
   (* This function is pure *)
-  let update_loc_db (peer_id, wd, ins_and_resolved, path_attrs, attr_id, weight) local_asn (peers: peer Ip_map.t) db dict =
-    let peer = Ip_map.find peer_id peers in
-    
+  let update_loc_db (peer_id, wd, ins_and_resolved, path_attrs, attr_id, weight) local_asn (peers: peer Ip_map.t) db dict =    
     (* Withdrawn from Loc-RIB *)
     let wd, db, dict =
       let loc_wd_pfx (wd, db, dict) pfx = 
@@ -713,8 +724,11 @@ module Loc_rib = struct
       List.fold_left loc_wd_pfx ([], db, dict) wd
     in
 
+
     match List.find_opt (fun (_, x) -> x <> None) ins_and_resolved with
     | None ->
+      let peer = Ip_map.find peer_id peers in
+
       let f (wd, db, dict) (pfx, _) =
         match Prefix_map.find_opt pfx db with
         | None -> (wd, db, dict) 
@@ -741,7 +755,7 @@ module Loc_rib = struct
     | Some (_, v) -> match v with
       | None -> Logs.err (fun m -> m "Really?! Come on!"); assert false
       | Some (direct_gw, igp_metric) -> begin
-        
+        let peer = Ip_map.find peer_id peers in
 
         let u_attrs, u_attr_id = 
           if peer.iBGP then (path_attrs, attr_id)  
@@ -933,14 +947,7 @@ module Loc_rib = struct
             assert false
           end
           else begin
-            (* Update subscribed ribs *)
             let peer = Ip_map.find remote_id t.subs in
-            t.subs <- Ip_map.remove remote_id t.subs;
-
-            let () =
-              let open Adj_rib_out in
-              t.out_ribs <- Dict.remove peer.out_rib.id t.out_ribs
-            in
 
             (* Withdraw all previously advertised messages *)
             let wd = 
@@ -953,6 +960,14 @@ module Loc_rib = struct
             in
             t.db <- new_db;
             t.dict <- new_dict;
+
+            (* Update subscribed ribs *)
+            t.subs <- Ip_map.remove remote_id t.subs;
+            let () =
+              let open Adj_rib_out in
+              t.out_ribs <- Dict.remove peer.out_rib.id t.out_ribs
+            in
+
 
             let () = 
               if Key_gen.kernel () then begin
