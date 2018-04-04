@@ -13,7 +13,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
   module Router = Router.Make(S)
   open Router
 
-  let rec command_loop console peers =
+  let rec command_loop console peers loc_rib =
     C.read console >>= function
     | Error err -> 
       Ctl_log.warn (fun m -> m "Fail to read command: %a" C.pp_error err);
@@ -29,42 +29,28 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
           push_event peer (Fsm.Manual_start)
         in
         let _ = Id_map.map f peers in
-        command_loop console peers
+        command_loop console peers loc_rib
       | "stop" -> 
         let f peer =
           Ctl_log.info (fun m -> m "BGP peer %s stops." (Ipaddr.V4.to_string peer.remote_id));
           push_event peer (Fsm.Manual_stop)
         in
         let _ = Id_map.map f peers in
-        command_loop console peers
+        command_loop console peers loc_rib
       | "show peers" ->
-        let f peer =
-          let fsm = Printf.sprintf "FSM: %s" (Fsm.to_string peer.fsm) in
-          let running_dev =
-            let dev1 = if not (peer.conn_retry_timer = None) then "Conn retry timer" else "" in
-            let dev2 = if not (peer.hold_timer = None) then "Hold timer" else "" in 
-            let dev3 = if not (peer.keepalive_timer = None) then "Keepalive timer" else "" in 
-            let dev4 = if not (peer.conn_starter = None) then "Conn starter" else "" in 
-            let dev5 = if not (peer.flow_handler = None) then "Flow handler" else "" in 
-            let str_list = List.filter (fun x -> not (x = "")) [dev1; dev2; dev3; dev4; dev5] in
-            Printf.sprintf "Running Dev: %s" (String.concat "; " str_list)
-          in
-          let msgs = 
-            Printf.sprintf "Sent: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE; \n Rec: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE"
-                          peer.stat.sent_open peer.stat.sent_update peer.stat.sent_notif peer.stat.sent_keepalive
-                          peer.stat.rec_open peer.stat.rec_update peer.stat.rec_notif peer.stat.rec_keepalive
-          in
-          Ctl_log.info (fun m -> m "%s \n %s" (Ipaddr.V4.to_string peer.remote_id) (String.concat "\n" [fsm; running_dev; msgs]));
+        let f peer = 
+          Ctl_log.info (fun m -> m "%s" (Router.router_to_string peer))
         in
         let _ = Id_map.map f peers in
-        command_loop console peers
+        command_loop console peers loc_rib
       | "show routes" ->
         let () = 
-          match !Rib.Loc_rib.t_ref with
-          | None -> Ctl_log.info (fun m -> m "Empty")
-          | Some rib -> Ctl_log.info (fun m -> m "Routes:\n%s" (Rib.Loc_rib.to_string rib))
+          if Rib.Loc_rib.size loc_rib = 0 then 
+            Ctl_log.info (fun m -> m "Empty Loc Rib.")
+          else 
+            Ctl_log.info (fun m -> m "Routes:\n%s" (Rib.Loc_rib.to_string loc_rib))
         in
-        command_loop console peers
+        command_loop console peers loc_rib
       | "show gc" ->
         let word_to_KB ws = ws * 8 / 1024 in
 
@@ -78,12 +64,12 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                 gc_stat.minor_collections gc_stat.major_collections gc_stat.compactions in
         Ctl_log.info (fun m -> m "%s" (String.concat "\n" ["GC stat:"; allocation; size; collection]));
         
-        command_loop console peers
+        command_loop console peers loc_rib
       | "exit" ->
         Lwt.return_unit
       | str -> 
         Ctl_log.info (fun m -> m "Unrecognised command %s" str);
-        command_loop console peers
+        command_loop console peers loc_rib
   ;;
 
   (* let parse_config kv =
@@ -141,7 +127,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                     config.local_id config.local_asn 
                                     (config.local_asn = peer.remote_asn) 
                                     (Key_gen.pg_transit ()) 
-                                    None true
+                                    None false
           in
           out_ribs := (out_rib_id, out_rib)::(!out_ribs);
           Router.create s loc_rib out_rib config peer 
@@ -167,7 +153,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (if Key_gen.test () then 
       OS.Time.sleep_ns (Duration.of_sec (Key_gen.runtime ()))
     else 
-      command_loop console peers
+      command_loop console peers loc_rib
     )
     >>= fun () ->
 

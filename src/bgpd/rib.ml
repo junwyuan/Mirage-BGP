@@ -1008,7 +1008,6 @@ module Loc_rib = struct
           end
     in
 
-    t_ref := Some t;
     if not t.running then 
       Lwt.return_unit
     else

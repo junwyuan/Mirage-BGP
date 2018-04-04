@@ -53,6 +53,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     socket: S.t;
 
     inbound_filter: Filter.route_map option;
+    peer_group: int option;
 
     (* Temporary flow storage *)
     mutable in_flow: Bgp_flow.t option;
@@ -511,6 +512,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       
       iBGP = config.local_asn = peer_config.remote_asn;
       inbound_filter = peer_config.inbound_filter;
+      peer_group = peer_config.peer_group;
       
       fsm = Fsm.create peer_config.conn_retry_time (peer_config.hold_time) (peer_config.hold_time / 3);
 
@@ -533,5 +535,39 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     let _ = handle_event_loop t in
 
     t
+  ;;
+
+  let router_to_string t = 
+    let open Filter in
+    let info_s = 
+      Printf.sprintf "local_id: %s; remote_id %s; local_asn %ld; remote_asn %ld; iBGP: %b; peer_group: %s; inbound_filter: %s"
+            (Ipaddr.V4.to_string t.local_id)
+            (Ipaddr.V4.to_string t.remote_id)
+            t.local_asn t.remote_asn
+            t.iBGP
+            (match t.peer_group with None -> "None" | Some v -> Printf.sprintf "%d" v)
+            (match t.inbound_filter with None -> "None" | Some v -> Printf.sprintf "%s" v.map_name)
+    in
+    
+    let fsm_s = Printf.sprintf "FSM: %s" (Fsm.to_string t.fsm) in
+    let running_dev_s =
+      let dev1 = if not (t.conn_retry_timer = None) then "Conn retry timer" else "" in
+      let dev2 = if not (t.hold_timer = None) then "Hold timer" else "" in 
+      let dev3 = if not (t.keepalive_timer = None) then "Keepalive timer" else "" in 
+      let dev4 = if not (t.conn_starter = None) then "Conn starter" else "" in 
+      let dev5 = if not (t.flow_handler = None) then "Flow handler" else "" in
+      let dev6 = if not (t.in_rib = None) then "In RIB" else "" in 
+      let str_list = List.filter (fun x -> not (x = "")) [dev1; dev2; dev3; dev4; dev5; dev6] in
+      Printf.sprintf "Running Dev: %s" (String.concat "; " str_list)
+    in
+
+    let stat_s = 
+      Printf.sprintf "Sent: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE; \n Rec: %d OPEN; %d UPDATE; %d NOTIF; %d KEEPALIVE"
+                    t.stat.sent_open t.stat.sent_update t.stat.sent_notif t.stat.sent_keepalive
+                    t.stat.rec_open t.stat.rec_update t.stat.rec_notif t.stat.rec_keepalive
+    in
+
+    let title = Ipaddr.V4.to_string t.remote_id in
+    String.concat "\n" [title; info_s; fsm_s; running_dev_s; stat_s]
   ;;
 end
