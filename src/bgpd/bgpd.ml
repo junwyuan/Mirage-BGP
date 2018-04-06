@@ -88,7 +88,31 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         Lwt.return @@ Config_parser.parse_from_string str
   ;; *)
 
+  
+  let gc_major_count = ref 0
+
   let start console s =
+    (* let () = if Key_gen.gc () then 
+      let open Gc in
+
+      let r = Gc.get () in
+      r.minor_heap_size 
+
+      let _ = Gc.create_alarm 
+            (fun () -> 
+              let tmp = Gc.quick_stat () in
+              
+              let minor = tmp.minor_collections in
+              let major = tmp.major_collections in
+              let compactions = tmp.compactions in
+
+              Logs.info (fun m -> m "Major GC %d, Minor GC %d, Compaction %d" major minor compactions)
+            ) 
+      in
+      ()
+    else ()
+    in *)
+
     let open Config_parser in
 
     (* Record backtrace *)
@@ -115,7 +139,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                       config.local_id config.local_asn 
                                       (config.local_asn = peer.remote_asn) 
                                       (Key_gen.pg_transit ()) 
-                                      None false
+                                      None true
         in
         out_ribs := (out_rib_id, out_rib)::(!out_ribs);
         c := (!c) + 1;
@@ -127,7 +151,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                     config.local_id config.local_asn 
                                     (config.local_asn = peer.remote_asn) 
                                     (Key_gen.pg_transit ()) 
-                                    None false
+                                    None true
           in
           out_ribs := (out_rib_id, out_rib)::(!out_ribs);
           Router.create s loc_rib out_rib config peer 

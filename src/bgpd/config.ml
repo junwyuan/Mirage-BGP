@@ -31,6 +31,11 @@ let peer_group_transit =
   Key.(create "pg_transit" Arg.(flag doc))
 ;;
 
+let gc = 
+  let doc = Key.Arg.info ~doc:"whether to give gc alarm." ["gc"] in
+  Key.(create "gc" Arg.(flag doc))
+;;
+
 let main = foreign 
   ~keys:[ 
     Key.abstract config;
@@ -39,6 +44,7 @@ let main = foreign
     Key.abstract kernel;
     Key.abstract remove;
     Key.abstract peer_group_transit;
+    Key.abstract gc;
   ] 
   "Bgpd.Main" 
   (console @-> stackv4 @-> job)

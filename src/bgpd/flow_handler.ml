@@ -89,8 +89,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
           t.callback event;
 
           (* Load balancing *)
-          OS.Time.sleep_ns (Duration.of_ms 1)
-          >>= fun () ->
+          Lwt_unix.yield () >>= fun () ->
 
           flow_reader t
         | Error err ->
