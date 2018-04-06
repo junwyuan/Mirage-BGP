@@ -3,7 +3,7 @@ open Mirage
 
 let config = 
   let doc = Key.Arg.info ~doc:"This is the path to config within data directory." ["config"] in
-  Key.(create "config" Arg.(opt string "config/bgpd.json" doc))
+  Key.(create "config" Arg.(opt string "bgpd.json" doc))
 ;;
 
 let test = 
@@ -31,6 +31,13 @@ let peer_group_transit =
   Key.(create "pg_transit" Arg.(flag doc))
 ;;
 
+let not_resolve =
+  let doc = Key.Arg.info ~doc:"Flag indicating whether to resolve routes." ["not_resolve"] in
+  Key.(create "not_resolve" Arg.(flag doc))
+;;
+
+let disk = generic_kv_ro "config"
+
 let main = foreign 
   ~keys:[ 
     Key.abstract config;
@@ -39,16 +46,17 @@ let main = foreign
     Key.abstract kernel;
     Key.abstract remove;
     Key.abstract peer_group_transit;
+    Key.abstract not_resolve;
   ] 
   "Bgpd.Main" 
-  (console @-> stackv4 @-> job)
+  (console @-> kv_ro @-> stackv4 @-> job)
 
-(* let disk = generic_kv_ro "data" *)
+
 
 let stack = generic_stackv4 default_network
 
 let () =
   register "bgpd" [
-    main $ default_console $ stack
+    main $ default_console $ disk $ stack
   ]
 ;;

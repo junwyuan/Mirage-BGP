@@ -9,7 +9,7 @@ module Ctl_log = (val Logs.src_log ctl_src : Logs.LOG)
 module Id_map = Map.Make(Ipaddr.V4)
 module Str_map = Map.Make(String)
 
-module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
+module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) (KV: Mirage_kv_lwt.RO)= struct
   module Router = Router.Make(S)
   open Router
 
@@ -72,31 +72,31 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         command_loop console peers loc_rib
   ;;
 
-  (* let parse_config kv =
+  let parse_config disk =
     let key = Key_gen.config () in
-    KV.size kv key >>= function
+    KV.size disk key >>= function
     | Error e -> 
       Ctl_log.err (fun f -> f "Could not read config file: %a" KV.pp_error e);
       Lwt.return Config_parser.default_config
     | Ok size -> 
-      KV.read kv key 0L size >>= function
+      KV.read disk key 0L size >>= function
       | Error e ->
         Ctl_log.err (fun f -> f "Could not read config file: %a" KV.pp_error e);
         Lwt.return Config_parser.default_config
       | Ok data ->
         let str = String.concat "" @@ List.map (fun b -> Cstruct.to_string b) data in     
         Lwt.return @@ Config_parser.parse_from_string str
-  ;; *)
+  ;;
 
-  let start console s =
+  let start console socket kv =
     let open Config_parser in
 
     (* Record backtrace *)
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
-    (* parse_config kv >>= fun config -> *)
-    let config = parse_from_file (Key_gen.config ()) in
+    parse_config kv >>= fun config ->
+    (* let config = parse_from_file (Key_gen.config ()) in *)
 
     let route_mgr = Route_mgr.create () in
 
@@ -119,7 +119,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
         in
         out_ribs := (out_rib_id, out_rib)::(!out_ribs);
         c := (!c) + 1;
-        Router.create s loc_rib out_rib config peer 
+        Router.create socket loc_rib out_rib config peer 
       | Some out_rib_id ->
         match List.assoc_opt out_rib_id (!out_ribs) with
         | None -> 
@@ -130,9 +130,9 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
                                     None false
           in
           out_ribs := (out_rib_id, out_rib)::(!out_ribs);
-          Router.create s loc_rib out_rib config peer 
+          Router.create socket loc_rib out_rib config peer 
         | Some out_rib ->
-          Router.create s loc_rib out_rib config peer 
+          Router.create socket loc_rib out_rib config peer 
     in
 
     let t_list = List.map init_t config.peers in
@@ -140,7 +140,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
 
     (* Start listening to BGP port. *)
     let local_port = config.local_port in
-    Router.listen_tcp_connection s local_port peers;
+    Router.listen_tcp_connection socket local_port peers;
     
     (* Automatic passive start *)
     let f _id (peer: Router.t) =
@@ -160,6 +160,6 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (* Clean up *)
     let f _id (peer: Router.t) = Router.stop peer in
     let () = Id_map.iter f peers in
-    S.disconnect s
+    S.disconnect socket
   ;;
 end
