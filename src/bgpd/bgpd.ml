@@ -9,7 +9,7 @@ module Ctl_log = (val Logs.src_log ctl_src : Logs.LOG)
 module Id_map = Map.Make(Ipaddr.V4)
 module Str_map = Map.Make(String)
 
-module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) (KV: Mirage_kv_lwt.RO)= struct
+module  Main (C: Mirage_console_lwt.S) (KV: Mirage_kv_lwt.RO) (S: Mirage_stack_lwt.V4) = struct
   module Router = Router.Make(S)
   open Router
 
@@ -88,14 +88,14 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) (KV: Mirage_kv_l
         Lwt.return @@ Config_parser.parse_from_string str
   ;;
 
-  let start console socket kv =
+  let start console disk socket  =
     let open Config_parser in
 
     (* Record backtrace *)
     Printexc.record_backtrace true;
 
     (* Parse config from file *)
-    parse_config kv >>= fun config ->
+    parse_config disk >>= fun config ->
     (* let config = parse_from_file (Key_gen.config ()) in *)
 
     let route_mgr = Route_mgr.create () in
