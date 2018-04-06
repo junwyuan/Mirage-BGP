@@ -33,7 +33,7 @@ let peer_group_transit =
 
 let not_resolve =
   let doc = Key.Arg.info ~doc:"Flag indicating whether to resolve routes." ["not_resolve"] in
-  Key.(create "not_resolve" Arg.(flag doc))
+  Key.(create "not_resolve" Arg.(opt bool true doc))
 ;;
 
 let disk = generic_kv_ro "config"
