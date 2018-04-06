@@ -59,7 +59,7 @@ module Unix = struct
   exception Err of error
 
   let get_routes () : (route list, error) result =  
-    let cmd = Bos.Cmd.((v "route")) in
+    (* let cmd = Bos.Cmd.((v "route")) in
     let output = Bos.OS.Cmd.(run_out cmd |> out_lines) in
     match output with 
     | Result.Ok (output, (info, status)) -> begin
@@ -126,7 +126,9 @@ module Unix = struct
         else Result.Error (Exited code)
       | `Signaled code -> Result.Error (Signaled code)
     end
-    | Result.Error _ -> Result.Error Unknown
+    | Result.Error _ -> Result.Error Unknown *)
+
+    Result.Ok []
   ;;    
 
   let add_routes routes =
@@ -139,9 +141,10 @@ module Unix = struct
       str
     in
     let str = String.concat "&&" (List.map f routes) in
-    match Sys.command str with
+    (* match Sys.command str with
     | 0 -> Result.Ok ()
-    | v -> Result.Error v
+    | v -> Result.Error v *)
+    Result.Ok ()
   ;;
 
   let del_routes nets =
@@ -152,9 +155,10 @@ module Unix = struct
       str
     in
     let str = String.concat "&&" (List.map f nets) in
-    match Sys.command str with
+    Result.Ok ()
+    (* match Sys.command str with
     | 0 -> Result.Ok ()
-    | v -> Result.Error v
+    | v -> Result.Error v *)
   ;;
 end
 
