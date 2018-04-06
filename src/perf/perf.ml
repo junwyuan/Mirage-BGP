@@ -518,7 +518,7 @@ module Main (S: Mirage_stack_lwt.V4) = struct
 
         let mean, std = Math.mean times, Math.std times in
         let throughput = (float_of_int pfx_per_round) /. mean in
-        let err = throughput *. (std /. (mean *. (float_of_int (List.length times)))) in
+        let err = throughput *. (std /. (mean *. sqrt ((float_of_int (List.length times))))) in
 
         Mon_log.info (fun m -> m "%d, %f, %f, %f, %f" (round_count * round_gap) mean std throughput err);
         
