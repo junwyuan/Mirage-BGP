@@ -31,9 +31,14 @@ type t = {
 let rec handle_loop t =
   let route_mgr_handle = function
     | Resolve (quests, nh, cb) ->
-      let res = List.map (fun pfx -> pfx, resolve_opt t.table pfx nh) quests in
-      let () = cb res in
-      handle_loop t
+      if Key_gen.not_resolve () then
+        let res = List.map (fun pfx -> pfx, Some (Ipaddr.V4.localhost, 0)) quests in
+        let () = cb res in
+        handle_loop t
+      else
+        let res = List.map (fun pfx -> pfx, resolve_opt t.table pfx nh) quests in
+        let () = cb res in
+        handle_loop t
     | Krt_change change ->
       (* Remove *)
       let filtered = List.filter (fun p -> Prefix_set.mem p t.cache) change.remove in
