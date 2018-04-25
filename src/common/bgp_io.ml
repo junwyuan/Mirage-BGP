@@ -22,6 +22,7 @@ module type S = sig
   val listen : s -> int -> (t -> unit Lwt.t) -> unit
   val read : t -> (Bgp.t, read_error) Result.result Lwt.t
   val write : t -> Bgp.t -> (unit, write_error) Result.result Lwt.t
+  val write_raw : t -> Cstruct.t -> (unit, write_error) Result.result Lwt.t
   val close : t -> unit Lwt.t
   val dst : t -> Ipaddr.V4.t * int
   val tcp_flow : t -> flow
@@ -118,6 +119,8 @@ module Make (S: Mirage_stack_lwt.V4) : S with type s = S.t
   ;;
 
   let write t msg = S.TCPV4.write t.flow (Bgp.gen_msg msg)
+
+  let write_raw t bytes = S.TCPV4.write t.flow bytes
 
   let close t = S.TCPV4.close t.flow
 

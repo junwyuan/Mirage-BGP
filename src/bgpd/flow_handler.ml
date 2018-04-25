@@ -4,15 +4,20 @@ open Lwt.Infix
 module Make (S: Mirage_stack_lwt.V4) = struct
   module Bgp_flow = Bgp_io.Make(S)
     
+  type input = 
+    | Bgp_message of Bgp.t
+    | Raw_bytes of Bgp.t * Cstruct.t
+
   type t = {
     mutable running: bool;
+    mutable quota: int;
     remote_id: Ipaddr.V4.t;
     remote_asn: int32;
     iBGP: bool;
     callback: Fsm.event -> unit;
     flow: Bgp_flow.t;
-    stream: Bgp.t Lwt_stream.t;
-    pf: Bgp.t option -> unit;
+    stream: input Lwt_stream.t;
+    pf: input option -> unit;
     log: (module Logs.LOG);
   }
 
@@ -20,10 +25,15 @@ module Make (S: Mirage_stack_lwt.V4) = struct
     let flow_writer_handle = function
       | None -> 
         Bgp_flow.close t.flow
-      | Some msg -> 
+      | Some input ->
+        let msg, bytes = 
+          match input with
+          | Bgp_message msg -> (msg, Bgp.gen_msg msg)
+          | Raw_bytes (msg, bytes) -> (msg, bytes)
+        in
+        
         let module Log = (val t.log : Logs.LOG) in
-
-        Bgp_flow.write t.flow msg
+        Bgp_flow.write_raw t.flow bytes
         >>= function
         | Error err ->
           let () = match err with
@@ -35,7 +45,6 @@ module Make (S: Mirage_stack_lwt.V4) = struct
                                         (Bgp.to_string msg)) 
             | _ -> ()
           in
-
           if t.running then t.callback Fsm.Tcp_connection_fail;
           Lwt.return_unit
         | Ok () -> 
@@ -89,9 +98,12 @@ module Make (S: Mirage_stack_lwt.V4) = struct
           t.callback event;
 
           (* Load balancing *)
-          Lwt_unix.yield () >>= fun () ->
-
-          flow_reader t
+          if t.quota = 0 then 
+            Lwt_unix.yield () >>= fun () ->
+            flow_reader t  
+          else 
+            let () = t.quota <- t.quota - 1 in
+            flow_reader t
         | Error err ->
           let () = match err with
             | `Closed -> 
@@ -138,7 +150,8 @@ module Make (S: Mirage_stack_lwt.V4) = struct
   let create remote_id remote_asn iBGP callback flow log =
     let stream, pf = Lwt_stream.create () in
     let t = { 
-      running = true; stream; pf; iBGP;
+      running = true; quota = Key_gen.quota ();
+      stream; pf; iBGP;
       remote_id; remote_asn; callback; 
       flow; log 
     } in
@@ -152,5 +165,6 @@ module Make (S: Mirage_stack_lwt.V4) = struct
     t.pf None
   ;;
 
-  let write t msg = t.pf (Some msg)
+  let write t msg = t.pf (Some (Bgp_message msg))
+  let write_raw t msg bytes = t.pf (Some (Raw_bytes (msg, bytes)))
 end

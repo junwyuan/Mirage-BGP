@@ -83,20 +83,37 @@ let rec handle_loop t =
 ;;
 
 let create () =
-  match Route_injector.Unix.get_routes () with
-  | Result.Ok routes ->
-    let f tbl route = 
-      Route_table.add_static tbl route
-    in
-    let table = List.fold_left f Route_table.empty routes in
+  match Key_gen.kernel () with
+  | true -> begin
+    match Route_injector.Unix.get_routes () with
+    | Result.Ok routes ->
+      let f tbl route = 
+        Route_table.add_static tbl route
+      in
+      let table = List.fold_left f Route_table.empty routes in
+      let stream, pf = Lwt_stream.create () in
+      let cache = Prefix_set.empty in
+      let t = { table; stream; pf; cache; } in
+      let _ = handle_loop t in
+      t
+    | Result.Error _ ->
+      Logs.err (fun m -> m "Fail to start route_mgr");
+      assert false
+  end
+  | false ->
+    let table = Route_table.empty in
+    let route = {
+      net = Ipaddr.V4.Prefix.of_string_exn "0.0.0.0/0";
+      gw = Some Ipaddr.V4.unspecified;
+      iface = Some "eth0";
+      metric = 0;
+    } in
+    let table = add_static table route in
     let stream, pf = Lwt_stream.create () in
     let cache = Prefix_set.empty in
     let t = { table; stream; pf; cache; } in
     let _ = handle_loop t in
     t
-  | Result.Error _ ->
-    Logs.err (fun m -> m "Fail to start route_mgr");
-    assert false
 ;;
 
 let stop t = t.pf (Some Stop)

@@ -17,8 +17,13 @@ let runtime =
 ;;
 
 let kernel = 
-  let doc = Key.Arg.info ~doc:"Flag indicating whether install the learned routes into kernel's routing table" ["kernel"] in
+  let doc = Key.Arg.info ~doc:"Flag indicating whether interact with OS" ["kernel"] in
   Key.(create "kernel" Arg.(flag doc))
+;;
+
+let quota = 
+  let doc = Key.Arg.info ~doc:"Quota for controlling how long one peer's input can occupy the CPU" ["quota"] in
+  Key.(create "quota" Arg.(opt int 10 doc))
 ;;
 
 let remove = 
@@ -45,6 +50,7 @@ let main = foreign
     Key.abstract remove;
     Key.abstract peer_group_transit;
     Key.abstract gc;
+    Key.abstract quota;
   ] 
   "Bgpd.Main" 
   (console @-> stackv4 @-> job)

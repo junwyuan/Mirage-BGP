@@ -127,40 +127,30 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     (* Init loc-rib *)
     let loc_rib = Rib.Loc_rib.create config.local_id config.local_asn route_mgr in
 
-    let c = ref 1000 in
-    let out_ribs = ref [] in
-
-    (* Init shared data *)
-    let init_t peer = 
+    (* Init out rib *)
+    let rec init_out_rib acc peer = 
       match peer.peer_group with
-      | None -> 
-        let out_rib_id = !c in
-        let out_rib = Rib.Adj_rib_out.create out_rib_id 
-                                      config.local_id config.local_asn 
-                                      (config.local_asn = peer.remote_asn) 
-                                      (Key_gen.pg_transit ()) 
-                                      None true
-        in
-        out_ribs := (out_rib_id, out_rib)::(!out_ribs);
-        c := (!c) + 1;
-        Router.create s loc_rib out_rib config peer 
+      | None -> acc
       | Some out_rib_id ->
-        match List.assoc_opt out_rib_id (!out_ribs) with
+        match List.assoc_opt out_rib_id acc with
         | None -> 
-          let out_rib = Rib.Adj_rib_out.create out_rib_id 
+          let out_rib = Rib.Adj_rib_out.create 
+                                    out_rib_id 
                                     config.local_id config.local_asn 
                                     (config.local_asn = peer.remote_asn) 
-                                    (Key_gen.pg_transit ()) 
-                                    None true
+                                    true None true
           in
-          out_ribs := (out_rib_id, out_rib)::(!out_ribs);
-          Router.create s loc_rib out_rib config peer 
-        | Some out_rib ->
-          Router.create s loc_rib out_rib config peer 
+          (out_rib_id, out_rib)::acc
+        | Some _ -> acc
     in
+    let out_rib_registry = List.fold_left init_out_rib [] config.peers in
 
-    let t_list = List.map init_t config.peers in
-    let peers = List.fold_left (fun acc (peer: Router.t) -> Id_map.add peer.remote_id peer acc) (Id_map.empty) t_list in
+    (* Init Routers *)
+    let init_router acc peer =
+      let router = Router.create s loc_rib out_rib_registry config peer in
+      Id_map.add router.remote_id router acc
+    in
+    let peers = List.fold_left init_router (Id_map.empty) config.peers in
 
     (* Start listening to BGP port. *)
     let local_port = config.local_port in
@@ -173,7 +163,7 @@ module  Main (C: Mirage_console_lwt.S) (S: Mirage_stack_lwt.V4) = struct
     in
     let () = Id_map.iter f peers in
 
-
+    (* For test *)
     (if Key_gen.test () then 
       OS.Time.sleep_ns (Duration.of_sec (Key_gen.runtime ()))
     else 
