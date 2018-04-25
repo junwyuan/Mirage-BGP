@@ -8,6 +8,12 @@ let option_get = function
   | Some v -> v
 ;;
 
+(* list map, tail recursive, reverse order output *)
+let rev_list_map f l =
+  let g acc x = (f x)::acc in
+  List.fold_left g [] l
+;;
+
 let classify list compare = 
   if list = [] then []
   else
@@ -240,7 +246,7 @@ module Adj_rib_in = struct
           in
           let groups = classify ins f in
 
-          let out_ins = List.map (fun (ins, (attrs, attr_id, weight)) -> ([], ins, attrs, attr_id, weight)) groups in
+          let out_ins = rev_list_map (fun (ins, (attrs, attr_id, weight)) -> ([], ins, attrs, attr_id, weight)) groups in
           let out = out_wd @ out_ins in
           (db_aft_ins, dict_aft_ins, out)
       end
@@ -277,7 +283,7 @@ module Adj_rib_in = struct
             else -1 
           in
           let groups = classify out f in
-          let res = List.map (fun (ins, (attrs, attr_id, w)) -> ([], ins, attrs, attr_id, w)) groups in
+          let res = rev_list_map (fun (ins, (attrs, attr_id, w)) -> ([], ins, attrs, attr_id, w)) groups in
           
           let () = t.callback res in
           handle_loop t
@@ -459,7 +465,7 @@ module Adj_rib_out = struct
       let gen_ins_update ins = { withdrawn = []; path_attrs = attrs; nlri = ins } in
       
       let updates, rest_wd = 
-        let partial = List.map gen_ins_update pfxs_list in
+        let partial = rev_list_map gen_ins_update pfxs_list in
         if rest <> [] then
           let wd_num = (max_update_len - min_update_len - attrs_len - pfx_len * (List.length rest)) / pfx_len in
           let wd, rest_wd = take wd wd_num in
@@ -477,7 +483,7 @@ module Adj_rib_out = struct
       if wd <> [] then
         let aux, rest = split wd ((max_update_len - min_update_len) / pfx_len) in 
         let gen_wd_update pfxs = { withdrawn = pfxs; path_attrs = []; nlri = [] } in
-        List.map gen_wd_update (rest::aux)
+        rev_list_map gen_wd_update (rest::aux)
       else []
     in
 
@@ -812,7 +818,7 @@ module Loc_rib = struct
           let krt_change = 
             let remove = wd in
             let insert = 
-              List.map (fun p -> (p, rte.direct_gw)) ins
+              rev_list_map (fun p -> (p, rte.direct_gw)) ins
             in
             { insert; remove }
           in
@@ -835,7 +841,7 @@ module Loc_rib = struct
           (* Remove installed routes from kernel's routing table *)
           if Key_gen.kernel () && Key_gen.remove () then
             let f (pfx, _) = pfx in
-            let l_rm = List.map f (Prefix_map.bindings t.db) in
+            let l_rm = rev_list_map f (Prefix_map.bindings t.db) in
             let open Route_mgr in
             let krt_change = { insert = []; remove = l_rm } in
             let () = Route_mgr.input t.route_mgr (Route_mgr.Krt_change krt_change) in
@@ -872,11 +878,11 @@ module Loc_rib = struct
             | Some (_, Some (direct_gw, igp_metric)) ->
               let ins = 
                 let tmp = List.filter (fun (_, x) -> x <> None) ins_and_resolved in
-                List.map (fun (pfx, _) -> pfx) tmp
+                rev_list_map (fun (pfx, _) -> pfx) tmp
               in
               let unreachable = 
                 let tmp = List.filter (fun (_, x) -> x = None) ins_and_resolved in
-                List.map (fun (pfx, _) -> pfx) tmp
+                rev_list_map (fun (pfx, _) -> pfx) tmp
               in
               process_update t remote_id (unreachable @ wd) ins attrs attr_id weight direct_gw igp_metric;
               handle_loop t
@@ -917,8 +923,10 @@ module Loc_rib = struct
             (* Withdraw all previously advertised messages && send out updates *)
             let wd = 
               let open Adj_rib_in in
-              List.map (fun (pfx, _) -> pfx) (Prefix_map.bindings peer.in_rib.db) 
+              let tmp = Prefix_map.bindings peer.in_rib.db in
+              rev_list_map (fun (pfx, _) -> pfx) tmp
             in
+
             process_update t remote_id wd [] [] 0 0 Ipaddr.V4.localhost 0;
 
             (* Update subscribed ribs *)

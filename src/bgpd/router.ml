@@ -51,8 +51,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     local_port: int;
     local_asn: int32;
     socket: S.t;
+    out_rib_registry: (int * Rib.Adj_rib_out.t) list;
 
     inbound_filter: Filter.route_map option;
+    outbound_filter: Filter.route_map option;
     peer_group: int option;
 
     (* Temporary flow storage *)
@@ -68,8 +70,10 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     mutable conn_starter: Device.t option;
 
     mutable in_rib: Rib.Adj_rib_in.t option;
-    out_rib: Rib.Adj_rib_out.t;
+    mutable out_rib: Rib.Adj_rib_out.t option;
+    
     loc_rib: Rib.Loc_rib.t;
+    
     
     stat: stat;
 
@@ -260,6 +264,20 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
     | Some handler -> Flow_handler.write handler msg
   ;;
 
+  let send_raw_msg t msg bytes = 
+    let module Bgp_log = (val t.log : Logs.LOG) in  
+    let () = match msg with
+      | Open _ -> t.stat.sent_open <- t.stat.sent_open + 1
+      | Update _ -> t.stat.sent_update <- t.stat.sent_update + 1
+      | Keepalive -> t.stat.sent_keepalive <- t.stat.sent_keepalive + 1
+      | Notification _ -> t.stat.sent_notif <- t.stat.sent_notif + 1
+    in 
+
+    match t.flow_handler with
+    | None -> Bgp_log.debug (fun m -> m "Flow handler is missing.")
+    | Some handler -> Flow_handler.write_raw handler msg bytes
+  ;;
+
   let send_open_msg (t: t) =
     let open Fsm in
     let o = {
@@ -385,13 +403,18 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       in
       t.in_rib <- Some in_rib;
 
-      (* Sub out_rib *)
-      let callback u = 
-        send_msg t (Bgp.Update u)
+      let out_rib = 
+        match t.peer_group with
+        | Some id -> List.assoc id t.out_rib_registry 
+        | None -> Rib.Adj_rib_out.create (Int32.to_int (Ipaddr.V4.to_int32 t.remote_id)) 
+                                          t.local_id t.local_asn
+                                          t.iBGP false None false
       in
-      Rib.Adj_rib_out.sub t.out_rib t.remote_id callback;
-      
-      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, t.out_rib)
+      t.out_rib <- Some out_rib;  
+
+      (* Sub Loc-RIB *)
+      let callback msg bytes = send_raw_msg t msg bytes in
+      Rib.Loc_rib.sub t.loc_rib (t.remote_id, t.remote_asn, in_rib, out_rib, callback)
     | Release_rib ->
       let () =
         match t.in_rib with
@@ -400,7 +423,19 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
           t.in_rib <- None;
           Rib.Adj_rib_in.stop rib
       in
-      Rib.Adj_rib_out.unsub t.out_rib t.remote_id;
+
+      let () = 
+        match t.out_rib with
+        | None -> ()
+        | Some out_rib ->
+          if t.peer_group <> None then
+            let () = Rib.Adj_rib_out.unsub out_rib t.remote_id in
+            t.out_rib <- None
+          else
+            let () = Rib.Adj_rib_out.stop out_rib in
+            t.out_rib <- None
+      in
+      
       Rib.Loc_rib.unsub t.loc_rib t.remote_id t.cond_var
   ;;    
   
@@ -475,7 +510,7 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       router_handle res
   ;;
 
-  let create socket loc_rib out_rib config peer_config =
+  let create socket loc_rib out_rib_registry config peer_config =
     let open Config_parser in
     
     (* Init shared data *)
@@ -509,9 +544,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       local_id = config.local_id;
       local_port = config.local_port;
       local_asn = config.local_asn;
-      
       iBGP = config.local_asn = peer_config.remote_asn;
       inbound_filter = peer_config.inbound_filter;
+      outbound_filter = None;
       peer_group = peer_config.peer_group;
       
       fsm = Fsm.create peer_config.conn_retry_time (peer_config.hold_time) (peer_config.hold_time / 3);
@@ -521,8 +556,9 @@ module  Make (S: Mirage_stack_lwt.V4) = struct
       keepalive_timer = None;
 
       in_rib = None;
-      out_rib;
+      out_rib = None;
       loc_rib;
+      out_rib_registry;
 
       stat;
       log = Logs.src_log bgpd_src;
