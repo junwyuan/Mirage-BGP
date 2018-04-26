@@ -31,14 +31,9 @@ type t = {
 let rec handle_loop t =
   let route_mgr_handle = function
     | Resolve (quests, nh, cb) ->
-      if Key_gen.not_resolve () then
-        let res = List.map (fun pfx -> pfx, Some (Ipaddr.V4.localhost, 0)) quests in
-        let () = cb res in
-        handle_loop t
-      else
-        let res = List.map (fun pfx -> pfx, resolve_opt t.table pfx nh) quests in
-        let () = cb res in
-        handle_loop t
+      let res = List.map (fun pfx -> pfx, resolve_opt t.table pfx nh) quests in
+      let () = cb res in
+      handle_loop t
     | Krt_change change ->
       (* Remove *)
       let filtered = List.filter (fun p -> Prefix_set.mem p t.cache) change.remove in
@@ -88,8 +83,8 @@ let rec handle_loop t =
 ;;
 
 let create () =
-  match Key_gen.not_resolve () with
-  | false -> begin
+  match Key_gen.kernel () with
+  | true -> begin
     match Route_injector.Unix.get_routes () with
     | Result.Ok routes ->
       let f tbl route = 
@@ -105,7 +100,7 @@ let create () =
       Logs.err (fun m -> m "Fail to start route_mgr");
       assert false
   end
-  | true ->
+  | false ->
     let table = Route_table.empty in
     let route = {
       net = Ipaddr.V4.Prefix.of_string_exn "0.0.0.0/0";

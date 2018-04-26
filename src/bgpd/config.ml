@@ -3,7 +3,7 @@ open Mirage
 
 let config = 
   let doc = Key.Arg.info ~doc:"This is the path to config within data directory." ["config"] in
-  Key.(create "config" Arg.(opt string "bgpd.json" doc))
+  Key.(create "config" Arg.(opt string "config/bgpd.json" doc))
 ;;
 
 let test = 
@@ -17,8 +17,13 @@ let runtime =
 ;;
 
 let kernel = 
-  let doc = Key.Arg.info ~doc:"Flag indicating whether install the learned routes into kernel's routing table" ["kernel"] in
+  let doc = Key.Arg.info ~doc:"Flag indicating whether interact with OS" ["kernel"] in
   Key.(create "kernel" Arg.(flag doc))
+;;
+
+let quota = 
+  let doc = Key.Arg.info ~doc:"Quota for controlling how long one peer's input can occupy the CPU" ["quota"] in
+  Key.(create "quota" Arg.(opt int 10 doc))
 ;;
 
 let remove = 
@@ -31,12 +36,12 @@ let peer_group_transit =
   Key.(create "pg_transit" Arg.(flag doc))
 ;;
 
-let not_resolve =
-  let doc = Key.Arg.info ~doc:"Flag indicating whether to resolve routes." ["not_resolve"] in
-  Key.(create "not_resolve" Arg.(opt bool true doc))
-;;
-
 let disk = generic_kv_ro "config"
+
+let gc = 
+  let doc = Key.Arg.info ~doc:"whether to give gc alarm." ["gc"] in
+  Key.(create "gc" Arg.(flag doc))
+;;
 
 let main = foreign 
   ~keys:[ 
@@ -46,7 +51,8 @@ let main = foreign
     Key.abstract kernel;
     Key.abstract remove;
     Key.abstract peer_group_transit;
-    Key.abstract not_resolve;
+    Key.abstract gc;
+    Key.abstract quota;
   ] 
   "Bgpd.Main" 
   (console @-> kv_ro @-> stackv4 @-> job)
