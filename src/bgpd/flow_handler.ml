@@ -99,7 +99,7 @@ module Make (S: Mirage_stack_lwt.V4) = struct
 
           (* Load balancing *)
           if t.quota = 0 then 
-            Lwt_unix.yield () >>= fun () ->
+            Lwt.return_unit >>= fun () ->
             flow_reader t  
           else 
             let () = t.quota <- t.quota - 1 in

@@ -10,5 +10,4 @@ true: debug
 "trie": include
 "test": include
 
-true: package(lwt.unix)
 true: package(yojson), package(bos)
